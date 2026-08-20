@@ -11,6 +11,16 @@ If you have more than one Claude Max / ChatGPT subscription (personal + work, tw
 
 Works on **macOS and Linux**. Plain bash + python3, no Keychain, no daemon, no dependencies.
 
+## Requirements
+
+- bash and python3 (both preinstalled on macOS and Ubuntu)
+- whichever CLIs you want to manage — either or both:
+  - Claude Code: `npm install -g @anthropic-ai/claude-code` (a recent version; `claude auth login` is used for clean logins, older versions fall back to the interactive REPL)
+  - Codex: `npm install -g @openai/codex`
+- You do **not** need to be logged into the primary CLI first. Existing logins are left alone; missing CLIs are detected with install hints rather than half-created slots.
+
+If `claude` only works in your shell through an alias (the old migrate-installer), run `claude install` once so a real binary is on PATH — scripts and shims can't see aliases.
+
 ## Install
 
 ```sh
@@ -94,9 +104,30 @@ agent-auth route enable|disable|status   manage router shims
 agent-auth shims                 numbered per-slot shims (claude-1, ...)
 agent-auth env <prov> <email>    eval-able export for one slot
 agent-auth run <prov> <email> [cmd...]   run anything under a slot
-agent-auth sync                  copy MCP servers + project trust from primary claude into slots
+agent-auth remove <prov> <email> delete a slot and its login
+agent-auth sync                  copy MCP servers + project trust from primaries into slots
 agent-auth doctor                sanity checks
 ```
+
+## Troubleshooting
+
+- **Login opened the browser on the wrong account** — the OAuth pages reuse whatever session your browser already has. Paste the login URL into a private/incognito window (one per account) or keep a browser profile per account. agent-auth flags `WRONG ACCOUNT` after login, so a mix-up can't go unnoticed.
+- **First interactive run of a new slot asks onboarding questions** (theme etc.) — normal for a fresh config dir; `agent-auth sync` copies the onboarding flags from your primary to skip most of it.
+- **`agent-auth: real 'claude' binary not found in PATH`** — the router shim needs a real binary somewhere later in PATH. If claude is alias-installed, run `claude install`.
+
+## MCP servers across accounts
+
+Each slot has its own MCP configuration (that's just how the CLIs work — Claude Code keeps it in the config dir's `.claude.json`, Codex in `config.toml`). `agent-auth sync` keeps slots consistent with your primary:
+
+- **claude slots** get the primary's MCP server *definitions* and trusted-project flags copied into their `.claude.json`
+- **codex slots** get the primary's `config.toml` re-copied (MCP servers live there), with the file-store pin re-applied
+
+Two classes of MCP server behave differently after a sync:
+
+- Servers whose credentials are **in the definition** (API key in env/header): work in every slot immediately.
+- **OAuth-based** MCP servers: their tokens live in each slot's own credential store, tied to that slot's account. That is not an agent-auth limitation to work around — sharing OAuth tokens across accounts is exactly the credential-copying this tool exists to avoid (and it breaks anyway when servers rotate refresh tokens). Each slot authorizes those once, in place, and they refresh in place forever after — same rule as the account login itself.
+
+Run `agent-auth sync` again whenever you add MCP servers or trust new projects on the primary.
 
 ## How it works (and what it never does)
 

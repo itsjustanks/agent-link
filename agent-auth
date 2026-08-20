@@ -60,25 +60,65 @@ PY
   esac
 }
 
+# Force file-based credential storage in a codex slot config. A copied config
+# may say "keyring", which would silently break slot isolation (credentials
+# would land in the shared OS keyring instead of inside CODEX_HOME).
+codex_pin_file_store() { # $1 config.toml path
+  python3 - "$1" <<'PY'
+import re, sys, os
+p = sys.argv[1]
+s = open(p).read() if os.path.exists(p) else ""
+line = 'cli_auth_credentials_store = "file"'
+if re.search(r'^\s*cli_auth_credentials_store\s*=', s, re.M):
+    s = re.sub(r'^\s*cli_auth_credentials_store\s*=.*$', line, s, flags=re.M)
+else:
+    s = s.rstrip("\n") + ("\n" if s else "") + line + "\n"
+open(p, "w").write(s)
+PY
+}
+
 # One-time slot preparation after mkdir.
 prov_prepare() { # $1 provider, $2 slot dir
   case "$1" in
     codex)
-      # Codex must use file-based credentials inside CODEX_HOME. Seed from the
-      # user's real config so slots behave like the primary, then pin the store.
+      # Seed from the user's real config so slots behave like the primary
+      # (MCP servers etc.), then pin credentials to file storage.
       if [ ! -f "$2/config.toml" ]; then
         [ -f "$HOME/.codex/config.toml" ] && cp "$HOME/.codex/config.toml" "$2/config.toml"
-        touch "$2/config.toml"
-        grep -q '^cli_auth_credentials_store' "$2/config.toml" 2>/dev/null || \
-          printf '\ncli_auth_credentials_store = "file"\n' >> "$2/config.toml"
       fi
+      codex_pin_file_store "$2/config.toml"
       ;;
   esac
 }
 
+prov_binary_check() { # $1 provider — fail with install hints if the CLI is missing
+  command -v "$(prov_binary "$1")" >/dev/null 2>&1 && return 0
+  echo "error: the '$(prov_binary "$1")' CLI is not in PATH." >&2
+  case "$1" in
+    claude)
+      echo "  install: npm install -g @anthropic-ai/claude-code   (https://claude.com/claude-code)" >&2
+      echo "  note: if 'claude' works in your shell only via an alias (the old installer)," >&2
+      echo "  run 'claude install' there to get a real binary on PATH." >&2
+      ;;
+    codex)
+      echo "  install: npm install -g @openai/codex" >&2
+      ;;
+  esac
+  return 127
+}
+
 prov_login() { # $1 provider, $2 slot dir, $3 email
   case "$1" in
-    claude) CLAUDE_CONFIG_DIR="$2" claude auth login --email "$3" ;;
+    claude)
+      if claude auth login --help >/dev/null 2>&1; then
+        CLAUDE_CONFIG_DIR="$2" claude auth login --email "$3"
+      else
+        echo "note: this Claude Code version predates 'claude auth login', so the full"
+        echo "      REPL will open. After the login completes, type /exit to come back."
+        echo "      (Or update first: claude update)"
+        CLAUDE_CONFIG_DIR="$2" claude /login
+      fi
+      ;;
     codex)  CODEX_HOME="$2" codex login ;;
   esac
 }
@@ -132,6 +172,7 @@ slot_check() { # $1 provider, $2 email, $3 index
 
 slot_login() { # $1 provider, $2 email
   local dir
+  prov_binary_check "$1" || return 127
   dir="$(slot_dir "$1" "$2")"
   mkdir -p "$dir"
   prov_prepare "$1" "$dir"
@@ -290,9 +331,12 @@ cmd_route() { # enable|disable|status
 }
 
 cmd_shims() { # numbered per-slot shims: claude-1, codex-2, ...
-  local p e i env_var
+  local p e i env_var f
   mkdir -p "$SHIM_BIN"
   for p in $PROVIDERS; do
+    for f in "$SHIM_BIN/$p"-[0-9] "$SHIM_BIN/$p"-[0-9][0-9]; do
+      [ -e "$f" ] && rm -f "$f"
+    done
     env_var="$(prov_env_var "$p")"
     i=0
     for e in $(slot_list "$p"); do
@@ -317,17 +361,22 @@ EOF
       echo "wrote $SHIM_BIN/$p-$i -> $e"
     done
   done
+  case ":$PATH:" in
+    *":$SHIM_BIN:"*) ;;
+    *) echo; echo "note: $SHIM_BIN is not in PATH — add to your shell profile:"
+       echo "  export PATH=\"$SHIM_BIN:\$PATH\"" ;;
+  esac
 }
 
 cmd_env() { # provider email — print eval-able export
-  prov_valid "${1:-}" || { echo "usage: agent-auth env <claude|codex> <email>" >&2; return 1; }
-  [ -d "$(slot_dir "$1" "${2:-}")" ] || { echo "no $1 slot '${2:-}'" >&2; return 1; }
+  prov_valid "${1:-}" && [ -n "${2:-}" ] || { echo "usage: agent-auth env <claude|codex> <email>" >&2; return 1; }
+  [ -d "$(slot_dir "$1" "$2")" ] || { echo "no $1 slot '$2'" >&2; return 1; }
   echo "export $(prov_env_var "$1")=\"$(slot_dir "$1" "$2")\""
 }
 
 cmd_run() { # provider email [cmd...]
-  prov_valid "${1:-}" || { echo "usage: agent-auth run <claude|codex> <email> [command...]" >&2; return 1; }
-  local p="$1" e="${2:-}" dir
+  prov_valid "${1:-}" && [ -n "${2:-}" ] || { echo "usage: agent-auth run <claude|codex> <email> [command...]" >&2; return 1; }
+  local p="$1" e="$2" dir
   dir="$(slot_dir "$p" "$e")"
   [ -d "$dir" ] || { echo "no $p slot '$e'" >&2; return 1; }
   shift 2
@@ -335,7 +384,39 @@ cmd_run() { # provider email [cmd...]
   env "$(prov_env_var "$p")=$dir" "$@"
 }
 
-cmd_sync() { # copy MCP defs + project trust from primary claude config into claude slots
+cmd_remove() { # provider email — delete a slot (its credentials die with it)
+  prov_valid "${1:-}" && [ -n "${2:-}" ] || { echo "usage: agent-auth remove <claude|codex> <email>" >&2; return 1; }
+  local p="$1" e="$2" dir a
+  dir="$(slot_dir "$p" "$e")"
+  [ -d "$dir" ] || { echo "no $p slot '$e'" >&2; return 1; }
+  printf "Delete the %s slot for %s, INCLUDING its login? [y/N] " "$p" "$e"
+  read -r a || return 1
+  case "$a" in y|Y|yes|YES) ;; *) echo "aborted"; return 1;; esac
+  rm -rf "$dir"
+  if [ -f "$(order_file "$p")" ]; then
+    grep -vxF "$e" "$(order_file "$p")" > "$(order_file "$p").tmp" || true
+    mv "$(order_file "$p").tmp" "$(order_file "$p")"
+  fi
+  if [ "$(cat "$(route_file "$p")" 2>/dev/null)" = "$e" ]; then
+    echo primary > "$(route_file "$p")"
+    echo "plain \`$p\` was routed to this slot — reset to primary"
+  fi
+  echo "removed. If you use numbered shims, refresh them: agent-auth shims"
+}
+
+cmd_sync() { # propagate MCP definitions + project trust from primaries into slots
+  # codex: slot config.toml <- primary ~/.codex/config.toml (MCP servers live there),
+  # re-pinned to file credential storage. Overwrites slot-local config edits.
+  local d
+  if [ -f "$HOME/.codex/config.toml" ]; then
+    for d in "$ACCOUNTS/codex"/*/; do
+      [ -d "$d" ] || continue
+      cp "$HOME/.codex/config.toml" "${d}config.toml"
+      codex_pin_file_store "${d}config.toml"
+      echo "$(basename "$d"): codex config.toml synced from primary (file-store pinned)"
+    done
+  fi
+  # claude: slot .claude.json <- definitions and trust from primary ~/.claude.json
   python3 - "$ACCOUNTS/claude" <<'PY'
 import json, os, sys, glob
 
@@ -385,9 +466,17 @@ cmd_doctor() {
   local p ok=0
   command -v python3 >/dev/null || { echo "[!] python3 not found (required)"; ok=1; }
   for p in $PROVIDERS; do
-    command -v "$p" >/dev/null && echo "[x] $p binary: $(command -v "$p")" \
-      || echo "[ ] $p binary not found (only needed if you manage $p accounts)"
+    if command -v "$p" >/dev/null; then
+      echo "[x] $p binary: $(command -v "$p")"
+    else
+      echo "[ ] $p binary not found (only needed if you manage $p accounts)"
+    fi
   done
+  if command -v claude >/dev/null && ! claude auth login --help >/dev/null 2>&1; then
+    echo "[!] this Claude Code version predates 'claude auth login' — logins will open"
+    echo "    the full REPL instead. Update with: claude update"
+    ok=1
+  fi
   if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
     echo "[!] CLAUDE_CONFIG_DIR is set globally in this shell ($CLAUDE_CONFIG_DIR)."
     echo "    That re-points your PRIMARY claude. agent-auth never needs this set globally."
@@ -411,9 +500,10 @@ cmd_interactive() {
     echo "─────────────────────────────────────────────"
     cmd_status
     echo
-    echo "  1) add an account          4) install/route plain \`claude\`/\`codex\`"
-    echo "  2) login pending accounts  5) write numbered shims (claude-1, ...)"
-    echo "  3) switch active account   6) doctor"
+    echo "  1) add an account          5) write numbered shims (claude-1, ...)"
+    echo "  2) login pending accounts  6) sync MCP servers + trust into slots"
+    echo "  3) switch active account   7) remove an account"
+    echo "  4) route plain commands    8) doctor"
     echo "  q) quit"
     printf '> '
     read -r choice || return 0
@@ -431,7 +521,13 @@ cmd_interactive() {
         ;;
       4) cmd_route enable ;;
       5) cmd_shims ;;
-      6) cmd_doctor || true ;;
+      6) cmd_sync || true ;;
+      7)
+        printf 'provider (claude/codex): '; read -r p
+        printf 'account email: '; read -r e
+        cmd_remove "$p" "$e" || true
+        ;;
+      8) cmd_doctor || true ;;
       q|Q|quit|exit) return 0 ;;
       *) echo "?" ;;
     esac
@@ -452,7 +548,8 @@ usage:
   agent-auth shims                 write numbered shims: claude-1, claude-2, codex-1 ...
   agent-auth env <prov> <email>    print an eval-able export for one slot
   agent-auth run <prov> <email> [cmd...]   run a command under a slot's account
-  agent-auth sync                  copy MCP servers + project trust from primary claude into slots
+  agent-auth remove <prov> <email> delete a slot and its login
+  agent-auth sync                  copy MCP servers + project trust from primaries into slots
   agent-auth doctor                sanity checks
 
 slots live in \$AGENT_AUTH_HOME (default ~/.agent-auth), one folder per account email.
@@ -472,6 +569,7 @@ main() {
     shims)   cmd_shims ;;
     env)     shift; cmd_env "$@" ;;
     run)     shift; cmd_run "$@" ;;
+    remove)  shift; cmd_remove "$@" ;;
     sync)    cmd_sync ;;
     doctor)  cmd_doctor ;;
     version|--version|-v) echo "$VERSION" ;;
