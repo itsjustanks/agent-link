@@ -1,0 +1,482 @@
+#!/usr/bin/env bash
+# agent-auth — multi-account manager for AI coding CLIs (Claude Code, OpenAI Codex).
+#
+# Every account lives in its own credential slot (a folder named by the account
+# email). Slots are used two ways, at the same time if you like:
+#
+#   PARALLEL  each slot is independently usable (shims like `claude-2`, or env
+#             vars for orchestrators such as Paseo) — N accounts, N quota pools,
+#             all live at once.
+#   SWITCH    `agent-auth use claude you@work.com` re-routes the plain `claude`
+#             command to that slot via a pointer file. No credentials are ever
+#             copied, backed up, or restored — every slot's OAuth tokens refresh
+#             in place, so nothing decays and nothing gets logged out. Your
+#             original ~/.claude and ~/.codex are never touched ("primary").
+#             A switch affects new processes only; running agents keep the
+#             account they started with.
+#
+# Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
+set -u
+
+VERSION="0.1.0"
+ROOT="${AGENT_AUTH_HOME:-$HOME/.agent-auth}"
+ACCOUNTS="$ROOT/accounts"
+SHIM_BIN="$ROOT/bin"
+STATE="$ROOT/state"
+PROVIDERS="claude codex"
+
+# ---------------------------------------------------------------- provider registry
+
+prov_valid() { case "$1" in claude|codex) return 0;; *) return 1;; esac; }
+
+prov_env_var() { case "$1" in claude) echo CLAUDE_CONFIG_DIR;; codex) echo CODEX_HOME;; esac; }
+
+prov_cred_file() { case "$1" in claude) echo .credentials.json;; codex) echo auth.json;; esac; }
+
+prov_binary() { echo "$1"; } # binary name == provider name for both
+
+# Print the logged-in account email for a slot dir (empty if none/unreadable).
+prov_email() { # $1 provider, $2 slot dir
+  case "$1" in
+    claude)
+      python3 - "$2" <<'PY'
+import json, sys, os
+p = os.path.join(sys.argv[1], ".claude.json")
+try: print(json.load(open(p)).get("oauthAccount", {}).get("emailAddress", ""))
+except Exception: pass
+PY
+      ;;
+    codex)
+      python3 - "$2" <<'PY'
+import json, sys, os, base64
+p = os.path.join(sys.argv[1], "auth.json")
+try:
+    tok = json.load(open(p))["tokens"]["id_token"].split(".")[1]
+    tok += "=" * (-len(tok) % 4)
+    print(json.loads(base64.urlsafe_b64decode(tok)).get("email", ""))
+except Exception: pass
+PY
+      ;;
+  esac
+}
+
+# One-time slot preparation after mkdir.
+prov_prepare() { # $1 provider, $2 slot dir
+  case "$1" in
+    codex)
+      # Codex must use file-based credentials inside CODEX_HOME. Seed from the
+      # user's real config so slots behave like the primary, then pin the store.
+      if [ ! -f "$2/config.toml" ]; then
+        [ -f "$HOME/.codex/config.toml" ] && cp "$HOME/.codex/config.toml" "$2/config.toml"
+        touch "$2/config.toml"
+        grep -q '^cli_auth_credentials_store' "$2/config.toml" 2>/dev/null || \
+          printf '\ncli_auth_credentials_store = "file"\n' >> "$2/config.toml"
+      fi
+      ;;
+  esac
+}
+
+prov_login() { # $1 provider, $2 slot dir, $3 email
+  case "$1" in
+    claude) CLAUDE_CONFIG_DIR="$2" claude auth login --email "$3" ;;
+    codex)  CODEX_HOME="$2" codex login ;;
+  esac
+}
+
+# ---------------------------------------------------------------- slot helpers
+
+slot_dir() { echo "$ACCOUNTS/$1/$2"; }
+
+order_file() { echo "$STATE/order-$1"; }
+
+route_file() { echo "$STATE/route-$1"; }
+
+# Emails for a provider in stable numbered order (order file first, strays after).
+slot_list() { # $1 provider
+  local seen="" e d
+  if [ -f "$(order_file "$1")" ]; then
+    while IFS= read -r e; do
+      [ -n "$e" ] && [ -d "$(slot_dir "$1" "$e")" ] && { echo "$e"; seen="$seen|$e|"; }
+    done < "$(order_file "$1")"
+  fi
+  for d in "$ACCOUNTS/$1"/*/; do
+    [ -d "$d" ] || continue
+    e="$(basename "$d")"
+    case "$seen" in *"|$e|"*) ;; *) echo "$e" ;; esac
+  done
+}
+
+slot_register() { # $1 provider, $2 email — record in order file once
+  mkdir -p "$STATE"
+  touch "$(order_file "$1")"
+  grep -qxF "$2" "$(order_file "$1")" || echo "$2" >> "$(order_file "$1")"
+}
+
+# Status of one slot. Prints a line; returns 0 only if logged in as the right account.
+slot_check() { # $1 provider, $2 email, $3 index
+  local dir got
+  dir="$(slot_dir "$1" "$2")"
+  if [ ! -f "$dir/$(prov_cred_file "$1")" ]; then
+    printf '  [ ] %s-%s  %s  — not logged in\n' "$1" "$3" "$2"
+    return 1
+  fi
+  got="$(prov_email "$1" "$dir")"
+  if [ -n "$got" ] && [ "$got" != "$2" ]; then
+    printf '  [!] %s-%s  %s  — logged in as %s (WRONG ACCOUNT — rerun: agent-auth login %s %s)\n' \
+      "$1" "$3" "$2" "$got" "$1" "$2"
+    return 1
+  fi
+  printf '  [x] %s-%s  %s  — logged in\n' "$1" "$3" "$2"
+  return 0
+}
+
+slot_login() { # $1 provider, $2 email
+  local dir
+  dir="$(slot_dir "$1" "$2")"
+  mkdir -p "$dir"
+  prov_prepare "$1" "$dir"
+  slot_register "$1" "$2"
+  echo
+  echo "==> $1 login for: $2"
+  echo "    In the browser, sign in as EXACTLY this account: $2"
+  echo "    Tip: if the browser is already signed into another account, paste the"
+  echo "    login URL into a private/incognito window instead."
+  prov_login "$1" "$dir" "$2"
+  local i=0 e
+  for e in $(slot_list "$1"); do i=$((i+1)); [ "$e" = "$2" ] && break; done
+  slot_check "$1" "$2" "$i"
+}
+
+# ---------------------------------------------------------------- commands
+
+cmd_status() {
+  local p e i pointer
+  for p in $PROVIDERS; do
+    pointer="primary"
+    [ -f "$(route_file "$p")" ] && pointer="$(cat "$(route_file "$p")")"
+    printf '%s  (plain `%s` routes to: %s)\n' "$p" "$p" "$pointer"
+    i=0
+    for e in $(slot_list "$p"); do
+      i=$((i+1))
+      slot_check "$p" "$e" "$i" || true
+    done
+    [ "$i" = 0 ] && echo "  (no accounts — add one: agent-auth add $p you@example.com)"
+  done
+  return 0
+}
+
+cmd_add() { # provider email
+  prov_valid "${1:-}" || { echo "usage: agent-auth add <claude|codex> <email>" >&2; return 1; }
+  [ -n "${2:-}" ] || { echo "usage: agent-auth add <claude|codex> <email>" >&2; return 1; }
+  slot_login "$1" "$2"
+}
+
+cmd_login() { # [provider] [email|all]
+  local p e i
+  case "${1:-all}" in
+    all)
+      for p in $PROVIDERS; do
+        i=0
+        for e in $(slot_list "$p"); do
+          i=$((i+1))
+          slot_check "$p" "$e" "$i" >/dev/null || slot_login "$p" "$e"
+        done
+      done
+      ;;
+    claude|codex)
+      p="$1"
+      if [ -n "${2:-}" ] && [ "${2:-}" != all ]; then
+        [ -d "$(slot_dir "$p" "$2")" ] || { echo "no $p slot for '$2' — use: agent-auth add $p $2" >&2; return 1; }
+        slot_login "$p" "$2"
+      else
+        i=0
+        for e in $(slot_list "$p"); do
+          i=$((i+1))
+          slot_check "$p" "$e" "$i" >/dev/null || slot_login "$p" "$e"
+        done
+      fi
+      ;;
+    *)
+      # bare email — find it in any provider
+      local found=0
+      for p in $PROVIDERS; do
+        [ -d "$(slot_dir "$p" "$1")" ] && { slot_login "$p" "$1"; found=1; }
+      done
+      [ "$found" = 1 ] || { echo "no slot folder for '$1'" >&2; return 1; }
+      ;;
+  esac
+}
+
+cmd_use() { # provider email|primary|<number>
+  prov_valid "${1:-}" || { echo "usage: agent-auth use <claude|codex> <email|primary|N>" >&2; return 1; }
+  local p="$1" target="${2:-}" e i
+  [ -n "$target" ] || { echo "usage: agent-auth use <claude|codex> <email|primary|N>" >&2; return 1; }
+  if [ "$target" != primary ] && ! [ -d "$(slot_dir "$p" "$target")" ]; then
+    # allow numeric selection
+    if echo "$target" | grep -q '^[0-9][0-9]*$'; then
+      i=0
+      for e in $(slot_list "$p"); do
+        i=$((i+1))
+        [ "$i" = "$target" ] && { target="$e"; break; }
+      done
+    fi
+    [ -d "$(slot_dir "$p" "$target")" ] || { echo "no $p slot '$2'" >&2; return 1; }
+  fi
+  mkdir -p "$STATE"
+  echo "$target" > "$(route_file "$p")"
+  echo "plain \`$p\` now routes to: $target (new processes only; running ones are unaffected)"
+  if [ ! -x "$SHIM_BIN/$p" ]; then
+    echo "note: routing shim not installed yet — run: agent-auth route enable"
+  fi
+}
+
+write_router_shim() { # $1 provider
+  local p="$1"
+  mkdir -p "$SHIM_BIN"
+  cat > "$SHIM_BIN/$p" <<EOF
+#!/usr/bin/env bash
+# agent-auth router shim — managed by \`agent-auth route\`. Do not edit.
+here="\$(cd "\$(dirname "\$0")" && pwd)"
+aa_root="\${AGENT_AUTH_HOME:-\$HOME/.agent-auth}"
+target="\$(cat "\$aa_root/state/route-$p" 2>/dev/null || true)"
+real=""
+old_ifs="\$IFS"; IFS=:
+for d in \$PATH; do
+  [ -n "\$d" ] || continue
+  [ "\$d" = "\$here" ] && continue
+  if [ -x "\$d/$p" ] && [ ! "\$d/$p" -ef "\$here/$p" ]; then real="\$d/$p"; break; fi
+done
+IFS="\$old_ifs"
+[ -n "\$real" ] || { echo "agent-auth: real '$p' binary not found in PATH" >&2; exit 127; }
+if [ -n "\$target" ] && [ "\$target" != "primary" ]; then
+  export $(prov_env_var "$p")="\$aa_root/accounts/$p/\$target"
+fi
+exec "\$real" "\$@"
+EOF
+  chmod +x "$SHIM_BIN/$p"
+}
+
+cmd_route() { # enable|disable|status
+  local p
+  case "${1:-status}" in
+    enable)
+      for p in $PROVIDERS; do write_router_shim "$p"; done
+      echo "Router shims written to $SHIM_BIN"
+      echo
+      echo "Put them FIRST in PATH by adding this to your shell profile:"
+      echo "  export PATH=\"$SHIM_BIN:\$PATH\""
+      echo
+      echo "Then: agent-auth use claude <email>   # or 'primary' to route back"
+      ;;
+    disable)
+      for p in $PROVIDERS; do rm -f "$SHIM_BIN/$p"; done
+      echo "Router shims removed. Plain commands hit your real binaries again."
+      ;;
+    status|*)
+      for p in $PROVIDERS; do
+        if [ -x "$SHIM_BIN/$p" ]; then
+          printf '%s: shim installed, routing to %s\n' "$p" "$(cat "$(route_file "$p")" 2>/dev/null || echo primary)"
+        else
+          printf '%s: no shim (plain `%s` is untouched)\n' "$p" "$p"
+        fi
+      done
+      case ":$PATH:" in
+        *":$SHIM_BIN:"*) ;;
+        *) [ -x "$SHIM_BIN/claude" ] || [ -x "$SHIM_BIN/codex" ] && \
+             echo "warning: $SHIM_BIN is not in PATH — routing is inert until it is (and first)" ;;
+      esac
+      ;;
+  esac
+}
+
+cmd_shims() { # numbered per-slot shims: claude-1, codex-2, ...
+  local p e i env_var
+  mkdir -p "$SHIM_BIN"
+  for p in $PROVIDERS; do
+    env_var="$(prov_env_var "$p")"
+    i=0
+    for e in $(slot_list "$p"); do
+      i=$((i+1))
+      cat > "$SHIM_BIN/$p-$i" <<EOF
+#!/usr/bin/env bash
+# agent-auth slot shim: $p account $e — managed by \`agent-auth shims\`.
+here="\$(cd "\$(dirname "\$0")" && pwd)"
+real=""
+old_ifs="\$IFS"; IFS=:
+for d in \$PATH; do
+  [ -n "\$d" ] || continue
+  [ "\$d" = "\$here" ] && continue
+  if [ -x "\$d/$p" ] && [ ! "\$d/$p" -ef "\$here/$p" ]; then real="\$d/$p"; break; fi
+done
+IFS="\$old_ifs"
+[ -n "\$real" ] || { echo "agent-auth: real '$p' binary not found in PATH" >&2; exit 127; }
+export $env_var="\${AGENT_AUTH_HOME:-\$HOME/.agent-auth}/accounts/$p/$e"
+exec "\$real" "\$@"
+EOF
+      chmod +x "$SHIM_BIN/$p-$i"
+      echo "wrote $SHIM_BIN/$p-$i -> $e"
+    done
+  done
+}
+
+cmd_env() { # provider email — print eval-able export
+  prov_valid "${1:-}" || { echo "usage: agent-auth env <claude|codex> <email>" >&2; return 1; }
+  [ -d "$(slot_dir "$1" "${2:-}")" ] || { echo "no $1 slot '${2:-}'" >&2; return 1; }
+  echo "export $(prov_env_var "$1")=\"$(slot_dir "$1" "$2")\""
+}
+
+cmd_run() { # provider email [cmd...]
+  prov_valid "${1:-}" || { echo "usage: agent-auth run <claude|codex> <email> [command...]" >&2; return 1; }
+  local p="$1" e="${2:-}" dir
+  dir="$(slot_dir "$p" "$e")"
+  [ -d "$dir" ] || { echo "no $p slot '$e'" >&2; return 1; }
+  shift 2
+  [ $# -gt 0 ] || set -- "$(prov_binary "$p")"
+  env "$(prov_env_var "$p")=$dir" "$@"
+}
+
+cmd_sync() { # copy MCP defs + project trust from primary claude config into claude slots
+  python3 - "$ACCOUNTS/claude" <<'PY'
+import json, os, sys, glob
+
+root = sys.argv[1]
+primary_path = os.path.expanduser("~/.claude.json")
+if not os.path.exists(primary_path):
+    print("no primary ~/.claude.json — nothing to sync"); sys.exit(0)
+primary = json.load(open(primary_path))
+mcp = primary.get("mcpServers", {})
+projects = primary.get("projects", {})
+GLOBAL_FLAGS = ["hasCompletedOnboarding", "bypassPermissionsModeAccepted", "theme", "autoUpdates", "effortLevel"]
+PROJECT_FIELDS = ["hasTrustDialogAccepted", "hasCompletedProjectOnboarding", "allowedTools",
+                  "mcpServers", "enabledMcpjsonServers", "disabledMcpjsonServers", "dontCrawlDirectory"]
+slots = sorted(glob.glob(os.path.join(root, "*/")))
+if not slots:
+    print("no claude slots yet"); sys.exit(0)
+for slot_dir in slots:
+    slot_path = os.path.join(slot_dir, ".claude.json")
+    slot = {}
+    if os.path.exists(slot_path):
+        slot = json.load(open(slot_path))
+    slot["mcpServers"] = mcp
+    for flag in GLOBAL_FLAGS:
+        if flag in primary:
+            slot[flag] = primary[flag]
+    slot_projects = slot.setdefault("projects", {})
+    trusted = 0
+    for path, entry in projects.items():
+        if not entry.get("hasTrustDialogAccepted"):
+            continue
+        trusted += 1
+        tgt = slot_projects.setdefault(path, {})
+        for field in PROJECT_FIELDS:
+            if field in entry:
+                tgt[field] = entry[field]
+    tmp = slot_path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(slot, f, indent=2)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, slot_path)
+    print(f"{os.path.basename(slot_dir.rstrip('/'))}: {len(mcp)} MCP servers, {trusted} trusted projects")
+print("==> synced definitions only; OAuth tokens are per-slot and never copied.")
+PY
+}
+
+cmd_doctor() {
+  local p ok=0
+  command -v python3 >/dev/null || { echo "[!] python3 not found (required)"; ok=1; }
+  for p in $PROVIDERS; do
+    command -v "$p" >/dev/null && echo "[x] $p binary: $(command -v "$p")" \
+      || echo "[ ] $p binary not found (only needed if you manage $p accounts)"
+  done
+  if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+    echo "[!] CLAUDE_CONFIG_DIR is set globally in this shell ($CLAUDE_CONFIG_DIR)."
+    echo "    That re-points your PRIMARY claude. agent-auth never needs this set globally."
+    ok=1
+  fi
+  for d in "$ACCOUNTS/codex"/*/; do
+    [ -d "$d" ] || continue
+    grep -q '^cli_auth_credentials_store *= *"file"' "$d/config.toml" 2>/dev/null \
+      || { echo "[!] $(basename "$d"): codex slot missing cli_auth_credentials_store=\"file\" pin"; ok=1; }
+  done
+  cmd_route status
+  [ "$ok" = 0 ] && echo "All good."
+  return "$ok"
+}
+
+cmd_interactive() {
+  local choice p e n
+  while :; do
+    echo
+    echo "agent-auth $VERSION — accounts under $ACCOUNTS"
+    echo "─────────────────────────────────────────────"
+    cmd_status
+    echo
+    echo "  1) add an account          4) install/route plain \`claude\`/\`codex\`"
+    echo "  2) login pending accounts  5) write numbered shims (claude-1, ...)"
+    echo "  3) switch active account   6) doctor"
+    echo "  q) quit"
+    printf '> '
+    read -r choice || return 0
+    case "$choice" in
+      1)
+        printf 'provider (claude/codex): '; read -r p
+        printf 'account email: '; read -r e
+        cmd_add "$p" "$e" || true
+        ;;
+      2) cmd_login all || true ;;
+      3)
+        printf 'provider (claude/codex): '; read -r p
+        printf 'route to (email, number, or "primary"): '; read -r n
+        cmd_use "$p" "$n" || true
+        ;;
+      4) cmd_route enable ;;
+      5) cmd_shims ;;
+      6) cmd_doctor || true ;;
+      q|Q|quit|exit) return 0 ;;
+      *) echo "?" ;;
+    esac
+  done
+}
+
+usage() {
+  cat <<EOF
+agent-auth $VERSION — multi-account manager for AI coding CLIs (claude, codex)
+
+usage:
+  agent-auth                       interactive mode
+  agent-auth status                show every account slot and where routing points
+  agent-auth add <prov> <email>    create a slot and log it in
+  agent-auth login [prov] [email|all]   (re)login slots that need it
+  agent-auth use <prov> <email|N|primary>  route plain \`claude\`/\`codex\` to a slot
+  agent-auth route enable|disable|status   manage the routing shims
+  agent-auth shims                 write numbered shims: claude-1, claude-2, codex-1 ...
+  agent-auth env <prov> <email>    print an eval-able export for one slot
+  agent-auth run <prov> <email> [cmd...]   run a command under a slot's account
+  agent-auth sync                  copy MCP servers + project trust from primary claude into slots
+  agent-auth doctor                sanity checks
+
+slots live in \$AGENT_AUTH_HOME (default ~/.agent-auth), one folder per account email.
+Your primary ~/.claude and ~/.codex are never modified.
+EOF
+}
+
+main() {
+  mkdir -p "$ACCOUNTS/claude" "$ACCOUNTS/codex" "$STATE"
+  case "${1:-}" in
+    "") if [ -t 0 ]; then cmd_interactive; else cmd_status; fi ;;
+    status)  cmd_status ;;
+    add)     shift; cmd_add "$@" ;;
+    login)   shift; cmd_login "$@" ;;
+    use)     shift; cmd_use "$@" ;;
+    route)   shift; cmd_route "${1:-status}" ;;
+    shims)   cmd_shims ;;
+    env)     shift; cmd_env "$@" ;;
+    run)     shift; cmd_run "$@" ;;
+    sync)    cmd_sync ;;
+    doctor)  cmd_doctor ;;
+    version|--version|-v) echo "$VERSION" ;;
+    help|--help|-h|*) usage ;;
+  esac
+}
+
+main "$@"
