@@ -24,7 +24,7 @@ If `claude` only works in your shell through an alias (the old migrate-installer
 ## Install
 
 ```sh
-git clone https://github.com/YOURNAME/agent-auth
+git clone https://github.com/itsjustanks/agent-auth
 cp agent-auth/agent-auth ~/.local/bin/ && chmod +x ~/.local/bin/agent-auth
 ```
 
