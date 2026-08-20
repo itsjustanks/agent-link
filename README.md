@@ -61,18 +61,48 @@ agent-auth run claude you@work.com claude -p "hello"
 eval "$(agent-auth env claude you@work.com)"    # exports CLAUDE_CONFIG_DIR for this shell
 ```
 
-### Paseo / orchestrator integration
+### Use with Paseo (multi-agent orchestration)
 
-Point a custom provider at a slot and it becomes a separate, parallel quota pool:
+If you run agents through [Paseo](https://paseo.sh), each slot can become its own provider — so five agents on three Claude accounts genuinely run on three separate rate limits, in parallel, with no switching.
+
+**1. Create and log in your slots** (see Quickstart), then grab each slot's exact path:
+
+```sh
+agent-auth env claude you@work.com
+# export CLAUDE_CONFIG_DIR="/home/you/.agent-auth/accounts/claude/you@work.com"
+```
+
+**2. Add one custom provider per slot** to `~/.paseo/config.json` under `agents.providers`. `extends` reuses Paseo's native Claude/Codex integration; only the credential dir changes:
 
 ```jsonc
-// ~/.paseo/config.json → agents.providers
-"claude-work": {
-  "extends": "claude",
-  "label": "Claude · you@work.com",
-  "env": { "CLAUDE_CONFIG_DIR": "/home/you/.agent-auth/accounts/claude/you@work.com" }
+"agents": {
+  "providers": {
+    "claude-work": {
+      "extends": "claude",
+      "label": "Claude · you@work.com",
+      "env": { "CLAUDE_CONFIG_DIR": "/home/you/.agent-auth/accounts/claude/you@work.com" }
+    },
+    "claude-personal": {
+      "extends": "claude",
+      "label": "Claude · you@home.com",
+      "env": { "CLAUDE_CONFIG_DIR": "/home/you/.agent-auth/accounts/claude/you@home.com" }
+    },
+    "codex-work": {
+      "extends": "codex",
+      "label": "Codex · you@work.com",
+      "env": { "CODEX_HOME": "/home/you/.agent-auth/accounts/codex/you@work.com" }
+    }
+  }
 }
 ```
+
+Keep provider **ids** as plain slugs (`claude-work`, not the email — ids travel through CLIs and URLs where `@` misbehaves) and put the email in the **label**, which is what Paseo's UI shows.
+
+**3. Restart the Paseo daemon.** Paseo builds its provider registry at startup, so new providers don't appear until a restart (`paseo restart`, or quit and reopen the app). Do it when no agents are mid-task.
+
+**4. Use them.** The new providers show up in Paseo's provider picker with the same models as the builtin — spawn each heavy agent on a different pool. Your builtin `claude`/`codex` providers keep using the primary login, untouched.
+
+The same `env`-var pattern works for any other orchestrator or script runner: anything that lets you set `CLAUDE_CONFIG_DIR`/`CODEX_HOME` per process can target a slot (or wrap it with `agent-auth run`).
 
 ## Hot-switch the plain `claude` / `codex` commands
 
