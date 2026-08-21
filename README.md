@@ -128,7 +128,9 @@ An explicitly set `CLAUDE_CONFIG_DIR` / `CODEX_HOME` always wins, so `agent-auth
 
 `agent-auth auto` prints a ready-to-paste Paseo provider snippet — one `Claude (Agent Auth)` provider that spreads agents across every account you own.
 
-> Note: this must be a launcher, not a symlink. Claude Code keys credentials to the literal config-dir path, so a symlink that swings between accounts reports "logged out".
+> Two notes: run `agent-auth auto` from your **installed** copy (e.g. `~/.local/bin/agent-auth`) — each launcher records the path of the agent-auth that created it, so generating them from a temporary clone ties them to that clone. If that path ever disappears the launcher simply falls back to your primary account rather than failing.
+>
+> And this has to be a launcher, not a symlink: Claude Code keys credentials to the literal config-dir path, so a symlink that swings between accounts reports "logged out".
 
 ## Hot-switch the plain `claude` / `codex` commands
 
