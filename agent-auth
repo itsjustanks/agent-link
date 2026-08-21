@@ -168,6 +168,40 @@ slot_list() { # $1 provider
   done
 }
 
+# ---------------------------------------------------------------- auto-routing pools
+#
+# One "auto" launcher per provider picks a real slot at LAUNCH time, so a single
+# Paseo/editor provider spreads new agents across accounts. It must resolve to a
+# real slot path: Claude keys credentials to the literal config-dir path, so a
+# symlink that swings between slots reports logged-out (verified).
+# Selection is least-recently-used among slots that are logged in and not in
+# cooldown. A running process keeps whatever it started with, always.
+
+pools_dir() { echo "$STATE/pools"; }
+
+slot_available() { # $1 provider, $2 email
+  local until now
+  prov_logged_in "$1" "$(slot_dir "$1" "$2")" || return 1
+  until="$(cat "$(pools_dir)/cooldown-$1-$2" 2>/dev/null || echo 0)"
+  now="$(date +%s)"
+  [ "$until" -gt "$now" ] && return 1
+  return 0
+}
+
+# Print the email of the slot to use next, and stamp it as used.
+pick_slot() { # $1 provider
+  local best="" best_ts="" e ts
+  mkdir -p "$(pools_dir)"
+  for e in $(slot_list "$1"); do
+    slot_available "$1" "$e" || continue
+    ts="$(cat "$(pools_dir)/last-$1-$e" 2>/dev/null || echo 0)"
+    if [ -z "$best" ] || [ "$ts" -lt "$best_ts" ]; then best="$e"; best_ts="$ts"; fi
+  done
+  [ -n "$best" ] || return 1
+  date +%s > "$(pools_dir)/last-$1-$best"
+  echo "$best"
+}
+
 slot_register() { # $1 provider, $2 email — record in order file once
   mkdir -p "$STATE"
   touch "$(order_file "$1")"
@@ -356,6 +390,110 @@ cmd_route() { # enable|disable|status
       return 0
       ;;
   esac
+}
+
+write_auto_launcher() { # $1 provider — one command that routes to a live account
+  local p="$1" env_var self
+  env_var="$(prov_env_var "$p")"
+  self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+  mkdir -p "$SHIM_BIN"
+  cat > "$SHIM_BIN/$p-auto" <<EOF
+#!/usr/bin/env bash
+# agent-auth auto-routing launcher for $p — managed by \`agent-auth auto\`.
+# Picks a logged-in, non-cooled-down account at launch and execs the real CLI.
+# Point one editor/orchestrator provider at this file instead of picking
+# accounts by hand. Running processes are never re-routed.
+here="\$(cd "\$(dirname "\$0")" && pwd)"
+aa_root="\${AGENT_AUTH_HOME:-\$HOME/.agent-auth}"
+real=""
+old_ifs="\$IFS"; IFS=:
+for d in \$PATH; do
+  [ -n "\$d" ] || continue
+  [ "\$d" = "\$here" ] && continue
+  if [ -x "\$d/$p" ] && [ ! "\$d/$p" -ef "\$here/$p" ]; then real="\$d/$p"; break; fi
+done
+IFS="\$old_ifs"
+[ -n "\$real" ] || real="$(command -v "$p" 2>/dev/null || echo "$p")"
+# An explicitly inherited value always wins.
+if [ -z "\${$env_var:-}" ] && [ -x "$self" ]; then
+  slot="\$("$self" pick $p 2>/dev/null || true)"
+  [ -n "\$slot" ] && export $env_var="\$aa_root/accounts/$p/\$slot"
+fi
+exec "\$real" "\$@"
+EOF
+  chmod +x "$SHIM_BIN/$p-auto"
+  echo "wrote $SHIM_BIN/$p-auto"
+}
+
+cmd_auto() { # write auto launchers and print the provider snippet
+  local p
+  for p in $PROVIDERS; do write_auto_launcher "$p"; done
+  cat <<EOF
+
+Point ONE provider at each launcher and it spreads new agents across your
+accounts automatically (least-recently-used, skipping cooled-down ones).
+
+Paseo — ~/.paseo/config.json under agents.providers (restart the daemon after):
+
+  "claude-auto": {
+    "extends": "claude",
+    "label": "Claude (Agent Auth)",
+    "command": ["$SHIM_BIN/claude-auto"]
+  },
+  "codex-auto": {
+    "extends": "codex",
+    "label": "Codex (Agent Auth)",
+    "command": ["$SHIM_BIN/codex-auto"]
+  }
+
+Anything else that runs a command works too — just run $SHIM_BIN/claude-auto
+in place of claude.
+EOF
+}
+
+cmd_pick() { # provider — print the account to use next (used by the launchers)
+  prov_valid "${1:-}" || { echo "usage: agent-auth pick <claude|codex>" >&2; return 1; }
+  pick_slot "$1"
+}
+
+cmd_cooldown() { # provider email minutes — park an exhausted account
+  prov_valid "${1:-}" && valid_account "${2:-}" || {
+    echo "usage: agent-auth cooldown <claude|codex> <email> [minutes|clear]" >&2; return 1; }
+  local p="$1" e="$2" arg="${3:-180}"
+  mkdir -p "$(pools_dir)"
+  if [ "$arg" = clear ]; then
+    rm -f "$(pools_dir)/cooldown-$p-$e"
+    echo "$p · $e: cooldown cleared"
+    return 0
+  fi
+  echo "$(( $(date +%s) + arg * 60 ))" > "$(pools_dir)/cooldown-$p-$e"
+  echo "$p · $e: parked for ${arg}m — auto-routing will skip it until then"
+}
+
+cmd_pools() { # show what auto-routing sees
+  local p e now until last state
+  now="$(date +%s)"
+  for p in $PROVIDERS; do
+    echo "$p"
+    for e in $(slot_list "$p"); do
+      until="$(cat "$(pools_dir)/cooldown-$p-$e" 2>/dev/null || echo 0)"
+      last="$(cat "$(pools_dir)/last-$p-$e" 2>/dev/null || echo 0)"
+      if ! prov_logged_in "$p" "$(slot_dir "$p" "$e")"; then
+        state="not logged in"
+      elif [ "$until" -gt "$now" ]; then
+        state="cooling down $(( (until - now + 59) / 60 ))m"
+      else
+        state="available"
+      fi
+      if [ "$last" -gt 0 ]; then
+        printf '  %-28s %-20s last used %sm ago\n' "$e" "$state" "$(( (now - last) / 60 ))"
+      else
+        printf '  %-28s %-20s never used\n' "$e" "$state"
+      fi
+    done
+  done
+  [ -x "$SHIM_BIN/claude-auto" ] || echo "(no auto launchers yet — run: agent-auth auto)"
+  return 0
 }
 
 cmd_shims() { # numbered per-slot shims: claude-1, codex-2, ...
@@ -573,6 +711,8 @@ cmd_interactive() {
         cmd_remove "$p" "$e" || true
         ;;
       8) cmd_doctor || true ;;
+      9) cmd_auto ;;
+      0) cmd_pools ;;
       q|Q|quit|exit) return 0 ;;
       *) echo "?" ;;
     esac
@@ -591,6 +731,9 @@ usage:
   agent-auth use <prov> <email|N|primary>  route plain \`claude\`/\`codex\` to a slot
   agent-auth route enable|disable|status   manage the routing shims
   agent-auth shims                 write numbered shims: claude-1, claude-2, codex-1 ...
+  agent-auth auto                  write auto-routing launchers (one provider, many accounts)
+  agent-auth pools                 show what auto-routing sees (available / cooling down)
+  agent-auth cooldown <prov> <email> [min|clear]   park an exhausted account
   agent-auth env <prov> <email>    print an eval-able export for one slot
   agent-auth run <prov> <email> [cmd...]   run a command under a slot's account
   agent-auth remove <prov> <email> delete a slot and its login
@@ -612,6 +755,10 @@ main() {
     use)     shift; cmd_use "$@" ;;
     route)   shift; cmd_route "${1:-status}" ;;
     shims)   cmd_shims ;;
+    auto)    cmd_auto ;;
+    pick)    shift; cmd_pick "$@" ;;
+    pools)   cmd_pools ;;
+    cooldown) shift; cmd_cooldown "$@" ;;
     env)     shift; cmd_env "$@" ;;
     run)     shift; cmd_run "$@" ;;
     remove)  shift; cmd_remove "$@" ;;

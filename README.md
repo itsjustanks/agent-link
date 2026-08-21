@@ -106,6 +106,30 @@ Keep provider **ids** as plain slugs (`claude-work`, not the email — ids trave
 
 The same `env`-var pattern works for any other orchestrator or script runner: anything that lets you set `CLAUDE_CONFIG_DIR`/`CODEX_HOME` per process can target a slot (or wrap it with `agent-auth run`).
 
+## Auto-routing: one provider, all your accounts
+
+Instead of picking an account per agent, point **one** provider at an auto launcher and every new process lands on a live account:
+
+```sh
+agent-auth auto        # writes ~/.agent-auth/bin/claude-auto and codex-auto
+agent-auth pools       # see what it will choose from
+```
+
+Each launch picks the **least-recently-used** account that is logged in and not cooling down, then execs the real CLI with that account's config dir. A running process is never re-routed — it keeps the account it started with for its whole life.
+
+When an account hits its usage limit, park it and auto-routing skips it:
+
+```sh
+agent-auth cooldown claude you@work.com 180     # skip for 3 hours
+agent-auth cooldown claude you@work.com clear
+```
+
+An explicitly set `CLAUDE_CONFIG_DIR` / `CODEX_HOME` always wins, so `agent-auth run`, per-account shims, and pinned providers keep working exactly as before.
+
+`agent-auth auto` prints a ready-to-paste Paseo provider snippet — one `Claude (Agent Auth)` provider that spreads agents across every account you own.
+
+> Note: this must be a launcher, not a symlink. Claude Code keys credentials to the literal config-dir path, so a symlink that swings between accounts reports "logged out".
+
 ## Hot-switch the plain `claude` / `codex` commands
 
 ```sh
@@ -134,6 +158,9 @@ agent-auth login [prov] [email|all]      (re)login anything that needs it
 agent-auth use <prov> <email|N|primary>  hot-switch plain claude/codex
 agent-auth route enable|disable|status   manage router shims
 agent-auth shims                 numbered per-slot shims (claude-1, ...)
+agent-auth auto                  auto-routing launchers (one provider, many accounts)
+agent-auth pools                 what auto-routing sees: available / cooling down / last used
+agent-auth cooldown <prov> <email> [min|clear]   park an exhausted account
 agent-auth env <prov> <email>    eval-able export for one slot
 agent-auth run <prov> <email> [cmd...]   run anything under a slot
 agent-auth remove <prov> <email> delete a slot and its login
