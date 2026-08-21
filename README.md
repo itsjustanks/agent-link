@@ -173,7 +173,7 @@ Run `agent-auth sync` again whenever you add MCP servers or trust new projects o
 ## How it works (and what it never does)
 
 - A slot is just the CLI's own config dir, relocated: Claude Code reads `CLAUDE_CONFIG_DIR`, Codex reads `CODEX_HOME`. The CLIs manage their own credentials inside the slot — agent-auth **never reads, writes, copies, or backs up a token**.
-- Setting `CLAUDE_CONFIG_DIR` makes Claude Code use a file-based credential store inside the slot (instead of the OS keychain), which is what makes slots portable and self-contained — on Linux and macOS alike.
+- `CLAUDE_CONFIG_DIR` gives Claude Code a separate credential store per slot. On macOS the tokens live in the OS keychain keyed by that config dir (not in the slot folder); on Linux they are written inside the slot. Either way the slots are independent — verified by three config dirs reporting three different `claude auth status` accounts at the same time. (A slot folder therefore looks "empty" on macOS even when logged in; agent-auth judges login state by the account recorded in the slot, not by a credentials file.)
 - Codex slots are pinned to `cli_auth_credentials_store = "file"` in the slot's `config.toml` so credentials stay inside `CODEX_HOME`.
 - `agent-auth sync` copies **definitions only** (MCP server configs, trusted-project flags) from your primary `~/.claude.json` into slots — never `oauthAccount`, never credentials.
 - Identity verification reads only the account email (from the slot's own config / ID-token claim) to catch wrong-account logins.
