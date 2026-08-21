@@ -65,6 +65,8 @@ eval "$(agent-auth env claude you@work.com)"    # exports CLAUDE_CONFIG_DIR for 
 
 If you run agents through [Paseo](https://paseo.sh), each slot can become its own provider — so five agents on three Claude accounts genuinely run on three separate rate limits, in parallel, with no switching.
 
+> **Prefer a UI?** [**paseo-agent-superpowers**](https://github.com/itsjustanks/paseo-agent-superpowers) is a Paseo plugin that does all of the below with one click — account slots with login status, provider wiring, health checks, and a universal MCP manager across Claude Code, Codex, Kimi, and Grok. agent-auth is the CLI underneath it; each works without the other.
+
 **1. Create and log in your slots** (see Quickstart), then grab each slot's exact path:
 
 ```sh
@@ -138,6 +140,15 @@ agent-auth remove <prov> <email> delete a slot and its login
 agent-auth sync                  copy MCP servers + project trust from primaries into slots
 agent-auth doctor                sanity checks
 ```
+
+## Headless servers (Ubuntu, VPS, containers)
+
+agent-auth itself is just bash + python3 and runs anywhere. The only interactive part is each account's one-time browser OAuth:
+
+- `claude auth login` prints a URL you can open in any browser (your laptop) and paste the code back into the SSH session.
+- `codex login` listens on localhost during the flow — forward it once: `ssh -L 1455:localhost:1455 you@server`, then open the printed URL locally.
+
+After that one-time login per slot, tokens refresh in place unattended — servers, cron agents, and orchestrator daemons keep working without a browser ever again.
 
 ## Troubleshooting
 
