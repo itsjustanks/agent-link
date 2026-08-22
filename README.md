@@ -126,7 +126,7 @@ agent-auth cooldown claude you@work.com clear
 
 An explicitly set `CLAUDE_CONFIG_DIR` / `CODEX_HOME` always wins, so `agent-auth run`, per-account shims, and pinned providers keep working exactly as before.
 
-`agent-auth auto` prints a ready-to-paste Paseo provider snippet — one `Claude (Agent Auth)` provider that spreads agents across every account you own.
+`agent-auth auto` prints a ready-to-paste Paseo provider snippet — one `Claude (Dynamic Agent Auth)` provider that spreads agents across every account you own.
 
 > Two notes: run `agent-auth auto` from your **installed** copy (e.g. `~/.local/bin/agent-auth`) — each launcher records the path of the agent-auth that created it, so generating them from a temporary clone ties them to that clone. If that path ever disappears the launcher simply falls back to your primary account rather than failing.
 >

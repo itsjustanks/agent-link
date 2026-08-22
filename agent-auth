@@ -437,12 +437,12 @@ Paseo — ~/.paseo/config.json under agents.providers (restart the daemon after)
 
   "claude-auto": {
     "extends": "claude",
-    "label": "Claude (Agent Auth)",
+    "label": "Claude (Dynamic Agent Auth)",
     "command": ["$SHIM_BIN/claude-auto"]
   },
   "codex-auto": {
     "extends": "codex",
-    "label": "Codex (Agent Auth)",
+    "label": "Codex (Dynamic Agent Auth)",
     "command": ["$SHIM_BIN/codex-auto"]
   }
 
