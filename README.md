@@ -38,7 +38,9 @@ If you already used the tool as `agent-auth`, keep that name working:
 ln -sf agent-link ~/.local/bin/agent-auth
 ```
 
-Existing setups keep working untouched: `~/.agent-auth` is still read if `~/.agent-link` does not exist, and `AGENT_AUTH_HOME` is still honoured.
+Existing setups keep working untouched: agent-link uses whichever home directory already holds your accounts (`~/.agent-auth` from before the rename, or `~/.agent-link`), and both `AGENT_AUTH_HOME` and `AGENT_LINK_HOME` are honoured.
+
+> **Do not move or rename your accounts directory.** Claude Code binds each login to the literal config-dir path, so moving it silently logs out every Claude account (Codex survives, since its credentials are files inside the folder). If you must move it, plan on `agent-link login all` afterwards. This is also why routing uses a launcher rather than a symlink.
 
 Make sure `~/.local/bin` is on your `PATH`. To update, run the same curl again. To uninstall, delete that file (and `~/.agent-link` if you want the slots gone too).
 

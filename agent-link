@@ -19,14 +19,19 @@
 set -u
 
 VERSION="0.3.0"
-# Home dir: new name first, then the pre-0.3 name and env var so existing
-# installs keep working untouched.
+# Home dir. Prefer whichever location actually holds accounts — Claude binds
+# credentials to the literal config-dir path, so an existing install must keep
+# using the directory its logins were created under, whatever it is called.
+aa_has_accounts() { [ -n "$(ls -A "$1/accounts/claude" "$1/accounts/codex" 2>/dev/null)" ]; }
 if [ -n "${AGENT_LINK_HOME:-}" ]; then ROOT="$AGENT_LINK_HOME"
 elif [ -n "${AGENT_AUTH_HOME:-}" ]; then ROOT="$AGENT_AUTH_HOME"
+elif aa_has_accounts "$HOME/.agent-link"; then ROOT="$HOME/.agent-link"
+elif aa_has_accounts "$HOME/.agent-auth"; then ROOT="$HOME/.agent-auth"
 elif [ -d "$HOME/.agent-link" ]; then ROOT="$HOME/.agent-link"
-elif [ -d "$HOME/.agent-link" ]; then ROOT="$HOME/.agent-link"
+elif [ -d "$HOME/.agent-auth" ]; then ROOT="$HOME/.agent-auth"
 else ROOT="$HOME/.agent-link"
 fi
+
 ACCOUNTS="$ROOT/accounts"
 SHIM_BIN="$ROOT/bin"
 STATE="$ROOT/state"
