@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# agent-auth — multi-account manager for AI coding CLIs (Claude Code, OpenAI Codex).
+# agent-link — multi-account manager for AI coding CLIs (Claude Code, OpenAI Codex).
 #
 # Every account lives in its own credential slot (a folder named by the account
 # email). Slots are used two ways, at the same time if you like:
@@ -7,7 +7,7 @@
 #   PARALLEL  each slot is independently usable (shims like `claude-2`, or env
 #             vars for orchestrators such as Paseo) — N accounts, N quota pools,
 #             all live at once.
-#   SWITCH    `agent-auth use claude you@work.com` re-routes the plain `claude`
+#   SWITCH    `agent-link use claude you@work.com` re-routes the plain `claude`
 #             command to that slot via a pointer file. No credentials are ever
 #             copied, backed up, or restored — every slot's OAuth tokens refresh
 #             in place, so nothing decays and nothing gets logged out. Your
@@ -18,8 +18,15 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.2.0"
-ROOT="${AGENT_AUTH_HOME:-$HOME/.agent-auth}"
+VERSION="0.3.0"
+# Home dir: new name first, then the pre-0.3 name and env var so existing
+# installs keep working untouched.
+if [ -n "${AGENT_LINK_HOME:-}" ]; then ROOT="$AGENT_LINK_HOME"
+elif [ -n "${AGENT_AUTH_HOME:-}" ]; then ROOT="$AGENT_AUTH_HOME"
+elif [ -d "$HOME/.agent-link" ]; then ROOT="$HOME/.agent-link"
+elif [ -d "$HOME/.agent-link" ]; then ROOT="$HOME/.agent-link"
+else ROOT="$HOME/.agent-link"
+fi
 ACCOUNTS="$ROOT/accounts"
 SHIM_BIN="$ROOT/bin"
 STATE="$ROOT/state"
@@ -218,7 +225,7 @@ slot_check() { # $1 provider, $2 email, $3 index
   fi
   got="$(prov_email "$1" "$dir")"
   if [ -n "$got" ] && [ "$got" != "$2" ]; then
-    printf '  [!] %s-%s  %s  — logged in as %s (WRONG ACCOUNT — rerun: agent-auth login %s %s)\n' \
+    printf '  [!] %s-%s  %s  — logged in as %s (WRONG ACCOUNT — rerun: agent-link login %s %s)\n' \
       "$1" "$3" "$2" "$got" "$1" "$2"
     return 1
   fi
@@ -313,7 +320,7 @@ cmd_status() {
 }
 
 cmd_add() { # provider email
-  prov_valid "${1:-}" || { echo "usage: agent-auth add <claude|codex> <email>" >&2; return 1; }
+  prov_valid "${1:-}" || { echo "usage: agent-link add <claude|codex> <email>" >&2; return 1; }
   valid_account "${2:-}" || { echo "invalid account name: '${2:-}'" >&2; return 1; }
   slot_login "$1" "$2"
 }
@@ -333,7 +340,7 @@ cmd_login() { # [provider] [email|all]
     claude|codex)
       p="$1"
       if [ -n "${2:-}" ] && [ "${2:-}" != all ]; then
-        [ -d "$(slot_dir "$p" "$2")" ] || { echo "no $p slot for '$2' — use: agent-auth add $p $2" >&2; return 1; }
+        [ -d "$(slot_dir "$p" "$2")" ] || { echo "no $p slot for '$2' — use: agent-link add $p $2" >&2; return 1; }
         slot_login "$p" "$2"
       else
         i=0
@@ -355,9 +362,9 @@ cmd_login() { # [provider] [email|all]
 }
 
 cmd_use() { # provider email|primary|<number>
-  prov_valid "${1:-}" || { echo "usage: agent-auth use <claude|codex> <email|primary|N>" >&2; return 1; }
+  prov_valid "${1:-}" || { echo "usage: agent-link use <claude|codex> <email|primary|N>" >&2; return 1; }
   local p="$1" target="${2:-}" e i
-  [ -n "$target" ] || { echo "usage: agent-auth use <claude|codex> <email|primary|N>" >&2; return 1; }
+  [ -n "$target" ] || { echo "usage: agent-link use <claude|codex> <email|primary|N>" >&2; return 1; }
   if [ "$target" != primary ] && ! [ -d "$(slot_dir "$p" "$target")" ]; then
     # allow numeric selection
     if echo "$target" | grep -q '^[0-9][0-9]*$'; then
@@ -373,7 +380,7 @@ cmd_use() { # provider email|primary|<number>
   echo "$target" > "$(route_file "$p")"
   echo "plain \`$p\` now routes to: $target (new processes only; running ones are unaffected)"
   if [ ! -x "$SHIM_BIN/$p" ]; then
-    echo "note: routing shim not installed yet — run: agent-auth route enable"
+    echo "note: routing shim not installed yet — run: agent-link route enable"
   fi
 }
 
@@ -382,9 +389,9 @@ write_router_shim() { # $1 provider
   mkdir -p "$SHIM_BIN"
   cat > "$SHIM_BIN/$p" <<EOF
 #!/usr/bin/env bash
-# agent-auth router shim — managed by \`agent-auth route\`. Do not edit.
+# agent-link router shim — managed by \`agent-link route\`. Do not edit.
 here="\$(cd "\$(dirname "\$0")" && pwd)"
-aa_root="\${AGENT_AUTH_HOME:-\$HOME/.agent-auth}"
+aa_root="\${AGENT_LINK_HOME:-\${AGENT_AUTH_HOME:-\$HOME/.agent-link}}"
 target="\$(cat "\$aa_root/state/route-$p" 2>/dev/null || true)"
 real=""
 old_ifs="\$IFS"; IFS=:
@@ -394,9 +401,9 @@ for d in \$PATH; do
   if [ -x "\$d/$p" ] && [ ! "\$d/$p" -ef "\$here/$p" ]; then real="\$d/$p"; break; fi
 done
 IFS="\$old_ifs"
-[ -n "\$real" ] || { echo "agent-auth: real '$p' binary not found in PATH" >&2; exit 127; }
+[ -n "\$real" ] || { echo "agent-link: real '$p' binary not found in PATH" >&2; exit 127; }
 # An explicitly inherited value always wins: otherwise this shim would rewrite
-# the env of \`agent-auth add/run/env\` and send a login into the routed slot.
+# the env of \`agent-link add/run/env\` and send a login into the routed slot.
 if [ -z "\${$(prov_env_var "$p"):-}" ] && [ -n "\$target" ] && [ "\$target" != "primary" ]; then
   export $(prov_env_var "$p")="\$aa_root/accounts/$p/\$target"
 fi
@@ -415,7 +422,7 @@ cmd_route() { # enable|disable|status
       echo "Put them FIRST in PATH by adding this to your shell profile:"
       echo "  export PATH=\"$SHIM_BIN:\$PATH\""
       echo
-      echo "Then: agent-auth use claude <email>   # or 'primary' to route back"
+      echo "Then: agent-link use claude <email>   # or 'primary' to route back"
       ;;
     disable)
       for p in $PROVIDERS; do rm -f "$SHIM_BIN/$p"; done
@@ -449,12 +456,12 @@ write_auto_launcher() { # $1 provider — one command that routes to a live acco
   mkdir -p "$SHIM_BIN"
   cat > "$SHIM_BIN/$p-auto" <<EOF
 #!/usr/bin/env bash
-# agent-auth auto-routing launcher for $p — managed by \`agent-auth auto\`.
+# agent-link auto-routing launcher for $p — managed by \`agent-link auto\`.
 # Picks a logged-in, non-cooled-down account at launch and execs the real CLI.
 # Point one editor/orchestrator provider at this file instead of picking
 # accounts by hand. Running processes are never re-routed.
 here="\$(cd "\$(dirname "\$0")" && pwd)"
-aa_root="\${AGENT_AUTH_HOME:-\$HOME/.agent-auth}"
+aa_root="\${AGENT_LINK_HOME:-\${AGENT_AUTH_HOME:-\$HOME/.agent-link}}"
 real=""
 old_ifs="\$IFS"; IFS=:
 for d in \$PATH; do
@@ -487,12 +494,12 @@ Paseo — ~/.paseo/config.json under agents.providers (restart the daemon after)
 
   "claude-auto": {
     "extends": "claude",
-    "label": "Claude (Dynamic Agent Auth)",
+    "label": "Claude (Dynamic Agent Link)",
     "command": ["$SHIM_BIN/claude-auto"]
   },
   "codex-auto": {
     "extends": "codex",
-    "label": "Codex (Dynamic Agent Auth)",
+    "label": "Codex (Dynamic Agent Link)",
     "command": ["$SHIM_BIN/codex-auto"]
   }
 
@@ -503,8 +510,8 @@ EOF
 
 
 # Run a provider's real CLI with dynamic routing applied:
-#   agent-auth claude          -> Claude Code on the next account in rotation
-#   agent-auth codex -m ...    -> args pass straight through
+#   agent-link claude          -> Claude Code on the next account in rotation
+#   agent-link codex -m ...    -> args pass straight through
 # An inherited CLAUDE_CONFIG_DIR/CODEX_HOME still wins, and if no account is
 # available it simply runs your primary login.
 cmd_exec_auto() { # $1 provider, rest = args for the real CLI
@@ -528,13 +535,13 @@ cmd_exec_auto() { # $1 provider, rest = args for the real CLI
 }
 
 cmd_pick() { # provider — print the account to use next (used by the launchers)
-  prov_valid "${1:-}" || { echo "usage: agent-auth pick <claude|codex>" >&2; return 1; }
+  prov_valid "${1:-}" || { echo "usage: agent-link pick <claude|codex>" >&2; return 1; }
   pick_slot "$1"
 }
 
 cmd_cooldown() { # provider email minutes — park an exhausted account
   prov_valid "${1:-}" && valid_account "${2:-}" || {
-    echo "usage: agent-auth cooldown <claude|codex> <email> [minutes|clear]" >&2; return 1; }
+    echo "usage: agent-link cooldown <claude|codex> <email> [minutes|clear]" >&2; return 1; }
   local p="$1" e="$2" arg="${3:-180}"
   mkdir -p "$(pools_dir)"
   if [ "$arg" = clear ]; then
@@ -568,7 +575,7 @@ cmd_pools() { # show what auto-routing sees
       fi
     done
   done
-  [ -x "$SHIM_BIN/claude-auto" ] || echo "(no auto launchers yet — run: agent-auth auto)"
+  [ -x "$SHIM_BIN/claude-auto" ] || echo "(no auto launchers yet — run: agent-link auto)"
   return 0
 }
 
@@ -585,7 +592,7 @@ cmd_shims() { # numbered per-slot shims: claude-1, codex-2, ...
       i=$((i+1))
       cat > "$SHIM_BIN/$p-$i" <<EOF
 #!/usr/bin/env bash
-# agent-auth slot shim: $p account $e — managed by \`agent-auth shims\`.
+# agent-link slot shim: $p account $e — managed by \`agent-link shims\`.
 here="\$(cd "\$(dirname "\$0")" && pwd)"
 real=""
 old_ifs="\$IFS"; IFS=:
@@ -595,8 +602,8 @@ for d in \$PATH; do
   if [ -x "\$d/$p" ] && [ ! "\$d/$p" -ef "\$here/$p" ]; then real="\$d/$p"; break; fi
 done
 IFS="\$old_ifs"
-[ -n "\$real" ] || { echo "agent-auth: real '$p' binary not found in PATH" >&2; exit 127; }
-export $env_var="\${AGENT_AUTH_HOME:-\$HOME/.agent-auth}/accounts/$p/$e"
+[ -n "\$real" ] || { echo "agent-link: real '$p' binary not found in PATH" >&2; exit 127; }
+export $env_var="\${AGENT_AUTH_HOME:-\$HOME/.agent-link}/accounts/$p/$e"
 exec "\$real" "\$@"
 EOF
       chmod +x "$SHIM_BIN/$p-$i"
@@ -611,13 +618,13 @@ EOF
 }
 
 cmd_env() { # provider email — print eval-able export
-  prov_valid "${1:-}" && valid_account "${2:-}" || { echo "usage: agent-auth env <claude|codex> <email>" >&2; return 1; }
+  prov_valid "${1:-}" && valid_account "${2:-}" || { echo "usage: agent-link env <claude|codex> <email>" >&2; return 1; }
   [ -d "$(slot_dir "$1" "$2")" ] || { echo "no $1 slot '$2'" >&2; return 1; }
   echo "export $(prov_env_var "$1")=\"$(slot_dir "$1" "$2")\""
 }
 
 cmd_run() { # provider email [cmd...]
-  prov_valid "${1:-}" && valid_account "${2:-}" || { echo "usage: agent-auth run <claude|codex> <email> [command...]" >&2; return 1; }
+  prov_valid "${1:-}" && valid_account "${2:-}" || { echo "usage: agent-link run <claude|codex> <email> [command...]" >&2; return 1; }
   local p="$1" e="$2" dir
   dir="$(slot_dir "$p" "$e")"
   [ -d "$dir" ] || { echo "no $p slot '$e'" >&2; return 1; }
@@ -627,7 +634,7 @@ cmd_run() { # provider email [cmd...]
 }
 
 cmd_remove() { # provider email — delete a slot (its credentials die with it)
-  prov_valid "${1:-}" || { echo "usage: agent-auth remove <claude|codex> <email>" >&2; return 1; }
+  prov_valid "${1:-}" || { echo "usage: agent-link remove <claude|codex> <email>" >&2; return 1; }
   # Never let a path fragment through: this function deletes a directory.
   valid_account "${2:-}" || { echo "invalid account name: '${2:-}'" >&2; return 1; }
   local p="$1" e="$2" dir a
@@ -738,7 +745,7 @@ cmd_doctor() {
   fi
   if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
     echo "[!] CLAUDE_CONFIG_DIR is set globally in this shell ($CLAUDE_CONFIG_DIR)."
-    echo "    That re-points your PRIMARY claude. agent-auth never needs this set globally."
+    echo "    That re-points your PRIMARY claude. agent-link never needs this set globally."
     ok=1
   fi
   for d in "$ACCOUNTS/codex"/*/; do
@@ -755,7 +762,7 @@ cmd_interactive() {
   local choice p e n
   while :; do
     printf '
-  %sagent-auth %s%s   %s%s%s
+  %sagent-link %s%s   %s%s%s
 ' "$C_BOLD" "$VERSION" "$C_OFF" "$C_DIM" "$ROOT" "$C_OFF"
     cmd_status
     echo
@@ -815,28 +822,28 @@ cmd_interactive() {
 
 usage() {
   cat <<EOF
-agent-auth $VERSION — multi-account manager for AI coding CLIs (claude, codex)
+agent-link $VERSION — multi-account manager for AI coding CLIs (claude, codex)
 
 usage:
-  agent-auth                       interactive mode
-  agent-auth status                show every account slot and where routing points
-  agent-auth add <prov> <email>    create a slot and log it in
-  agent-auth login [prov] [email|all]   (re)login slots that need it
-  agent-auth use <prov> <email|N|primary>  route plain \`claude\`/\`codex\` to a slot
-  agent-auth route enable|disable|status   manage the routing shims
-  agent-auth shims                 write numbered shims: claude-1, claude-2, codex-1 ...
-  agent-auth auto                  write auto-routing launchers (one provider, many accounts)
-  agent-auth pools                 show what auto-routing sees (available / cooling down)
-  agent-auth cooldown <prov> <email> [min|clear]   park an exhausted account
-  agent-auth env <prov> <email>    print an eval-able export for one slot
-  agent-auth run <prov> <email> [cmd...]   run a command under a slot's account
-  agent-auth claude [args...]      run Claude Code on the next account in rotation
-  agent-auth codex  [args...]      same for Codex
-  agent-auth remove <prov> <email> delete a slot and its login
-  agent-auth sync                  copy MCP servers + project trust from primaries into slots
-  agent-auth doctor                sanity checks
+  agent-link                       interactive mode
+  agent-link status                show every account slot and where routing points
+  agent-link add <prov> <email>    create a slot and log it in
+  agent-link login [prov] [email|all]   (re)login slots that need it
+  agent-link use <prov> <email|N|primary>  route plain \`claude\`/\`codex\` to a slot
+  agent-link route enable|disable|status   manage the routing shims
+  agent-link shims                 write numbered shims: claude-1, claude-2, codex-1 ...
+  agent-link auto                  write auto-routing launchers (one provider, many accounts)
+  agent-link pools                 show what auto-routing sees (available / cooling down)
+  agent-link cooldown <prov> <email> [min|clear]   park an exhausted account
+  agent-link env <prov> <email>    print an eval-able export for one slot
+  agent-link run <prov> <email> [cmd...]   run a command under a slot's account
+  agent-link claude [args...]      run Claude Code on the next account in rotation
+  agent-link codex  [args...]      same for Codex
+  agent-link remove <prov> <email> delete a slot and its login
+  agent-link sync                  copy MCP servers + project trust from primaries into slots
+  agent-link doctor                sanity checks
 
-slots live in \$AGENT_AUTH_HOME (default ~/.agent-auth), one folder per account email.
+slots live in \$AGENT_AUTH_HOME (default ~/.agent-link), one folder per account email.
 Your primary ~/.claude and ~/.codex are never modified.
 EOF
 }
