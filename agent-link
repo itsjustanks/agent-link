@@ -396,7 +396,7 @@ write_router_shim() { # $1 provider
 #!/usr/bin/env bash
 # agent-link router shim — managed by \`agent-link route\`. Do not edit.
 here="\$(cd "\$(dirname "\$0")" && pwd)"
-aa_root="\${AGENT_LINK_HOME:-\${AGENT_AUTH_HOME:-\$HOME/.agent-link}}"
+aa_root="\${AGENT_LINK_HOME:-\${AGENT_AUTH_HOME:-$ROOT}}"
 target="\$(cat "\$aa_root/state/route-$p" 2>/dev/null || true)"
 real=""
 old_ifs="\$IFS"; IFS=:
@@ -466,7 +466,7 @@ write_auto_launcher() { # $1 provider — one command that routes to a live acco
 # Point one editor/orchestrator provider at this file instead of picking
 # accounts by hand. Running processes are never re-routed.
 here="\$(cd "\$(dirname "\$0")" && pwd)"
-aa_root="\${AGENT_LINK_HOME:-\${AGENT_AUTH_HOME:-\$HOME/.agent-link}}"
+aa_root="\${AGENT_LINK_HOME:-\${AGENT_AUTH_HOME:-$ROOT}}"
 real=""
 old_ifs="\$IFS"; IFS=:
 for d in \$PATH; do
@@ -608,7 +608,7 @@ for d in \$PATH; do
 done
 IFS="\$old_ifs"
 [ -n "\$real" ] || { echo "agent-link: real '$p' binary not found in PATH" >&2; exit 127; }
-export $env_var="\${AGENT_AUTH_HOME:-\$HOME/.agent-link}/accounts/$p/$e"
+export $env_var="\${AGENT_LINK_HOME:-\${AGENT_AUTH_HOME:-$ROOT}}/accounts/$p/$e"
 exec "\$real" "\$@"
 EOF
       chmod +x "$SHIM_BIN/$p-$i"
