@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 ROOT="${AGENT_AUTH_HOME:-$HOME/.agent-auth}"
 ACCOUNTS="$ROOT/accounts"
 SHIM_BIN="$ROOT/bin"
@@ -246,18 +246,68 @@ slot_login() { # $1 provider, $2 email
 
 # ---------------------------------------------------------------- commands
 
+# ---------------------------------------------------------------- presentation
+
+# Colour only for a real terminal, and never when NO_COLOR is set.
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != dumb ]; then
+  C_OFF=$'\033[0m'; C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'
+  C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'; C_RED=$'\033[31m'; C_CYAN=$'\033[36m'
+else
+  C_OFF=""; C_BOLD=""; C_DIM=""; C_GREEN=""; C_YELLOW=""; C_RED=""; C_CYAN=""
+fi
+
+# One place that knows how an account should look: dot colour + words.
+slot_state() { # $1 provider, $2 email -> "dot|state|note"
+  local dir got until now last mins
+  dir="$(slot_dir "$1" "$2")"
+  if ! prov_logged_in "$1" "$dir"; then
+    printf '%s|%s|%s' "${C_YELLOW}○${C_OFF}" "not logged in" "run 'l' to log in"
+    return
+  fi
+  got="$(prov_email "$1" "$dir")"
+  if [ -n "$got" ] && [ "$got" != "$2" ]; then
+    printf '%s|%s|%s' "${C_RED}●${C_OFF}" "WRONG ACCOUNT" "signed in as $got"
+    return
+  fi
+  now="$(date +%s)"
+  until="$(cat "$(pools_dir)/cooldown-$1-$2" 2>/dev/null || echo 0)"
+  last="$(cat "$(pools_dir)/last-$1-$2" 2>/dev/null || echo 0)"
+  if [ "$until" -gt "$now" ]; then
+    printf '%s|%s|%s' "${C_RED}●${C_OFF}" "logged in" "parked $(( (until - now + 59) / 60 ))m — routing skips it"
+    return
+  fi
+  if [ "$last" -gt 0 ]; then
+    mins=$(( (now - last) / 60 ))
+    printf '%s|%s|%s' "${C_GREEN}●${C_OFF}" "logged in" "in rotation · used ${mins}m ago"
+  else
+    printf '%s|%s|%s' "${C_GREEN}●${C_OFF}" "logged in" "in rotation"
+  fi
+}
+
 cmd_status() {
-  local p e i pointer
+  local p e i pointer state dot words note auto right pad
   for p in $PROVIDERS; do
     pointer="primary"
     [ -f "$(route_file "$p")" ] && pointer="$(cat "$(route_file "$p")")"
-    printf '%s  (plain `%s` routes to: %s)\n' "$p" "$p" "$pointer"
+    echo
+    right="plain \`$p\` → $pointer"
+    pad=$(( 60 - ${#p} - ${#right} )); [ "$pad" -lt 2 ] && pad=2
+    printf '  %s%s%s%*s%s%s%s\n' "$C_BOLD" "$(echo "$p" | tr '[:lower:]' '[:upper:]')" "$C_OFF" \
+      "$pad" "" "$C_DIM" "$right" "$C_OFF"
     i=0
     for e in $(slot_list "$p"); do
       i=$((i+1))
-      slot_check "$p" "$e" "$i" || true
+      state="$(slot_state "$p" "$e")"
+      dot="${state%%|*}"; words="$(echo "$state" | cut -d'|' -f2)"; note="${state##*|}"
+      printf '    %s %-30s %-14s %s%s%s\n' "$dot" "$e" "$words" "$C_DIM" "$note" "$C_OFF"
     done
-    [ "$i" = 0 ] && echo "  (no accounts — add one: agent-auth add $p you@example.com)"
+    [ "$i" = 0 ] && printf '    %sno accounts yet — press %sa%s to add one%s\n' "$C_DIM" "$C_BOLD" "$C_DIM" "$C_OFF"
+    if [ -x "$SHIM_BIN/$p-auto" ]; then
+      auto="${C_GREEN}ready${C_OFF} ${C_DIM}($SHIM_BIN/$p-auto)${C_OFF}"
+    else
+      auto="${C_DIM}not set up — press d${C_OFF}"
+    fi
+    printf '    %sdynamic routing:%s %b\n' "$C_DIM" "$C_OFF" "$auto"
   done
   return 0
 }
@@ -678,43 +728,61 @@ cmd_doctor() {
 cmd_interactive() {
   local choice p e n
   while :; do
-    echo
-    echo "agent-auth $VERSION — accounts under $ACCOUNTS"
-    echo "─────────────────────────────────────────────"
+    printf '
+  %sagent-auth %s%s   %s%s%s
+' "$C_BOLD" "$VERSION" "$C_OFF" "$C_DIM" "$ROOT" "$C_OFF"
     cmd_status
     echo
-    echo "  1) add an account          5) write numbered shims (claude-1, ...)"
-    echo "  2) login pending accounts  6) sync MCP servers + trust into slots"
-    echo "  3) switch active account   7) remove an account"
-    echo "  4) route plain commands    8) doctor"
-    echo "  q) quit"
-    printf '> '
+    printf '  %sACCOUNTS%s  a %sadd%s · l %slog in what needs it%s · r %sremove%s
+' \
+      "$C_BOLD" "$C_OFF" "$C_DIM" "$C_OFF" "$C_DIM" "$C_OFF" "$C_DIM" "$C_OFF"
+    printf '  %sROUTING%s   d %sdynamic router%s · u %spin plain command%s · s %snumbered shims%s
+' \
+      "$C_BOLD" "$C_OFF" "$C_DIM" "$C_OFF" "$C_DIM" "$C_OFF" "$C_DIM" "$C_OFF"
+    printf '  %sPOOLS%s     p %spark an account%s · k %sunpark%s
+' \
+      "$C_BOLD" "$C_OFF" "$C_DIM" "$C_OFF" "$C_DIM" "$C_OFF"
+    printf '  %sUPKEEP%s    y %ssync MCP + trust%s · ? %sdoctor%s · q %squit%s
+' \
+      "$C_BOLD" "$C_OFF" "$C_DIM" "$C_OFF" "$C_DIM" "$C_OFF" "$C_DIM" "$C_OFF"
+    printf '  %s> %s' "$C_CYAN" "$C_OFF"
     read -r choice || return 0
     case "$choice" in
-      1)
-        printf 'provider (claude/codex): '; read -r p
-        printf 'account email: '; read -r e
+      a|A)
+        printf '  provider (claude/codex): '; read -r p
+        printf '  account email: '; read -r e
         cmd_add "$p" "$e" || true
         ;;
-      2) cmd_login all || true ;;
-      3)
-        printf 'provider (claude/codex): '; read -r p
-        printf 'route to (email, number, or "primary"): '; read -r n
-        cmd_use "$p" "$n" || true
-        ;;
-      4) cmd_route enable ;;
-      5) cmd_shims ;;
-      6) cmd_sync || true ;;
-      7)
-        printf 'provider (claude/codex): '; read -r p
-        printf 'account email: '; read -r e
+      l|L) cmd_login all || true ;;
+      r|R)
+        printf '  provider (claude/codex): '; read -r p
+        printf '  account email: '; read -r e
         cmd_remove "$p" "$e" || true
         ;;
-      8) cmd_doctor || true ;;
-      9) cmd_auto ;;
-      0) cmd_pools ;;
+      d|D) cmd_auto ;;
+      u|U)
+        printf '  provider (claude/codex): '; read -r p
+        printf '  pin plain command to (email, number, or "primary"): '; read -r n
+        cmd_use "$p" "$n" || true
+        ;;
+      s|S) cmd_shims ;;
+      p|P)
+        printf '  provider (claude/codex): '; read -r p
+        printf '  account email: '; read -r e
+        printf '  minutes [180]: '; read -r n
+        cmd_cooldown "$p" "$e" "${n:-180}" || true
+        ;;
+      k|K)
+        printf '  provider (claude/codex): '; read -r p
+        printf '  account email: '; read -r e
+        cmd_cooldown "$p" "$e" clear || true
+        ;;
+      y|Y) cmd_sync || true ;;
+      "?"|h|H) cmd_doctor || true ;;
       q|Q|quit|exit) return 0 ;;
-      *) echo "?" ;;
+      "") ;;
+      *) printf '  %sunknown key: %s%s
+' "$C_DIM" "$choice" "$C_OFF" ;;
     esac
   done
 }

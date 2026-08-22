@@ -31,8 +31,25 @@ cp agent-auth/agent-auth ~/.local/bin/ && chmod +x ~/.local/bin/agent-auth
 ## Quickstart
 
 ```sh
-agent-auth                 # interactive mode — walks you through everything
+agent-auth                 # interactive dashboard — walks you through everything
 ```
+
+It opens on a live view of every account (logged in · in rotation · parked · wrong account), where the plain `claude`/`codex` command points, and whether dynamic routing is set up — with one-key actions grouped underneath:
+
+```
+  CLAUDE                              plain `claude` → primary
+    ● you@work.com                   logged in      in rotation · used 3m ago
+    ● you@home.com                   logged in      parked 45m — routing skips it
+    ○ new@example.com                not logged in  run 'l' to log in
+    dynamic routing: ready (~/.agent-auth/bin/claude-auto)
+
+  ACCOUNTS  a add · l log in what needs it · r remove
+  ROUTING   d dynamic router · u pin plain command · s numbered shims
+  POOLS     p park an account · k unpark
+  UPKEEP    y sync MCP + trust · ? doctor · q quit
+```
+
+Colour is used when the terminal supports it and skipped under `NO_COLOR` or when piped, so `agent-auth status` stays readable in scripts and CI.
 
 or directly:
 
