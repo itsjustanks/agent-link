@@ -501,6 +501,32 @@ in place of claude.
 EOF
 }
 
+
+# Run a provider's real CLI with dynamic routing applied:
+#   agent-auth claude          -> Claude Code on the next account in rotation
+#   agent-auth codex -m ...    -> args pass straight through
+# An inherited CLAUDE_CONFIG_DIR/CODEX_HOME still wins, and if no account is
+# available it simply runs your primary login.
+cmd_exec_auto() { # $1 provider, rest = args for the real CLI
+  local p="$1" env_var real d slot
+  shift
+  env_var="$(prov_env_var "$p")"
+  real=""
+  local old_ifs="$IFS"; IFS=:
+  for d in $PATH; do
+    [ -n "$d" ] || continue
+    [ "$d" = "$SHIM_BIN" ] && continue
+    if [ -x "$d/$p" ]; then real="$d/$p"; break; fi
+  done
+  IFS="$old_ifs"
+  [ -n "$real" ] || { prov_binary_check "$p"; return 127; }
+  if [ -z "$(eval "printf '%s' \"\${$env_var:-}\"")" ]; then
+    slot="$(pick_slot "$p" 2>/dev/null || true)"
+    [ -n "$slot" ] && export "$env_var=$(slot_dir "$p" "$slot")"
+  fi
+  exec "$real" "$@"
+}
+
 cmd_pick() { # provider — print the account to use next (used by the launchers)
   prov_valid "${1:-}" || { echo "usage: agent-auth pick <claude|codex>" >&2; return 1; }
   pick_slot "$1"
@@ -804,6 +830,8 @@ usage:
   agent-auth cooldown <prov> <email> [min|clear]   park an exhausted account
   agent-auth env <prov> <email>    print an eval-able export for one slot
   agent-auth run <prov> <email> [cmd...]   run a command under a slot's account
+  agent-auth claude [args...]      run Claude Code on the next account in rotation
+  agent-auth codex  [args...]      same for Codex
   agent-auth remove <prov> <email> delete a slot and its login
   agent-auth sync                  copy MCP servers + project trust from primaries into slots
   agent-auth doctor                sanity checks
@@ -832,6 +860,7 @@ main() {
     remove)  shift; cmd_remove "$@" ;;
     sync)    cmd_sync ;;
     doctor)  cmd_doctor ;;
+    claude|codex) cmd_exec_auto "$@" ;;
     version|--version|-v) echo "$VERSION" ;;
     help|--help|-h|*) usage ;;
   esac

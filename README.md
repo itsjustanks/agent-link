@@ -23,10 +23,24 @@ If `claude` only works in your shell through an alias (the old migrate-installer
 
 ## Install
 
+It is a single file with no dependencies beyond bash and python3:
+
+```sh
+mkdir -p ~/.local/bin
+curl -fsSL https://raw.githubusercontent.com/itsjustanks/agent-auth/main/agent-auth -o ~/.local/bin/agent-auth
+chmod +x ~/.local/bin/agent-auth
+agent-auth            # opens the dashboard
+```
+
+Make sure `~/.local/bin` is on your `PATH`. To update, run the same curl again. To uninstall, delete that file (and `~/.agent-auth` if you want the slots gone too).
+
+<details><summary>Prefer git?</summary>
+
 ```sh
 git clone https://github.com/itsjustanks/agent-auth
 cp agent-auth/agent-auth ~/.local/bin/ && chmod +x ~/.local/bin/agent-auth
 ```
+</details>
 
 ## Quickstart
 
@@ -121,7 +135,30 @@ Keep provider **ids** as plain slugs (`claude-work`, not the email — ids trave
 
 **4. Use them.** The new providers show up in Paseo's provider picker with the same models as the builtin — spawn each heavy agent on a different pool. Your builtin `claude`/`codex` providers keep using the primary login, untouched.
 
-The same `env`-var pattern works for any other orchestrator or script runner: anything that lets you set `CLAUDE_CONFIG_DIR`/`CODEX_HOME` per process can target a slot (or wrap it with `agent-auth run`).
+### Any other tool (custom providers, editors, CI)
+
+Anything that lets you configure **a command** or **environment variables** can use agent-auth. Two patterns cover everything:
+
+| You can set… | Use | Result |
+| --- | --- | --- |
+| a command | `~/.agent-auth/bin/claude-auto` | one entry, rotates across all accounts |
+| a command | `~/.agent-auth/bin/claude-1`, `claude-2`, … | one entry pinned to account #N |
+| env vars | `CLAUDE_CONFIG_DIR=~/.agent-auth/accounts/claude/<email>` | pinned to that account |
+| neither | wrap the call in `agent-auth claude …` | rotates across all accounts |
+
+`CODEX_HOME` is the Codex equivalent of `CLAUDE_CONFIG_DIR`. Any of these can be mixed — a rotating entry for bulk work plus a pinned one for a job that must stay on a named account.
+
+## Run any command on the next account
+
+The quickest way to use several accounts without configuring anything:
+
+```sh
+agent-auth claude              # Claude Code on the next account in rotation
+agent-auth codex               # same for Codex
+agent-auth claude -p "hello"   # arguments pass straight through
+```
+
+Each invocation picks the least-recently-used account that is logged in and not parked. If you set `CLAUDE_CONFIG_DIR`/`CODEX_HOME` yourself it is respected, and if no account is available it just runs your primary login.
 
 ## Auto-routing: one provider, all your accounts
 
