@@ -1,0 +1,8 @@
+{
+  "id": "vscode",
+  "title": "VS Code / Cursor",
+  "summary": "Point the editor's Claude or Codex integration at a rotating account",
+  "requires": "code",
+  "kind": "docs-only",
+  "doc": "README.md"
+}

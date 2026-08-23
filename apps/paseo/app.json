@@ -1,0 +1,8 @@
+{
+  "id": "paseo",
+  "title": "Paseo panel",
+  "summary": "Accounts, health, usage and MCP management inside Paseo",
+  "requires": "paseo",
+  "kind": "paseo-plugin",
+  "pluginId": "paseo-agent-superpowers"
+}
