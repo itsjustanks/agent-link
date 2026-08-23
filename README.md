@@ -28,7 +28,15 @@ curl -fsSL https://raw.githubusercontent.com/itsjustanks/agent-link/main/agent-l
 chmod +x ~/.local/bin/agent-link
 ```
 
-Make sure `~/.local/bin` is on your `PATH`. Re-run the curl to update; delete the file to uninstall.
+Make sure `~/.local/bin` is on your `PATH`. Delete the file to uninstall.
+
+**Updating** is one command:
+
+```sh
+agent-link update
+```
+
+It replaces the CLI with the current published version, refreshes the app sources it installs from, and reinstalls whatever apps you already have — the Paseo panel included, so the CLI and its UI never drift apart. (Re-running the curl updates the CLI alone and leaves the panel on its old version.)
 
 You need whichever CLIs you want to manage — [Claude Code](https://claude.com/claude-code) (`npm i -g @anthropic-ai/claude-code`) and/or [Codex](https://github.com/openai/codex) (`npm i -g @openai/codex`). You do not need to be logged into them first.
 
@@ -198,6 +206,7 @@ agent-link env <prov> <email>    eval-able export for one account
 agent-link sync                  copy MCP servers + project trust into accounts
 agent-link remove <prov> <email> delete an account slot and its login
 agent-link app [list|install|remove] [id] [--link]   optional integrations under apps/
+agent-link update                update the CLI, then reinstall the apps you have installed
 agent-link fix [model]           test accounts, rescue stuck chats, resync — one-shot cleanup
 agent-link insights [days]       where work went: sessions, tokens, cache rate, models, refusals
 agent-link probe [prov] [model] [--park]   ask each account to answer on a model
