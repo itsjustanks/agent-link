@@ -152,7 +152,14 @@ Anything that lets you set **a command** or **environment variables** can use ag
 
 `agent-link auto` prints this snippet filled in for your machine. Provider changes apply with `paseo reload`.
 
-> **Prefer a UI?** [paseo-agent-superpowers](https://github.com/itsjustanks/paseo-agent-superpowers) is a Paseo plugin that shows every account with health and usage, wires the router in one click, and manages MCP servers across all of them. agent-link is the CLI underneath; each works without the other.
+> **Prefer a UI?** An optional Paseo panel ships in this repo under [`paseo-plugin/`](paseo-plugin). One command installs it when Paseo is present:
+>
+> ```sh
+> agent-link plugin install      # fetches the panel if you installed by curl
+> agent-link plugin status
+> ```
+>
+> It shows every account with health, usage and MCP state, installs the Dynamic Agent Link provider in one click, and manages MCP servers across all accounts. The CLI never depends on it.
 
 ## Commands
 

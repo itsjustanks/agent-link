@@ -966,6 +966,65 @@ print()
 PY2
 }
 
+# The Paseo panel is an optional companion that ships in this repo. Install it
+# only when Paseo is actually present — the CLI never depends on it.
+REPO_URL="https://github.com/itsjustanks/agent-link"
+
+# Find the plugin source: an explicit path, next to this script, the current
+# directory, a previous checkout — or fetch it. A curl-installed agent-link has
+# no repo beside it, so fetching is the normal path, not a fallback.
+plugin_dir() { # [explicit path]
+  local here d
+  here="$(cd "$(dirname "$0")" && pwd)"
+  for d in "${1:-}" "$PWD/paseo-plugin" "$here/paseo-plugin" "$here/../paseo-plugin" "$ROOT/src/paseo-plugin"; do
+    [ -n "$d" ] && [ -f "$d/paseo-plugin.json" ] && { echo "$d"; return 0; }
+  done
+  command -v git >/dev/null 2>&1 || return 1
+  echo "fetching the panel from $REPO_URL…" >&2
+  rm -rf "$ROOT/src.tmp"
+  if git clone --depth 1 -q "$REPO_URL" "$ROOT/src.tmp" >&2; then
+    rm -rf "$ROOT/src"; mv "$ROOT/src.tmp" "$ROOT/src"
+    [ -f "$ROOT/src/paseo-plugin/paseo-plugin.json" ] && { echo "$ROOT/src/paseo-plugin"; return 0; }
+  fi
+  return 1
+}
+
+cmd_plugin() { # install|status|remove [path]
+  local action="${1:-status}" dir
+  command -v paseo >/dev/null 2>&1 || {
+    echo "Paseo is not installed — the panel is optional and the CLI works without it." >&2
+    return 1
+  }
+  case "$action" in
+    status)
+      paseo plugin ls 2>/dev/null | grep -E 'PLUGIN|paseo-agent-superpowers' || echo "  not installed — run: agent-link plugin install"
+      return 0
+      ;;
+    remove)
+      paseo plugin remove paseo-agent-superpowers && echo "removed (source left in place)"
+      return $?
+      ;;
+    install) ;;
+    *) echo "usage: agent-link plugin [install|status|remove]" >&2; return 1 ;;
+  esac
+  dir="$(plugin_dir "${2:-}")" || {
+    echo "could not find or fetch the plugin source (needs git, or pass a path)" >&2
+    return 1
+  }
+  echo "source: $dir"
+  if [ ! -d "$dir/node_modules" ]; then
+    echo "installing plugin dependencies…"
+    (cd "$dir" && npm install --silent) || { echo "npm install failed" >&2; return 1; }
+  fi
+  (cd "$dir" && npm run --silent typecheck) || { echo "plugin failed to typecheck — not installing" >&2; return 1; }
+  # Re-installing from a new path needs the old registration removed first;
+  # Paseo refuses a duplicate plugin id.
+  if paseo plugin ls 2>/dev/null | grep -q "^paseo-agent-superpowers"; then
+    paseo plugin remove paseo-agent-superpowers >/dev/null 2>&1
+  fi
+  paseo plugin install "$dir" >/dev/null && echo "installed. Open Paseo → Agent Link."
+}
+
 cmd_whoami() { # [provider]
   local p pdir email kind runs nxt
   for p in ${1:-$PROVIDERS}; do
@@ -1325,6 +1384,7 @@ usage:
   agent-link codex  [args...]      same for Codex
   agent-link remove <prov> <email> delete a slot and its login
   agent-link sync                  copy MCP servers + project trust from primaries into slots
+  agent-link plugin [install|status|remove]   the optional Paseo panel that ships with this repo
   agent-link doctor                sanity checks
 
 slots live in \$AGENT_AUTH_HOME (default ~/.agent-link), one folder per account email.
@@ -1347,6 +1407,7 @@ main() {
     handoff) shift; cmd_handoff "$@" ;;
     pools)   cmd_pools ;;
     whoami)  shift; cmd_whoami "$@" ;;
+    plugin)  shift; cmd_plugin "$@" ;;
     insights) shift; cmd_insights "$@" ;;
     rescue)  shift; cmd_rescue "$@" ;;
     probe)   shift; cmd_probe "$@" ;;
