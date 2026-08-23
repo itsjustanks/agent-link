@@ -181,6 +181,11 @@ agent-link shims                 numbered per-account shims (claude-1, …)
 agent-link env <prov> <email>    eval-able export for one account
 agent-link sync                  copy MCP servers + project trust into accounts
 agent-link remove <prov> <email> delete an account slot and its login
+agent-link plugin [install|status|remove]   the optional Paseo panel in paseo-plugin/
+agent-link insights [days]       where work went: sessions, tokens, cache rate, models, refusals
+agent-link probe [prov] [model] [--park]   ask each account to answer on a model
+agent-link rescue [hours] [--go] conversations that hit a limit; --go moves them
+agent-link whoami / next         which account this process uses / what is next
 agent-link doctor                sanity checks
 ```
 

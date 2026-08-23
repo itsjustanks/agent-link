@@ -1308,18 +1308,16 @@ cmd_interactive() {
 ' "$C_BOLD" "$VERSION" "$C_OFF" "$C_DIM" "$ROOT" "$C_OFF"
     cmd_status
     echo
-    printf '  %sACCOUNTS%s  a %sadd%s · l %slog in what needs it%s · r %sremove%s
-' \
+    printf '  %sACCOUNTS%s  a %sadd%s · l %slog in what needs it%s · r %sremove%s\n' \
       "$C_BOLD" "$C_OFF" "$C_DIM" "$C_OFF" "$C_DIM" "$C_OFF" "$C_DIM" "$C_OFF"
-    printf '  %sROUTING%s   d %sdynamic router%s · u %spin plain command%s · s %snumbered shims%s
-' \
+    printf '  %sROUTING%s   d %sdynamic router%s · u %spin plain command%s · s %snumbered shims%s\n' \
       "$C_BOLD" "$C_OFF" "$C_DIM" "$C_OFF" "$C_DIM" "$C_OFF" "$C_DIM" "$C_OFF"
-    printf '  %sPOOLS%s     p %spark an account%s · k %sunpark%s
-' \
+    printf '  %sLIMITS%s    p %spark%s · k %sunpark%s · t %stest a model%s · x %srescue stuck chats%s\n' \
+      "$C_BOLD" "$C_OFF" "$C_DIM" "$C_OFF" "$C_DIM" "$C_OFF" "$C_DIM" "$C_OFF" "$C_DIM" "$C_OFF"
+    printf '  %sINSIGHT%s   i %swhere work went%s · w %swho am I on%s\n' \
       "$C_BOLD" "$C_OFF" "$C_DIM" "$C_OFF" "$C_DIM" "$C_OFF"
-    printf '  %sUPKEEP%s    y %ssync MCP + trust%s · ? %sdoctor%s · q %squit%s
-' \
-      "$C_BOLD" "$C_OFF" "$C_DIM" "$C_OFF" "$C_DIM" "$C_OFF" "$C_DIM" "$C_OFF"
+    printf '  %sUPKEEP%s    y %ssync settings + MCP%s · g %sPaseo panel%s · ? %sdoctor%s · q %squit%s\n' \
+      "$C_BOLD" "$C_OFF" "$C_DIM" "$C_OFF" "$C_DIM" "$C_OFF" "$C_DIM" "$C_OFF" "$C_DIM" "$C_OFF"
     printf '  %s> %s' "$C_CYAN" "$C_OFF"
     read -r choice || return 0
     case "$choice" in
@@ -1353,6 +1351,24 @@ cmd_interactive() {
         cmd_cooldown "$p" "$e" clear || true
         ;;
       y|Y) cmd_sync || true ;;
+      t|T)
+        printf '  model [claude-fable-5]: '; read -r n
+        printf '  park the ones that refuse? [y/N] '; read -r e
+        case "$e" in y|Y) cmd_probe claude "${n:-claude-fable-5}" --park || true ;; *) cmd_probe claude "${n:-claude-fable-5}" || true ;; esac
+        ;;
+      x|X)
+        printf '  look back how many hours? [6] '; read -r n
+        printf '  move them to a healthy account? [y/N] '; read -r e
+        case "$e" in y|Y) cmd_rescue "${n:-6}" --go || true ;; *) cmd_rescue "${n:-6}" || true ;; esac
+        ;;
+      i|I)
+        printf '  days [7]: '; read -r n
+        cmd_insights "${n:-7}" || true
+        ;;
+      w|W) cmd_whoami || true ;;
+      g|G) cmd_plugin "${1:-status}" || true; printf '  install/remove the panel? [i/r/enter to skip] '; read -r e
+        case "$e" in i|I) cmd_plugin install || true ;; r|R) cmd_plugin remove || true ;; esac
+        ;;
       "?"|h|H) cmd_doctor || true ;;
       q|Q|quit|exit) return 0 ;;
       "") ;;
