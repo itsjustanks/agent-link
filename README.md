@@ -196,6 +196,19 @@ An explicitly set `CLAUDE_CONFIG_DIR` / `CODEX_HOME` always wins, so `agent-link
 >
 > And this has to be a launcher, not a symlink: Claude Code keys credentials to the literal config-dir path, so a symlink that swings between accounts reports "logged out".
 
+### Resumes stay on their own account
+
+A conversation is stored inside the account that created it, so resuming it under a different account fails with *"No conversation found with session ID"*. The launchers detect a session id in the arguments (`--resume <id>`, `-r <id>`, `codex resume <id>`) and pin that run to the account that owns the session, instead of rotating.
+
+To deliberately continue a chat on a different account — say the first one ran out of credit:
+
+```sh
+agent-link handoff claude <session-id> you@other.com
+agent-link run claude you@other.com claude --resume <session-id>
+```
+
+That copies the transcript into the other account's store. The CLI re-sends the conversation on resume, so it continues where it left off, billed to the new account from that point.
+
 ## Hot-switch the plain `claude` / `codex` commands
 
 ```sh

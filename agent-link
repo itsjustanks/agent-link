@@ -482,10 +482,41 @@ for d in \$PATH; do
 done
 IFS="\$old_ifs"
 [ -n "\$real" ] || real="$(command -v "$p" 2>/dev/null || echo "$p")"
-# An explicitly inherited value always wins.
-if [ -z "\${$env_var:-}" ] && [ -x "$self" ]; then
-  slot="\$("$self" pick $p 2>/dev/null || true)"
-  [ -n "\$slot" ] && export $env_var="\$aa_root/accounts/$p/\$slot"
+# A resumed session only exists in the account that created it, so routing a
+# resume elsewhere fails with "No conversation found with session ID". Detect a
+# session id in the args and pin to the account that owns it.
+aa_sid=""
+aa_prev=""
+for aa_a in "\$@"; do
+  case "\$aa_a" in
+    --resume=*) aa_sid="\${aa_a#--resume=}" ;;
+    -*) ;;
+    *)
+      case "\$aa_prev" in
+        --resume|-r|resume) aa_sid="\$aa_a" ;;
+      esac
+      ;;
+  esac
+  aa_prev="\$aa_a"
+done
+aa_pinned=""
+if [ -n "\$aa_sid" ]; then
+  for aa_d in "\$aa_root/accounts/$p"/*/; do
+    [ -d "\$aa_d" ] || continue
+    if [ -n "\$(find "\$aa_d" -maxdepth 4 -name "*\$aa_sid*" -print -quit 2>/dev/null)" ]; then
+      aa_pinned="\${aa_d%/}"
+      break
+    fi
+  done
+fi
+# An explicitly inherited value always wins, then a pinned resume, then rotation.
+if [ -z "\${$env_var:-}" ]; then
+  if [ -n "\$aa_pinned" ]; then
+    export $env_var="\$aa_pinned"
+  elif [ -x "$self" ]; then
+    slot="\$("$self" pick $p 2>/dev/null || true)"
+    [ -n "\$slot" ] && export $env_var="\$aa_root/accounts/$p/\$slot"
+  fi
 fi
 exec "\$real" "\$@"
 EOF
@@ -543,6 +574,34 @@ cmd_exec_auto() { # $1 provider, rest = args for the real CLI
     [ -n "$slot" ] && export "$env_var=$(slot_dir "$p" "$slot")"
   fi
   exec "$real" "$@"
+}
+
+# Move a conversation to another account so it can be continued there.
+# Sessions are stored per config dir, so a chat started on account A simply
+# does not exist for account B — this copies the transcript across. The model
+# re-sends the transcript on resume, so the conversation continues; the new
+# account is billed from that point on.
+cmd_handoff() { # $1 provider, $2 session-id, $3 target email
+  prov_valid "${1:-}" || { echo "usage: agent-link handoff <claude|codex> <session-id> <email>" >&2; return 1; }
+  [ -n "${2:-}" ] || { echo "usage: agent-link handoff <claude|codex> <session-id> <email>" >&2; return 1; }
+  valid_account "${3:-}" || { echo "usage: agent-link handoff <claude|codex> <session-id> <email>" >&2; return 1; }
+  local p="$1" sid="$2" target="$3" src="" hit="" rel dest
+  [ -d "$(slot_dir "$p" "$target")" ] || { echo "no $p account '$target'" >&2; return 1; }
+  for d in "$ACCOUNTS/$p"/*/; do
+    [ -d "$d" ] || continue
+    hit="$(find "$d" -maxdepth 4 -name "*$sid*" -print -quit 2>/dev/null)"
+    [ -n "$hit" ] && { src="${d%/}"; break; }
+  done
+  [ -n "$src" ] || { echo "session '$sid' not found in any $p account" >&2; return 1; }
+  [ "$src" = "$(slot_dir "$p" "$target")" ] && { echo "already on $target"; return 0; }
+  rel="${hit#$src/}"
+  dest="$(slot_dir "$p" "$target")/$rel"
+  mkdir -p "$(dirname "$dest")"
+  cp "$hit" "$dest"
+  echo "copied session $sid"
+  echo "  from: $(basename "$src")"
+  echo "    to: $target"
+  echo "continue it with: agent-link run $p $target $p --resume $sid"
 }
 
 cmd_pick() { # provider — print the account to use next (used by the launchers)
@@ -846,6 +905,7 @@ usage:
   agent-link auto                  write auto-routing launchers (one provider, many accounts)
   agent-link pools                 show what auto-routing sees (available / cooling down)
   agent-link cooldown <prov> <email> [min|clear]   park an exhausted account
+  agent-link handoff <prov> <session-id> <email>   move a chat to another account
   agent-link env <prov> <email>    print an eval-able export for one slot
   agent-link run <prov> <email> [cmd...]   run a command under a slot's account
   agent-link claude [args...]      run Claude Code on the next account in rotation
@@ -871,6 +931,7 @@ main() {
     shims)   cmd_shims ;;
     auto)    cmd_auto ;;
     pick)    shift; cmd_pick "$@" ;;
+    handoff) shift; cmd_handoff "$@" ;;
     pools)   cmd_pools ;;
     cooldown) shift; cmd_cooldown "$@" ;;
     env)     shift; cmd_env "$@" ;;
