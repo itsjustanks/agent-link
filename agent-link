@@ -970,59 +970,118 @@ PY2
 # only when Paseo is actually present — the CLI never depends on it.
 REPO_URL="https://github.com/itsjustanks/agent-link"
 
-# Find the plugin source: an explicit path, next to this script, the current
-# directory, a previous checkout — or fetch it. A curl-installed agent-link has
-# no repo beside it, so fetching is the normal path, not a fallback.
-plugin_dir() { # [explicit path]
+# ---------------------------------------------------------------- apps
+#
+# Integrations live in apps/<id>/ with an app.json describing how to install
+# them. Nothing here is required: the CLI works on its own, and an app only
+# appears as installable when the tool it targets is present.
+
+apps_dir() { # find the apps/ directory, fetching the repo if needed
   local here d
   here="$(cd "$(dirname "$0")" && pwd)"
-  for d in "${1:-}" "$PWD/paseo-plugin" "$here/paseo-plugin" "$here/../paseo-plugin" "$ROOT/src/paseo-plugin"; do
-    [ -n "$d" ] && [ -f "$d/paseo-plugin.json" ] && { echo "$d"; return 0; }
+  for d in "$PWD/apps" "$here/apps" "$here/../apps" "$ROOT/src/apps"; do
+    [ -d "$d" ] && { echo "$d"; return 0; }
   done
   command -v git >/dev/null 2>&1 || return 1
-  echo "fetching the panel from $REPO_URL…" >&2
+  echo "fetching integrations from $REPO_URL…" >&2
   rm -rf "$ROOT/src.tmp"
   if git clone --depth 1 -q "$REPO_URL" "$ROOT/src.tmp" >&2; then
     rm -rf "$ROOT/src"; mv "$ROOT/src.tmp" "$ROOT/src"
-    [ -f "$ROOT/src/paseo-plugin/paseo-plugin.json" ] && { echo "$ROOT/src/paseo-plugin"; return 0; }
+    [ -d "$ROOT/src/apps" ] && { echo "$ROOT/src/apps"; return 0; }
   fi
   return 1
 }
 
-cmd_plugin() { # install|status|remove [path]
-  local action="${1:-status}" dir
-  command -v paseo >/dev/null 2>&1 || {
-    echo "Paseo is not installed — the panel is optional and the CLI works without it." >&2
-    return 1
-  }
+app_field() { # $1 app dir, $2 key
+  python3 - "$1/app.json" "$2" <<'PY2'
+import json, sys
+try:
+    print(json.load(open(sys.argv[1])).get(sys.argv[2], "") or "")
+except Exception:
+    print("")
+PY2
+}
+
+app_state() { # $1 app dir -> installed|available|unavailable
+  local req kind pid
+  req="$(app_field "$1" requires)"
+  kind="$(app_field "$1" kind)"
+  [ -n "$req" ] && ! command -v "$req" >/dev/null 2>&1 && { echo unavailable; return; }
+  case "$kind" in
+    paseo-plugin)
+      pid="$(app_field "$1" pluginId)"
+      paseo plugin ls 2>/dev/null | grep -q "^$pid" && echo installed || echo available
+      ;;
+    *) echo available ;;
+  esac
+}
+
+cmd_app() { # list|install|status|remove [id]
+  local action="${1:-list}" id="${2:-}" base d state kind pid
+  base="$(apps_dir)" || { echo "no apps/ directory found and could not fetch it" >&2; return 1; }
   case "$action" in
-    status)
-      paseo plugin ls 2>/dev/null | grep -E 'PLUGIN|paseo-agent-superpowers' || echo "  not installed — run: agent-link plugin install"
+    list|status)
+      for d in "$base"/*/; do
+        [ -f "$d/app.json" ] || continue
+        state="$(app_state "$d")"
+        case "$state" in
+          installed)   printf '  %s●%s %-10s %-34s %sinstalled%s\n' "$C_GREEN" "$C_OFF" "$(app_field "$d" id)" "$(app_field "$d" summary)" "$C_GREEN" "$C_OFF" ;;
+          available)   printf '  %s○%s %-10s %-34s %savailable — agent-link app install %s%s\n' "$C_DIM" "$C_OFF" "$(app_field "$d" id)" "$(app_field "$d" summary)" "$C_DIM" "$(app_field "$d" id)" "$C_OFF" ;;
+          *)           printf '  %s·%s %-10s %-34s %s%s not installed on this machine%s\n' "$C_DIM" "$C_OFF" "$(app_field "$d" id)" "$(app_field "$d" summary)" "$C_DIM" "$(app_field "$d" requires)" "$C_OFF" ;;
+        esac
+      done
       return 0
       ;;
-    remove)
-      paseo plugin remove paseo-agent-superpowers && echo "removed (source left in place)"
-      return $?
+    install|remove) [ -n "$id" ] || { echo "usage: agent-link app $action <id>   (see: agent-link app list)" >&2; return 1; } ;;
+    *) echo "usage: agent-link app [list|install|remove] [id]" >&2; return 1 ;;
+  esac
+  d="$base/$id"
+  [ -f "$d/app.json" ] || { echo "no app called '$id' — try: agent-link app list" >&2; return 1; }
+  kind="$(app_field "$d" kind)"; pid="$(app_field "$d" pluginId)"
+  case "$kind" in
+    paseo-plugin)
+      command -v paseo >/dev/null 2>&1 || { echo "Paseo is not installed — this app is optional." >&2; return 1; }
+      if [ "$action" = remove ]; then
+        paseo plugin remove "$pid" && echo "removed (source left in place)"
+        return $?
+      fi
+      [ -d "$d/node_modules" ] || { echo "installing dependencies…"; (cd "$d" && npm install --silent) || return 1; }
+      (cd "$d" && npm run --silent typecheck) || { echo "app failed to typecheck — not installing" >&2; return 1; }
+      paseo plugin ls 2>/dev/null | grep -q "^$pid" && paseo plugin remove "$pid" >/dev/null 2>&1
+      paseo plugin install "$d" >/dev/null && echo "installed. Open Paseo → Agent Link."
       ;;
-    install) ;;
+    docs-only)
+      [ "$action" = remove ] && { echo "nothing to remove — this app is instructions only"; return 0; }
+      echo; sed 's/^/  /' "$d/$(app_field "$d" doc)"
+      ;;
+    *) echo "unknown app kind: $kind" >&2; return 1 ;;
+  esac
+}
+
+# Back-compat: `agent-link plugin …` still means the Paseo app.
+cmd_plugin() {
+  case "${1:-status}" in
+    status) cmd_app list ;;
+    install) cmd_app install paseo ;;
+    remove) cmd_app remove paseo ;;
     *) echo "usage: agent-link plugin [install|status|remove]" >&2; return 1 ;;
   esac
-  dir="$(plugin_dir "${2:-}")" || {
-    echo "could not find or fetch the plugin source (needs git, or pass a path)" >&2
-    return 1
-  }
-  echo "source: $dir"
-  if [ ! -d "$dir/node_modules" ]; then
-    echo "installing plugin dependencies…"
-    (cd "$dir" && npm install --silent) || { echo "npm install failed" >&2; return 1; }
-  fi
-  (cd "$dir" && npm run --silent typecheck) || { echo "plugin failed to typecheck — not installing" >&2; return 1; }
-  # Re-installing from a new path needs the old registration removed first;
-  # Paseo refuses a duplicate plugin id.
-  if paseo plugin ls 2>/dev/null | grep -q "^paseo-agent-superpowers"; then
-    paseo plugin remove paseo-agent-superpowers >/dev/null 2>&1
-  fi
-  paseo plugin install "$dir" >/dev/null && echo "installed. Open Paseo → Agent Link."
+}
+
+# One key that does the obvious maintenance: sideline accounts that cannot serve
+# your model, move conversations off them, and put every account back in step.
+cmd_fix() { # [model]
+  local model="${1:-}"
+  echo
+  printf '  %s1. testing each account%s\n' "$C_BOLD" "$C_OFF"
+  cmd_probe claude "$model" --park || true
+  printf '  %s2. conversations stopped by a limit%s\n' "$C_BOLD" "$C_OFF"
+  cmd_rescue 6 --go || true
+  printf '  %s3. bringing settings and MCP into line%s\n' "$C_BOLD" "$C_OFF"
+  cmd_sync 2>&1 | sed 's/^/    /'
+  echo
+  printf '  %sdone — current state:%s\n' "$C_BOLD" "$C_OFF"
+  cmd_status
 }
 
 cmd_whoami() { # [provider]
@@ -1301,26 +1360,37 @@ cmd_doctor() {
 }
 
 cmd_interactive() {
-  local choice p e n
+  local choice p e n warn parked blocked
   while :; do
-    printf '
-  %sagent-link %s%s   %s%s%s
-' "$C_BOLD" "$VERSION" "$C_OFF" "$C_DIM" "$ROOT" "$C_OFF"
+    printf '\n  %sagent-link %s%s   %s%s%s\n' "$C_BOLD" "$VERSION" "$C_OFF" "$C_DIM" "$ROOT" "$C_OFF"
     cmd_status
+    # A single line that says whether anything needs you.
+    warn=""
+    parked=$(ls "$(pools_dir)"/cooldown-* 2>/dev/null | wc -l | tr -d ' ')
+    blocked=$(for pr in $PROVIDERS; do for em in $(slot_list "$pr"); do
+      prov_logged_in "$pr" "$(slot_dir "$pr" "$em")" || echo x; done; done | wc -l | tr -d ' ')
+    [ "$parked" != 0 ] && warn="$warn${warn:+ · }$parked parked"
+    [ "$blocked" != 0 ] && warn="$warn${warn:+ · }$blocked need sign-in"
+    if [ -n "$warn" ]; then
+      printf '\n  %s! %s%s  %spress f to sort it out%s\n' "$C_YELLOW" "$warn" "$C_OFF" "$C_DIM" "$C_OFF"
+    else
+      printf '\n  %s✓ every account is signed in and in rotation%s\n' "$C_GREEN" "$C_OFF"
+    fi
     echo
-    printf '  %sACCOUNTS%s  a %sadd%s · l %slog in what needs it%s · r %sremove%s\n' \
-      "$C_BOLD" "$C_OFF" "$C_DIM" "$C_OFF" "$C_DIM" "$C_OFF" "$C_DIM" "$C_OFF"
-    printf '  %sROUTING%s   d %sdynamic router%s · u %spin plain command%s · s %snumbered shims%s\n' \
-      "$C_BOLD" "$C_OFF" "$C_DIM" "$C_OFF" "$C_DIM" "$C_OFF" "$C_DIM" "$C_OFF"
-    printf '  %sLIMITS%s    p %spark%s · k %sunpark%s · t %stest a model%s · x %srescue stuck chats%s\n' \
-      "$C_BOLD" "$C_OFF" "$C_DIM" "$C_OFF" "$C_DIM" "$C_OFF" "$C_DIM" "$C_OFF" "$C_DIM" "$C_OFF"
-    printf '  %sINSIGHT%s   i %swhere work went%s · w %swho am I on%s\n' \
-      "$C_BOLD" "$C_OFF" "$C_DIM" "$C_OFF" "$C_DIM" "$C_OFF"
-    printf '  %sUPKEEP%s    y %ssync settings + MCP%s · g %sPaseo panel%s · ? %sdoctor%s · q %squit%s\n' \
-      "$C_BOLD" "$C_OFF" "$C_DIM" "$C_OFF" "$C_DIM" "$C_OFF" "$C_DIM" "$C_OFF" "$C_DIM" "$C_OFF"
+    printf '  %sf%s %sfix everything%s   %sa%s add   %sl%s log in   %sr%s remove\n' \
+      "$C_CYAN" "$C_OFF" "$C_BOLD" "$C_OFF" "$C_CYAN" "$C_OFF" "$C_CYAN" "$C_OFF" "$C_CYAN" "$C_OFF"
+    printf '  %sd%s router   %su%s pin   %ss%s shims   %sp%s park   %sk%s unpark   %st%s test model   %sx%s rescue\n' \
+      "$C_CYAN" "$C_OFF" "$C_CYAN" "$C_OFF" "$C_CYAN" "$C_OFF" "$C_CYAN" "$C_OFF" "$C_CYAN" "$C_OFF" "$C_CYAN" "$C_OFF" "$C_CYAN" "$C_OFF"
+    printf '  %si%s insights   %sw%s whoami   %sy%s sync   %sg%s apps   %s?%s doctor   %sq%s quit\n' \
+      "$C_CYAN" "$C_OFF" "$C_CYAN" "$C_OFF" "$C_CYAN" "$C_OFF" "$C_CYAN" "$C_OFF" "$C_CYAN" "$C_OFF" "$C_CYAN" "$C_OFF"
     printf '  %s> %s' "$C_CYAN" "$C_OFF"
-    read -r choice || return 0
+    # Single keypress when we have a terminal; fall back to a line otherwise.
+    if [ -t 0 ]; then read -r -n 1 choice; echo; else read -r choice || return 0; fi
     case "$choice" in
+      f|F)
+        printf '  model to test [claude-fable-5]: '; read -r n
+        cmd_fix "${n:-claude-fable-5}" || true
+        ;;
       a|A)
         printf '  provider (claude/codex): '; read -r p
         printf '  account email: '; read -r e
@@ -1341,16 +1411,15 @@ cmd_interactive() {
       s|S) cmd_shims ;;
       p|P)
         printf '  provider (claude/codex): '; read -r p
-        printf '  account email: '; read -r e
+        printf '  account email (or "primary"): '; read -r e
         printf '  minutes [180]: '; read -r n
         cmd_cooldown "$p" "$e" "${n:-180}" || true
         ;;
       k|K)
         printf '  provider (claude/codex): '; read -r p
-        printf '  account email: '; read -r e
+        printf '  account email (or "primary"): '; read -r e
         cmd_cooldown "$p" "$e" clear || true
         ;;
-      y|Y) cmd_sync || true ;;
       t|T)
         printf '  model [claude-fable-5]: '; read -r n
         printf '  park the ones that refuse? [y/N] '; read -r e
@@ -1366,14 +1435,19 @@ cmd_interactive() {
         cmd_insights "${n:-7}" || true
         ;;
       w|W) cmd_whoami || true ;;
-      g|G) cmd_plugin "${1:-status}" || true; printf '  install/remove the panel? [i/r/enter to skip] '; read -r e
-        case "$e" in i|I) cmd_plugin install || true ;; r|R) cmd_plugin remove || true ;; esac
+      y|Y) cmd_sync || true ;;
+      g|G)
+        echo; cmd_app list
+        printf '  install/remove which? [id, or enter to skip] '; read -r n
+        if [ -n "$n" ]; then
+          printf '  (i)nstall or (r)emove? [i] '; read -r e
+          case "$e" in r|R) cmd_app remove "$n" || true ;; *) cmd_app install "$n" || true ;; esac
+        fi
         ;;
-      "?"|h|H) cmd_doctor || true ;;
-      q|Q|quit|exit) return 0 ;;
+      '?'|h|H) cmd_doctor || true ;;
+      q|Q) return 0 ;;
       "") ;;
-      *) printf '  %sunknown key: %s%s
-' "$C_DIM" "$choice" "$C_OFF" ;;
+      *) printf '  %sunknown key: %s%s\n' "$C_DIM" "$choice" "$C_OFF" ;;
     esac
   done
 }
@@ -1400,7 +1474,8 @@ usage:
   agent-link codex  [args...]      same for Codex
   agent-link remove <prov> <email> delete a slot and its login
   agent-link sync                  copy MCP servers + project trust from primaries into slots
-  agent-link plugin [install|status|remove]   the optional Paseo panel that ships with this repo
+  agent-link app [list|install|remove] [id]  optional integrations (Paseo panel, editors)
+  agent-link fix [model]           test accounts, rescue stuck chats, resync — the one-shot cleanup
   agent-link doctor                sanity checks
 
 slots live in \$AGENT_AUTH_HOME (default ~/.agent-link), one folder per account email.
@@ -1424,6 +1499,7 @@ main() {
     pools)   cmd_pools ;;
     whoami)  shift; cmd_whoami "$@" ;;
     plugin)  shift; cmd_plugin "$@" ;;
+    app)     shift; cmd_app "$@" ;;
     insights) shift; cmd_insights "$@" ;;
     rescue)  shift; cmd_rescue "$@" ;;
     probe)   shift; cmd_probe "$@" ;;
@@ -1433,6 +1509,7 @@ main() {
     run)     shift; cmd_run "$@" ;;
     remove)  shift; cmd_remove "$@" ;;
     sync)    cmd_sync ;;
+    fix)     shift; cmd_fix "$@" ;;
     doctor)  cmd_doctor ;;
     claude|codex) cmd_exec_auto "$@" ;;
     version|--version|-v) echo "$VERSION" ;;

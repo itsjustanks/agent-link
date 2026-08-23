@@ -152,14 +152,26 @@ Anything that lets you set **a command** or **environment variables** can use ag
 
 `agent-link auto` prints this snippet filled in for your machine. Provider changes apply with `paseo reload`.
 
-> **Prefer a UI?** An optional Paseo panel ships in this repo under [`paseo-plugin/`](paseo-plugin). One command installs it when Paseo is present:
->
-> ```sh
-> agent-link plugin install      # fetches the panel if you installed by curl
-> agent-link plugin status
-> ```
->
-> It shows every account with health, usage and MCP state, installs the Dynamic Agent Link provider in one click, and manages MCP servers across all accounts. The CLI never depends on it.
+> **Prefer a UI?** Optional integrations live in [`apps/`](apps) — see [Integrations](#integrations) below.
+
+## Integrations
+
+Optional add-ons live in [`apps/`](apps), one folder per tool. They are never required — the CLI works alone — and only show as installable when that tool is on your machine.
+
+```sh
+agent-link app list
+#  ● paseo      Accounts, health, usage and MCP inside Paseo        installed
+#  ○ vscode     Point the editor at a rotating account              available
+
+agent-link app install paseo
+```
+
+| App | What it gives you |
+| --- | --- |
+| [`paseo`](apps/paseo) | A panel in Paseo: every account with health, usage and MCP state, one-click install of the Dynamic Agent Link provider, and MCP management across all accounts |
+| [`vscode`](apps/vscode) | How to point VS Code or Cursor at a rotating or pinned account |
+
+Adding another editor or tool means dropping a folder in `apps/` with an `app.json`.
 
 ## Commands
 
@@ -181,7 +193,8 @@ agent-link shims                 numbered per-account shims (claude-1, …)
 agent-link env <prov> <email>    eval-able export for one account
 agent-link sync                  copy MCP servers + project trust into accounts
 agent-link remove <prov> <email> delete an account slot and its login
-agent-link plugin [install|status|remove]   the optional Paseo panel in paseo-plugin/
+agent-link app [list|install|remove] [id]  optional integrations under apps/
+agent-link fix [model]           test accounts, rescue stuck chats, resync — one-shot cleanup
 agent-link insights [days]       where work went: sessions, tokens, cache rate, models, refusals
 agent-link probe [prov] [model] [--park]   ask each account to answer on a model
 agent-link rescue [hours] [--go] conversations that hit a limit; --go moves them
