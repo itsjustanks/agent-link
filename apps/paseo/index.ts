@@ -1,6 +1,6 @@
 import type { PluginContext } from "@getpaseo/plugin";
 import { AgentSyncSurface } from "./agents.client";
-import { CanvasSurface } from "./canvas.client";
+import { CanvasPanel, CanvasSurface } from "./canvas.client";
 import { canvasCopy, canvasOpen, canvasRender, canvasServe, canvasSource, canvasState, canvasStop } from "./canvas.shared";
 import {
   canvasShutdown,
@@ -122,6 +122,15 @@ export default function contribute(plugin: PluginContext) {
   plugin.addSidebarItem({ id: "agent-sync", title: "Agent Link", icon: "Users", surface: "agent-sync" });
   plugin.addSidebarItem({ id: "mcp", title: "MCP", icon: "Plug", surface: "mcp" });
   plugin.addSidebarItem({ id: "canvas", title: "Canvas", icon: "LayoutDashboard", surface: "canvas" });
+  // The same view beside an agent: its workspace's artifacts, and a way to put
+  // one into the conversation being had about it.
+  plugin.addWorkspacePanel({
+    id: "canvas-panel",
+    title: "Canvas",
+    icon: "LayoutDashboard",
+    context: "agent",
+    Component: CanvasPanel,
+  });
   plugin.addCommandCenterItem({
     id: "open-agent-sync",
     title: "Open Agent Link (accounts & provider health)",
@@ -140,6 +149,16 @@ export default function contribute(plugin: PluginContext) {
     context: "global",
     onSelect({ openSurface }) {
       openSurface("mcp");
+    },
+  });
+  plugin.addCommandCenterItem({
+    id: "open-canvas-here",
+    title: "Canvas for this agent",
+    icon: "LayoutDashboard",
+    keywords: ["canvas", "artifact", "dashboard", "send to chat", "preview"],
+    context: "agent",
+    onSelect({ openPanel }) {
+      openPanel("canvas-panel");
     },
   });
   plugin.addCommandCenterItem({

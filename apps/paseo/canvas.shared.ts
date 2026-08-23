@@ -78,7 +78,9 @@ export const PageThemeSchema = z.object({
 });
 
 export const RenderSchema = z.object({
-  dataUri: z.string(), // data:image/png;base64,… ready for <Image>
+  dataUri: z.string(), // data:image/<format>;base64,… ready for <Image>
+  base64: z.string(), // the same bytes, for posting into a chat message
+  format: z.enum(["webp", "png"]),
   width: z.number(),
   height: z.number(),
   bytes: z.number(),
@@ -96,6 +98,8 @@ export const canvasRender = defineRpc({
     width: z.number().min(320).max(2400),
     scale: z.number().min(1).max(3),
     theme: PageThemeSchema.optional(),
+    // Chat attachments are safest as PNG; the panel itself prefers WebP.
+    format: z.enum(["webp", "png"]).optional(),
   }),
   output: RenderSchema,
 });

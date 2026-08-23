@@ -1,5 +1,5 @@
-import type { PluginSurfaceProps } from "@getpaseo/plugin";
-import { usePaseo, useRpc } from "@getpaseo/plugin";
+import type { PluginAgentPanelProps, PluginSurfaceProps } from "@getpaseo/plugin";
+import { usePaseo, useRpc, useWorkspace } from "@getpaseo/plugin";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import React, { useMemo, useState } from "react";
 import { Text, View } from "react-native";
@@ -81,7 +81,23 @@ function brief(request: string, name: string): string {
   ].join("\n");
 }
 
-export function CanvasSurface({ theme, layout }: PluginSurfaceProps) {
+/**
+ * One view, two homes: the sidebar surface sees every artifact on the machine,
+ * and the agent panel sees only its own workspace's — and can post a render
+ * straight into that agent's conversation, which is the one place a picture of
+ * the thing being discussed actually belongs.
+ */
+function CanvasView({
+  theme,
+  layout,
+  agentId,
+  scopeDir,
+}: {
+  theme: PluginSurfaceProps["theme"];
+  layout: PluginSurfaceProps["layout"];
+  agentId?: string;
+  scopeDir?: string;
+}) {
   const t = useUi(theme, layout.compact);
   const paseo = usePaseo();
   const queryClient = useQueryClient();
@@ -110,7 +126,10 @@ export function CanvasSurface({ theme, layout }: PluginSurfaceProps) {
   const apply = (next: CanvasState) => queryClient.setQueryData(["agent-link", "canvas"], next);
   const data = state.data;
 
-  const artifacts = data?.artifacts ?? [];
+  const artifacts = useMemo(() => {
+    const all = data?.artifacts ?? [];
+    return scopeDir ? all.filter((artifact) => artifact.path.startsWith(scopeDir)) : all;
+  }, [data?.artifacts, scopeDir]);
   const current = artifacts.find((artifact) => artifact.path === selected) ?? null;
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -169,6 +188,48 @@ export function CanvasSurface({ theme, layout }: PluginSurfaceProps) {
       return { ids, preferred: preferred ?? "claude" };
     },
     enabled: mode === "create",
+  });
+
+  // Only agents whose working directory contains the artifact are offered —
+  // posting a dashboard into an unrelated conversation helps nobody.
+  const agents = useQuery({
+    queryKey: ["agent-link", "canvas-agents"],
+    queryFn: async () => {
+      const result = (await paseo.agents.list({ page: { limit: 100 } })) as {
+        entries: Array<Record<string, unknown>>;
+      };
+      return (result.entries ?? [])
+        .filter((entry) => entry.status !== "closed")
+        .map((entry) => ({
+          id: String(entry.id),
+          title: String(entry.title ?? entry.id),
+          cwd: String(entry.cwd ?? ""),
+          status: String(entry.status ?? ""),
+        }));
+    },
+    enabled: !agentId,
+  });
+
+  const sendToChat = useMutation({
+    mutationFn: async (input: { path: string; to: string; title: string }) => {
+      // PNG rather than the panel's WebP: a chat attachment travels further
+      // than this surface does.
+      const shot = await callRender({
+        path: input.path,
+        width: 1200,
+        scale: 2,
+        theme: pageTheme,
+        format: "png",
+      });
+      const handle = paseo.agents.ref(input.to) as unknown as {
+        send: (text: string, options?: Record<string, unknown>) => Promise<unknown>;
+      };
+      await handle.send(input.title, { images: [{ data: shot.base64, mimeType: "image/png" }] });
+      return input.title;
+    },
+    onSuccess: (title) =>
+      setNotice({ tone: "ok", text: `Posted “${title}” into the conversation — the agent can see it too.` }),
+    onError: (error: Error) => setNotice({ tone: "error", text: error.message }),
   });
 
   const serveMutation = useMutation({
@@ -393,6 +454,16 @@ export function CanvasSurface({ theme, layout }: PluginSurfaceProps) {
         )}
 
         <View style={{ flexDirection: "row", gap: t.space.sm, flexWrap: "wrap" }}>
+          {agentId ? (
+            <Button
+              label="Send to chat"
+              variant="primary"
+              loading={sendToChat.isPending}
+              onPress={() =>
+                sendToChat.mutate({ path: current.path, to: agentId, title: current.title || current.name })
+              }
+            />
+          ) : null}
           {current.publicUrl ? (
             <>
               <Button label="Copy link" variant="primary" onPress={() => copyMutation.mutate(current.publicUrl)} />
@@ -426,6 +497,40 @@ export function CanvasSurface({ theme, layout }: PluginSurfaceProps) {
           </Text>
         ) : null}
       </Card>
+
+      {!agentId ? (
+        <Card>
+          <Disclosure title="Send this to an agent">
+            {agents.isPending ? <Loading label="Looking for agents…" /> : null}
+            {(agents.data ?? []).filter((agent) => !agent.cwd || current.path.startsWith(agent.cwd)).length === 0 ? (
+              <Text style={t.text.caption}>
+                No live agent is working in this artifact's folder. Open the Canvas panel beside an agent to post it
+                into that conversation.
+              </Text>
+            ) : null}
+            {(agents.data ?? [])
+              .filter((agent) => !agent.cwd || current.path.startsWith(agent.cwd))
+              .slice(0, 8)
+              .map((agent, index) => (
+                <Row
+                  key={agent.id}
+                  first={index === 0}
+                  title={agent.title}
+                  subtitle={agent.status}
+                  trailing={
+                    <Button
+                      label="Send"
+                      loading={sendToChat.isPending && sendToChat.variables?.to === agent.id}
+                      onPress={() =>
+                        sendToChat.mutate({ path: current.path, to: agent.id, title: current.title || current.name })
+                      }
+                    />
+                  }
+                />
+              ))}
+          </Disclosure>
+        </Card>
+      ) : null}
 
       {current.kind !== "image" ? (
         <Card>
@@ -511,4 +616,18 @@ export function CanvasSurface({ theme, layout }: PluginSurfaceProps) {
       ) : null}
     </Screen>
   );
+}
+
+export function CanvasSurface({ theme, layout }: PluginSurfaceProps) {
+  return <CanvasView theme={theme} layout={layout} />;
+}
+
+/**
+ * The agent-context tab. Scoped to that agent's workspace and able to post a
+ * render into its conversation, which is what makes a canvas part of the
+ * discussion rather than a file you have to go and look at.
+ */
+export function CanvasPanel({ theme, layout, workspaceId, agentId }: PluginAgentPanelProps) {
+  const directory = useWorkspace(workspaceId, (workspace) => workspace.directory || workspace.projectRootPath);
+  return <CanvasView theme={theme} layout={layout} agentId={agentId} scopeDir={directory ?? undefined} />;
 }

@@ -629,20 +629,27 @@ async function renderAt(
   width: number,
   scale: number,
   theme?: PageTheme,
+  format?: "webp" | "png",
 ): Promise<Awaited<ReturnType<typeof renderUrl>>> {
-  if (kind === "html") return renderUrl(`file://${file}`, { width, scale });
+  if (kind === "html") return renderUrl(`file://${file}`, { width, scale, format });
   const work = await mkdtemp(join(tmpdir(), "agent-link-page-"));
   const page = join(work, "page.html");
   try {
     await writeFile(page, await pageFor(file, kind, theme), "utf8");
-    return await renderUrl(`file://${page}`, { width, scale });
+    return await renderUrl(`file://${page}`, { width, scale, format });
   } finally {
     await rm(work, { recursive: true, force: true });
   }
 }
 
 export async function handleCanvasRender(
-  { path, width, scale, theme }: { path: string; width: number; scale: number; theme?: PageTheme },
+  {
+    path,
+    width,
+    scale,
+    theme,
+    format,
+  }: { path: string; width: number; scale: number; theme?: PageTheme; format?: "webp" | "png" },
 ): Promise<Render> {
   const file = realpathSync(path);
   const stats = statSync(file);
@@ -653,22 +660,24 @@ export async function handleCanvasRender(
 
   // An HTML artifact brings its own styling, so the app theme is not part of
   // its identity; a generated page is drawn in the theme and so it is.
-  const key = `${file}:${stats.mtimeMs}:${width}:${scale}:${kind === "html" ? "-" : themeKey(theme)}`;
+  const key = `${file}:${stats.mtimeMs}:${width}:${scale}:${format ?? "webp"}:${kind === "html" ? "-" : themeKey(theme)}`;
   const hit = renders.get(key);
   if (hit) return { ...hit, fromCache: true, ms: 0 };
 
   const started = Date.now();
-  let shot = await renderAt(file, kind, width, scale, theme);
+  let shot = await renderAt(file, kind, width, scale, theme, format);
 
   // A very long page at 2x turns into a payload nobody wants to push over a
   // remote connection. Halve it rather than refuse it.
   if (shot.bytes > 3_000_000 && scale > 1) {
-    const lighter = await renderAt(file, kind, width, 1, theme);
+    const lighter = await renderAt(file, kind, width, 1, theme, format);
     if (lighter.bytes < shot.bytes) shot = lighter;
   }
 
   const render: Render = {
     dataUri: `data:image/${shot.format};base64,${shot.base64}`,
+    base64: shot.base64,
+    format: shot.format,
     width: shot.width,
     height: shot.height,
     bytes: shot.bytes,
