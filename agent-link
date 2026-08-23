@@ -227,7 +227,50 @@ slot_available_primary() { # $1 provider
   until="$(cat "$(pools_dir)/cooldown-$1-primary" 2>/dev/null || echo 0)"
   now="$(date +%s)"
   [ "$until" -gt "$now" ] && return 1
+  if recently_refused "$1" "$([ "$1" = claude ] && echo "$HOME/.claude" || echo "$HOME/.codex")"; then
+    autopark "$1" primary
+    return 1
+  fi
   return 0
+}
+
+# Self-healing: if an account was refused for a limit in its most recent
+# activity, sideline it automatically. This is what makes a limit recover
+# without anyone running a command — the dead agent is lost either way, but
+# every launch after it avoids that account.
+REFUSAL_WINDOW_MIN=45
+recently_refused() { # $1 provider, $2 config dir
+  [ "$1" = claude ] || return 1
+  python3 - "$2" "$REFUSAL_WINDOW_MIN" <<'PY2'
+import glob, os, sys, time
+d, window = sys.argv[1], float(sys.argv[2])
+cutoff = time.time() - window * 60
+newest, newest_m = None, 0
+for f in glob.glob(os.path.join(d, "projects", "*", "*.jsonl")):
+    try:
+        m = os.stat(f).st_mtime
+    except OSError:
+        continue
+    if m > newest_m:
+        newest, newest_m = f, m
+if not newest or newest_m < cutoff:
+    sys.exit(1)
+try:
+    with open(newest, "rb") as fh:
+        fh.seek(max(0, os.path.getsize(newest) - 20000))
+        tail = fh.read().decode("utf-8", "ignore")
+except OSError:
+    sys.exit(1)
+sys.exit(0 if ("spend limit" in tail or "usage limit" in tail) else 1)
+PY2
+}
+
+# Park an account that just refused, so the decision persists for later launches.
+autopark() { # $1 provider, $2 key (email or "primary")
+  mkdir -p "$(pools_dir)"
+  echo "$(( $(date +%s) + 180 * 60 ))" > "$(pools_dir)/cooldown-$1-$2"
+  echo "auto: refused for a limit" > "$(pools_dir)/reason-$1-$2"
+  echo "$(date '+%Y-%m-%d %H:%M')  auto-parked $1/$2 after a limit refusal" >> "$STATE/autopark.log"
 }
 
 slot_available() { # $1 provider, $2 email
@@ -236,6 +279,10 @@ slot_available() { # $1 provider, $2 email
   until="$(cat "$(pools_dir)/cooldown-$1-$2" 2>/dev/null || echo 0)"
   now="$(date +%s)"
   [ "$until" -gt "$now" ] && return 1
+  if recently_refused "$1" "$(slot_dir "$1" "$2")"; then
+    autopark "$1" "$2"
+    return 1
+  fi
   return 0
 }
 
@@ -341,7 +388,7 @@ slot_state() { # $1 provider, $2 email -> "dot|state|note"
   until="$(cat "$(pools_dir)/cooldown-$1-$2" 2>/dev/null || echo 0)"
   last="$(cat "$(pools_dir)/last-$1-$2" 2>/dev/null || echo 0)"
   if [ "$until" -gt "$now" ]; then
-    printf '%s|%s|%s' "${C_RED}●${C_OFF}" "logged in" "parked $(( (until - now + 59) / 60 ))m — routing skips it"
+    printf '%s|%s|%s' "${C_RED}●${C_OFF}" "logged in" "parked $(( (until - now + 59) / 60 ))m — $(cat "$(pools_dir)/reason-$1-$2" 2>/dev/null || echo 'routing skips it')"
     return
   fi
   local runs
@@ -685,11 +732,12 @@ cmd_cooldown() { # provider email minutes — park an exhausted account
   local p="$1" e="$2" arg="${3:-180}"
   mkdir -p "$(pools_dir)"
   if [ "$arg" = clear ]; then
-    rm -f "$(pools_dir)/cooldown-$p-$e"
+    rm -f "$(pools_dir)/cooldown-$p-$e" "$(pools_dir)/reason-$p-$e"
     echo "$p · $e: cooldown cleared"
     return 0
   fi
   echo "$(( $(date +%s) + arg * 60 ))" > "$(pools_dir)/cooldown-$p-$e"
+  echo "parked by you" > "$(pools_dir)/reason-$p-$e"
   echo "$p · $e: parked for ${arg}m — auto-routing will skip it until then"
 }
 
