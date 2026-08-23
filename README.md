@@ -168,12 +168,12 @@ agent-link app install paseo
 
 | App | What it gives you |
 | --- | --- |
-| [`paseo`](apps/paseo) | Three tabs in Paseo — **Agent Link** (accounts, health, usage, one-click auto-router), **MCP** (servers across every account), **Canvas** (open or share the HTML your agents write) |
+| [`paseo`](apps/paseo) | Three tabs in Paseo — **Agent Link** (accounts, health, usage, one-click auto-router), **MCP** (servers across every account, JSON editing, paste-to-import, OAuth per account), **Canvas** (what your agents built, rendered inside the app and shareable as a live link) |
 | [`vscode`](apps/vscode) | How to point VS Code or Cursor at a rotating or pinned account |
 
 Installing the Paseo app is one command: it copies the plugin into Paseo's own `plugins/<id>` directory, installs and typechecks it, registers the id and confirms the daemon is running it. Re-run to upgrade, `agent-link app remove paseo` to uninstall, and add `--link` to register a checkout in place while working on it. Anything missing — Paseo itself, Node, the plugins switch in Settings — is named rather than guessed at.
 
-**Canvas**, in the Paseo app, is the one part with an optional extra dependency: previewing an artifact needs nothing, but a public link uses a [Cloudflare quick tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/), so it asks you to `brew install cloudflared` if you have not.
+**Canvas**, in the Paseo app, renders what your agents write — HTML dashboards, Markdown reports, diagrams — *inside* Paseo rather than in a browser, which is what makes it work when the daemon is a server somewhere else. It has two optional dependencies and says so plainly when either is missing: Chrome or Chromium to render, `cloudflared` to hand out a live public link.
 
 Adding another editor or tool means dropping a folder in `apps/` with an `app.json`.
 

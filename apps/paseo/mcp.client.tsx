@@ -1,8 +1,21 @@
-import type { PluginSurfaceProps, PluginTheme } from "@getpaseo/plugin";
+/**
+ * The MCP surface: the list of servers beside one server's detail.
+ *
+ * Master–detail because every question asked here is about one server at a
+ * time — where is it defined, what does each destination actually hold, who
+ * has authorised it — and because an editor that opens anywhere other than
+ * where the user clicked is an editor they will not find.
+ *
+ * The friction is placed on purpose: copying one definition over the others
+ * and importing a definition that still holds a placeholder both ask twice,
+ * while revealed secrets keep a notice on screen until they are masked again.
+ */
+import type { PluginSurfaceProps } from "@getpaseo/plugin";
 import { useRpc } from "@getpaseo/plugin";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import React, { useMemo, useState } from "react";
-import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
+import React, { useEffect, useMemo, useState } from "react";
+import { Clipboard, Text, View } from "react-native";
+import { z } from "zod";
 import {
   mcpAdd,
   mcpApply,
@@ -15,579 +28,1344 @@ import {
   mcpRename,
   mcpSync,
   type Destination,
+  type McpAuthAccount,
   type McpDefRow,
   type McpHealth,
   type McpServerRow,
 } from "./contracts.shared";
-import { Badge, Btn, Dot, STATUS, makeStyles } from "./ui.client";
+import {
+  ParsedServerSchema,
+  mcpImportApply,
+  mcpImportParse,
+  mcpLogin,
+  mcpLoginCancel,
+  mcpLoginStatus,
+  mcpLogout,
+  mcpRawGet,
+  mcpRawPut,
+  type JsonIssue,
+  type LoginSession,
+  type RawDefRow,
+} from "./mcpjson.shared";
+import {
+  Button,
+  Card,
+  CodeBlock,
+  ConfirmButton,
+  Coverage,
+  Disclosure,
+  EmptyState,
+  ErrorText,
+  Facts,
+  Field,
+  Loading,
+  Notice,
+  Row,
+  Screen,
+  Section,
+  Segmented,
+  SplitView,
+  StatusPill,
+  Tag,
+  Toolbar,
+  useTokens,
+  useUi,
+  type Status,
+} from "./ui.client";
 
-function shortLabel(dest: Destination): string {
-  const who = dest.account ? dest.account.split("@")[0] : dest.provider;
-  const primary = dest.label.includes("(primary)") ? " ·1°" : "";
-  return `${dest.provider}:${who}${primary}`;
+type ParsedServer = z.infer<typeof ParsedServerSchema>;
+type PutResult = z.output<typeof mcpRawPut.output>;
+type Flash = { tone: Status; text: string };
+type Mode = "browse" | "add" | "import";
+type Kind = "stdio" | "http";
+
+// -------------------------------------------------------------------- helpers
+
+function healthStatus(status: McpHealth["status"]): Status {
+  if (status === "ok") return "ok";
+  if (status === "auth-required" || status === "warn") return "attention";
+  if (status === "unknown") return "neutral";
+  return "error";
 }
 
-function healthTone(theme: PluginTheme, status: McpHealth["status"]) {
-  if (status === "ok") return STATUS.green;
-  if (status === "auth-required" || status === "warn") return STATUS.orange;
-  if (status === "unknown") return theme.colors.foregroundMuted;
-  return STATUS.red;
-}
-
-function healthLabel(status: McpHealth["status"]) {
+function healthWord(status: McpHealth["status"]): string {
   switch (status) {
     case "ok":
       return "healthy";
     case "auth-required":
-      return "auth needed";
-    case "binary-missing":
-      return "binary missing";
-    case "down":
-      return "down";
+      return "sign-in";
     case "warn":
       return "warning";
+    case "binary-missing":
+      return "no binary";
+    case "down":
+      return "down";
     default:
-      return "unknown";
+      return "unchecked";
   }
 }
 
-export function McpSurface({ theme, layout }: PluginSurfaceProps) {
-  const queryClient = useQueryClient();
-  const callMatrix = useRpc(mcpMatrix);
-  const callAdd = useRpc(mcpAdd);
-  const callApply = useRpc(mcpApply);
-  const callAuth = useRpc(mcpAuth);
-  const callRemove = useRpc(mcpRemove);
-  const callSync = useRpc(mcpSync);
-  const callDefAll = useRpc(mcpDefAll);
-  const callEditOne = useRpc(mcpEditOne);
-  const callRename = useRpc(mcpRename);
-  const callHealth = useRpc(mcpHealth);
-  const styles = useMemo(() => makeStyles(theme, layout.compact), [theme, layout.compact]);
-  // Every button inherits the compact (touch) sizing without repeating it.
-  const Button = (props: React.ComponentProps<typeof Btn>) => <Btn compact={layout.compact} {...props} />;
+function sessionStatus(state: LoginSession["state"]): Status {
+  if (state === "done") return "ok";
+  if (state === "failed") return "error";
+  if (state === "waiting") return "attention";
+  return "busy";
+}
 
-  const [message, setMessage] = useState<string | null>(null);
-  const [search, setSearch] = useState("");
-  const [filterTab, setFilterTab] = useState<"all" | "gaps" | "issues">("all");
-  const [health, setHealth] = useState<Map<string, McpHealth> | null>(null);
-  const [healthRunning, setHealthRunning] = useState(false);
-  const [pendingRemove, setPendingRemove] = useState<{ name: string; destId: string } | null>(null);
-  const [expanded, setExpanded] = useState<string | null>(null);
+/** A log or a stack trace is useful; twenty lines of it under the toolbar is not. */
+function clampLines(text: string, limit: number): string {
+  const lines = text.split("\n");
+  if (lines.length <= limit) return text.trim();
+  return `${lines.slice(0, limit).join("\n")}\n… ${lines.length - limit} more lines`;
+}
 
-  // editor state: which server, its per-destination rows, reveal, selected row
-  const [editServer, setEditServer] = useState<string | null>(null);
-  const [editRows, setEditRows] = useState<McpDefRow[]>([]);
-  const [revealed, setRevealed] = useState(false);
-  const [editDest, setEditDest] = useState<string | null>(null);
-  const [rowUrl, setRowUrl] = useState("");
-  const [rowCommand, setRowCommand] = useState("");
-  const [rowKv, setRowKv] = useState("");
-  const [rowKind, setRowKind] = useState<"stdio" | "http">("http");
-  const [renameTo, setRenameTo] = useState("");
+function errorText(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
 
-  // add form
-  const [showAdd, setShowAdd] = useState(false);
-  const [formName, setFormName] = useState("");
-  const [formKind, setFormKind] = useState<"stdio" | "http">("http");
-  const [formUrl, setFormUrl] = useState("");
-  const [formCommand, setFormCommand] = useState("");
-  const [formKv, setFormKv] = useState("");
-  const [formTargets, setFormTargets] = useState<Set<string>>(new Set());
+/**
+ * "line 4, col 12 — message", the offending line, and a caret under the column.
+ * A coordinate the reader has to count to is a coordinate they will get wrong.
+ */
+function formatIssue(source: string, issue: JsonIssue): string {
+  if (issue.line < 1) return issue.message;
+  const head = `line ${issue.line}, col ${issue.column} — ${issue.message}`;
+  const line = source.split("\n")[issue.line - 1];
+  if (line === undefined) return head;
+  return `${head}\n${line}\n${" ".repeat(Math.max(0, issue.column - 1))}^`;
+}
 
-  const matrixQuery = useQuery({ queryKey: ["agent-link", "mcp-matrix"], queryFn: () => callMatrix({}) });
-  const authQuery = useQuery({ queryKey: ["agent-link", "mcp-auth"], queryFn: () => callAuth({}) });
-  const destinations = matrixQuery.data?.destinations ?? [];
-  const servers = matrixQuery.data?.servers ?? [];
-  const destById = (id: string) => destinations.find((dest) => dest.id === id);
+/**
+ * No RPC copies arbitrary text, so this goes through the host's clipboard —
+ * which a host is free not to have. The caller says so rather than pretending
+ * the copy happened; the URL is selectable either way.
+ */
+function copyToClipboard(text: string): boolean {
+  try {
+    Clipboard.setString(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
-  const refresh = () => void queryClient.invalidateQueries({ queryKey: ["agent-link"] });
-  const onResult = (result: { message?: string; log?: string }) => {
-    setMessage(result.message ?? result.log ?? null);
-    setPendingRemove(null);
-    refresh();
+function loginCommand(account: McpAuthAccount, server: string): string {
+  return account.isPrimary
+    ? `claude mcp login ${server}`
+    : `CLAUDE_CONFIG_DIR="${account.dir}" claude mcp login ${server}`;
+}
+
+// ----------------------------------------------------------------- fragments
+
+function Issues({ source, issues }: { source: string; issues: JsonIssue[] }) {
+  const t = useTokens();
+  if (issues.length === 0) return null;
+  return (
+    <View style={{ gap: t.space.sm }}>
+      {issues.map((issue, index) => (
+        <CodeBlock key={`${issue.code}-${index}`} tone="error">
+          {formatIssue(source, issue)}
+        </CodeBlock>
+      ))}
+    </View>
+  );
+}
+
+function Lines({ items }: { items: string[] }) {
+  const t = useTokens();
+  return (
+    <View style={{ gap: t.space.xs }}>
+      {items.map((item, index) => (
+        <Text key={`${item}-${index}`} style={t.text.caption}>
+          {item}
+        </Text>
+      ))}
+    </View>
+  );
+}
+
+/** A destination is picked by pressing its row; the word says which state it is in. */
+function Targets({
+  title,
+  destinations,
+  selected,
+  onToggle,
+  onAll,
+  onNone,
+}: {
+  title: string;
+  destinations: Destination[];
+  selected: string[];
+  onToggle: (id: string) => void;
+  onAll: () => void;
+  onNone: () => void;
+}) {
+  const t = useTokens();
+  return (
+    <Section
+      title={`${title} — ${selected.length} of ${destinations.length}`}
+      trailing={
+        <View style={{ flexDirection: "row", gap: t.space.sm }}>
+          <Button label="All" variant="ghost" onPress={onAll} />
+          <Button label="None" variant="ghost" onPress={onNone} />
+        </View>
+      }
+    >
+      <Card padded={false}>
+        {destinations.length === 0 ? (
+          <EmptyState title="Nowhere to write" body="No CLI config was found on this machine to write a server into." />
+        ) : null}
+        {destinations.map((dest, index) => {
+          const on = selected.includes(dest.id);
+          return (
+            <Row
+              key={dest.id}
+              first={index === 0}
+              selected={on}
+              onPress={() => onToggle(dest.id)}
+              title={dest.label}
+              subtitle={dest.configPath}
+              trailing={on ? <Tag label="included" tone="ok" /> : <Tag label="skipped" />}
+            />
+          );
+        })}
+      </Card>
+    </Section>
+  );
+}
+
+function useTargetSet(destinations: Destination[]) {
+  // null means "every destination", so a freshly loaded destination is included
+  // rather than silently dropped from a selection made before it appeared.
+  const [chosen, setChosen] = useState<string[] | null>(null);
+  const ids = chosen ?? destinations.map((dest) => dest.id);
+  return {
+    ids,
+    toggle: (id: string) =>
+      setChosen((previous) => {
+        const next = new Set(previous ?? destinations.map((dest) => dest.id));
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return [...next];
+      }),
+    all: () => setChosen(null),
+    none: () => setChosen([]),
+    reset: () => setChosen(null),
+  };
+}
+
+// ------------------------------------------------------------------- editors
+
+function FieldsEditor({
+  row,
+  saving,
+  onDirty,
+  onSave,
+}: {
+  row: McpDefRow;
+  saving: boolean;
+  onDirty: (dirty: boolean) => void;
+  onSave: (input: { kind: Kind; url: string; command: string; kvLines: string }) => void;
+}) {
+  const t = useTokens();
+  const [kind, setKind] = useState<Kind>(row.kind);
+  const [url, setUrl] = useState(row.url);
+  const [command, setCommand] = useState(row.command);
+  const [kvLines, setKvLines] = useState(row.kvLines);
+  const dirty = kind !== row.kind || url !== row.url || command !== row.command || kvLines !== row.kvLines;
+  useEffect(() => onDirty(dirty), [dirty, onDirty]);
+  return (
+    <View style={{ gap: t.space.md }}>
+      <Segmented
+        value={kind}
+        onChange={setKind}
+        options={[
+          { value: "http", label: "HTTP" },
+          { value: "stdio", label: "Command" },
+        ]}
+      />
+      {kind === "http" ? (
+        <Field label="URL" value={url} onChangeText={setUrl} placeholder="https://example.com/mcp" />
+      ) : (
+        <Field label="Command" value={command} onChangeText={setCommand} placeholder="npx -y some-mcp-server" />
+      )}
+      <Field
+        label={kind === "http" ? "Headers" : "Environment"}
+        value={kvLines}
+        onChangeText={setKvLines}
+        multiline
+        mono
+        placeholder={kind === "http" ? "Authorization=Bearer …" : "API_KEY=…"}
+        hint="One KEY=value per line. A masked ••• value keeps this destination's stored secret."
+      />
+      <View style={{ flexDirection: "row", gap: t.space.sm }}>
+        <Button
+          label="Save this destination"
+          variant="primary"
+          loading={saving}
+          disabled={!dirty}
+          onPress={() => onSave({ kind, url, command, kvLines })}
+        />
+      </View>
+    </View>
+  );
+}
+
+/**
+ * The JSON tab. Save stays shut until the buffer both differs and has come back
+ * clean from the daemon, and any keystroke throws the verdict away — a pass from
+ * two edits ago is not permission to write.
+ */
+function JsonEditor({
+  seed,
+  nativePreview,
+  onDirty,
+  onPut,
+}: {
+  seed: string;
+  nativePreview: string;
+  onDirty: (dirty: boolean) => void;
+  onPut: (json: string, dryRun: boolean) => Promise<PutResult | null>;
+}) {
+  const t = useTokens();
+  const [buffer, setBuffer] = useState(seed);
+  const [baseline, setBaseline] = useState(seed);
+  const [verdict, setVerdict] = useState<PutResult | null>(null);
+  const [showPreview, setShowPreview] = useState(false);
+  const [busy, setBusy] = useState<"validate" | "preview" | "save" | null>(null);
+  const dirty = buffer !== baseline;
+  useEffect(() => onDirty(dirty), [dirty, onDirty]);
+
+  const run = async (job: "validate" | "preview" | "save") => {
+    setBusy(job);
+    const result = await onPut(buffer, job !== "save");
+    setBusy(null);
+    if (!result) return;
+    setVerdict(result);
+    setShowPreview(job === "preview");
+    if (job === "save" && result.ok) setBaseline(buffer);
   };
 
+  return (
+    <View style={{ gap: t.space.md }}>
+      <Field
+        label="Definition"
+        value={buffer}
+        onChangeText={(next) => {
+          setBuffer(next);
+          setVerdict(null);
+          setShowPreview(false);
+        }}
+        multiline
+        mono
+        minHeight={t.text.mono.lineHeight * 14}
+        hint="Claude's shape, whatever the destination stores. Preview shows the translation."
+      />
+      <View style={{ flexDirection: "row", gap: t.space.sm }}>
+        <Button label="Validate" loading={busy === "validate"} onPress={() => void run("validate")} />
+        <Button label="Preview" loading={busy === "preview"} onPress={() => void run("preview")} />
+        <Button
+          label="Save"
+          variant="primary"
+          loading={busy === "save"}
+          disabled={!dirty || !verdict?.ok}
+          onPress={() => void run("save")}
+        />
+        <Button
+          label="Revert"
+          variant="ghost"
+          disabled={!dirty}
+          onPress={() => {
+            setBuffer(baseline);
+            setVerdict(null);
+            setShowPreview(false);
+          }}
+        />
+      </View>
+      {verdict && !verdict.ok && verdict.issues.length === 0 ? <ErrorText>{verdict.message}</ErrorText> : null}
+      {verdict ? <Issues source={buffer} issues={verdict.issues} /> : null}
+      {verdict?.ok ? (
+        <Text style={t.text.caption}>
+          {dirty ? "Checked clean — Save is now open." : verdict.message || "Nothing left to write."}
+        </Text>
+      ) : null}
+      {verdict && verdict.warnings.length > 0 ? <Lines items={verdict.warnings} /> : null}
+      {showPreview && verdict ? (
+        <>
+          <Section title="What this destination will hold">
+            <CodeBlock>{verdict.preview || nativePreview}</CodeBlock>
+          </Section>
+          {verdict.dropped.length > 0 ? (
+            <Section title="Dropped — no equivalent in this format">
+              <Lines items={verdict.dropped} />
+            </Section>
+          ) : null}
+        </>
+      ) : null}
+    </View>
+  );
+}
+
+function DestinationEditor({
+  tab,
+  onTab,
+  defRow,
+  rawRow,
+  saving,
+  otherCount,
+  onSaveFields,
+  onPut,
+  onCopyEverywhere,
+  onClose,
+}: {
+  tab: "fields" | "json";
+  onTab: (tab: "fields" | "json") => void;
+  defRow?: McpDefRow;
+  rawRow?: RawDefRow;
+  saving: boolean;
+  otherCount: number;
+  onSaveFields: (input: { kind: Kind; url: string; command: string; kvLines: string }) => void;
+  onPut: (json: string, dryRun: boolean) => Promise<PutResult | null>;
+  onCopyEverywhere: () => void;
+  onClose: () => void;
+}) {
+  const t = useTokens();
+  // Copying this definition over the others is only meaningful once it is the
+  // definition on disk, so an unsaved buffer withdraws the offer.
+  const [dirty, setDirty] = useState(false);
+  return (
+    <Card level={2}>
+      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: t.space.sm }}>
+        <Segmented
+          value={tab}
+          onChange={onTab}
+          options={[
+            { value: "fields", label: "Fields" },
+            { value: "json", label: "JSON" },
+          ]}
+        />
+        <Button label="Close" variant="ghost" onPress={onClose} />
+      </View>
+      {tab === "fields" ? (
+        !defRow ? (
+          <Loading label="Reading this destination…" />
+        ) : defRow.found ? (
+          <FieldsEditor
+            key={`${defRow.destId}-fields`}
+            row={defRow}
+            saving={saving}
+            onDirty={setDirty}
+            onSave={onSaveFields}
+          />
+        ) : (
+          <ErrorText>This destination has no readable definition for that server.</ErrorText>
+        )
+      ) : !rawRow ? (
+        <Loading label="Reading this destination…" />
+      ) : rawRow.found ? (
+        <JsonEditor
+          key={`${rawRow.destId}-json`}
+          seed={rawRow.json}
+          nativePreview={rawRow.nativePreview}
+          onDirty={setDirty}
+          onPut={onPut}
+        />
+      ) : (
+        <ErrorText>This destination has no readable definition for that server.</ErrorText>
+      )}
+      {otherCount > 0 ? (
+        <View style={{ gap: t.space.xs }}>
+          {dirty ? (
+            <Text style={t.text.caption}>Save this destination before copying it over the others.</Text>
+          ) : (
+            <ConfirmButton
+              label="Use for all destinations"
+              confirmLabel={`Overwrite ${otherCount} destinations`}
+              onConfirm={onCopyEverywhere}
+            />
+          )}
+        </View>
+      ) : null}
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------------- auth
+
+function AuthRows({
+  server,
+  accounts,
+  destinations,
+  presentIn,
+  sessions,
+  daemonIsLocal,
+  pendingDir,
+  onAuthorise,
+  onCancel,
+  onSignOut,
+  onCopied,
+}: {
+  server: string;
+  accounts: McpAuthAccount[];
+  destinations: Destination[];
+  presentIn: string[];
+  sessions: LoginSession[];
+  daemonIsLocal: boolean;
+  pendingDir: string | null;
+  onAuthorise: (account: McpAuthAccount) => void;
+  onCancel: (key: string) => void;
+  onSignOut: (account: McpAuthAccount) => void;
+  onCopied: (ok: boolean) => void;
+}) {
+  const t = useTokens();
+  const rows = accounts
+    .map((account) => {
+      const dest = destinations.find((entry) => entry.provider === "claude" && entry.account === account.email);
+      return { account, defined: dest ? presentIn.includes(dest.id) : false, needs: account.needsAuth.includes(server) };
+    })
+    .filter((row) => row.defined || row.needs);
+  if (rows.length === 0) return null;
+
+  return (
+    <Section title="Authorisation">
+      <Card padded={false}>
+        {rows.map(({ account, needs }, index) => {
+          const session = sessions.find((entry) => entry.server === server && entry.account === account.email);
+          const live = session?.state === "starting" || session?.state === "waiting";
+          const remote = needs && !daemonIsLocal;
+          return (
+            <Row
+              key={account.dir}
+              first={index === 0}
+              title={account.email}
+              subtitle={account.isPrimary ? "primary Claude account" : account.dir}
+              trailing={
+                needs ? (
+                  daemonIsLocal ? (
+                    <Button
+                      label="Authorise"
+                      loading={pendingDir === account.dir}
+                      disabled={live}
+                      onPress={() => onAuthorise(account)}
+                    />
+                  ) : undefined
+                ) : (
+                  <Button label="Sign out" variant="danger" onPress={() => onSignOut(account)} />
+                )
+              }
+              meta={<StatusPill status={needs ? "attention" : "ok"} label={needs ? "sign-in needed" : "ready"} />}
+              expanded={
+                remote || session ? (
+                  <View style={{ gap: t.space.sm }}>
+                    {remote ? (
+                      <>
+                        <Text style={t.text.caption}>
+                          The browser callback lands on the daemon machine, not this one — run it there:
+                        </Text>
+                        <CodeBlock>{loginCommand(account, server)}</CodeBlock>
+                      </>
+                    ) : null}
+                    {session ? (
+                      <>
+                        <View style={{ flexDirection: "row", alignItems: "center", gap: t.space.sm }}>
+                          <StatusPill status={sessionStatus(session.state)} label={session.state} />
+                          <Text style={[t.text.caption, { flex: 1, minWidth: 0 }]} numberOfLines={2}>
+                            {session.message}
+                          </Text>
+                        </View>
+                        {session.url ? <CodeBlock>{session.url}</CodeBlock> : null}
+                        <View style={{ flexDirection: "row", gap: t.space.sm }}>
+                          {session.url ? (
+                            <Button label="Copy link" onPress={() => onCopied(copyToClipboard(session.url))} />
+                          ) : null}
+                          {live ? <Button label="Cancel" variant="ghost" onPress={() => onCancel(session.key)} /> : null}
+                        </View>
+                      </>
+                    ) : null}
+                  </View>
+                ) : undefined
+              }
+            />
+          );
+        })}
+      </Card>
+    </Section>
+  );
+}
+
+// -------------------------------------------------------------------- surface
+
+export function McpSurface({ theme, layout }: PluginSurfaceProps) {
+  const t = useUi(theme, layout.compact);
+  const queryClient = useQueryClient();
+
+  const callMatrix = useRpc(mcpMatrix);
+  const callAuth = useRpc(mcpAuth);
+  const callAdd = useRpc(mcpAdd);
+  const callApply = useRpc(mcpApply);
+  const callRemove = useRpc(mcpRemove);
+  const callRename = useRpc(mcpRename);
+  const callSync = useRpc(mcpSync);
+  const callHealth = useRpc(mcpHealth);
+  const callDefAll = useRpc(mcpDefAll);
+  const callEditOne = useRpc(mcpEditOne);
+  const callRawGet = useRpc(mcpRawGet);
+  const callRawPut = useRpc(mcpRawPut);
+  const callImportParse = useRpc(mcpImportParse);
+  const callImportApply = useRpc(mcpImportApply);
+  const callLogin = useRpc(mcpLogin);
+  const callLoginStatus = useRpc(mcpLoginStatus);
+  const callLoginCancel = useRpc(mcpLoginCancel);
+  const callLogout = useRpc(mcpLogout);
+
+  const [flash, setFlash] = useState<Flash | null>(null);
+  const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState<"all" | "gaps" | "issues">("all");
+  const [health, setHealth] = useState<Map<string, McpHealth> | null>(null);
+  const [mode, setMode] = useState<Mode>("browse");
+  const [selected, setSelected] = useState<string | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [editTab, setEditTab] = useState<"fields" | "json">("fields");
+  const [revealed, setRevealed] = useState(false);
+  const [renameTo, setRenameTo] = useState("");
+
+  const [addName, setAddName] = useState("");
+  const [addKind, setAddKind] = useState<Kind>("http");
+  const [addUrl, setAddUrl] = useState("");
+  const [addCommand, setAddCommand] = useState("");
+  const [addKv, setAddKv] = useState("");
+
+  const [blob, setBlob] = useState("");
+  const [debouncedBlob, setDebouncedBlob] = useState("");
+  const [picked, setPicked] = useState<string[]>([]);
+  const [overwrite, setOverwrite] = useState(false);
+  const [allowPlaceholders, setAllowPlaceholders] = useState(false);
+  const [importResult, setImportResult] = useState<{
+    written: string[];
+    skipped: string[];
+    issues: JsonIssue[];
+  } | null>(null);
+
+  const matrixQuery = useQuery({ queryKey: ["agent-link", "mcp-matrix"], queryFn: () => callMatrix({}) });
+  const destinations = useMemo<Destination[]>(() => matrixQuery.data?.destinations ?? [], [matrixQuery.data]);
+  const servers = useMemo<McpServerRow[]>(() => matrixQuery.data?.servers ?? [], [matrixQuery.data]);
+
+  const addTargets = useTargetSet(destinations);
+  const importTargets = useTargetSet(destinations);
+
+  const authQuery = useQuery({ queryKey: ["agent-link", "mcp-auth"], queryFn: () => callAuth({}) });
+  const rawQuery = useQuery({
+    queryKey: ["agent-link", "mcp-raw", selected, revealed],
+    queryFn: () => callRawGet({ name: selected as string, reveal: revealed }),
+    enabled: Boolean(selected),
+  });
+  // The raw rows feed every destination line; the field rows are only read once
+  // an editor is actually open.
+  const defQuery = useQuery({
+    queryKey: ["agent-link", "mcp-def", selected, revealed],
+    queryFn: () => callDefAll({ name: selected as string, reveal: revealed }),
+    enabled: Boolean(selected) && editing !== null,
+  });
+
+  const [liveLogin, setLiveLogin] = useState(false);
+  const loginQuery = useQuery({
+    queryKey: ["agent-link", "mcp-login-status"],
+    queryFn: () => callLoginStatus({}),
+    refetchInterval: liveLogin ? 2000 : false,
+  });
+  const sessions = useMemo<LoginSession[]>(() => loginQuery.data?.sessions ?? [], [loginQuery.data]);
+  const daemonIsLocal = loginQuery.data?.daemonIsLocal ?? true;
+  const anyLive = sessions.some((entry) => entry.state === "starting" || entry.state === "waiting");
+  useEffect(() => setLiveLogin(anyLive), [anyLive]);
+  // A grant that just landed changes who still needs one.
+  const settled = sessions.filter((entry) => entry.state === "done").map((entry) => entry.key).join("|");
+  useEffect(() => {
+    if (!settled) return;
+    void queryClient.invalidateQueries({ queryKey: ["agent-link", "mcp-auth"] });
+  }, [settled, queryClient]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedBlob(blob), 400);
+    return () => clearTimeout(timer);
+  }, [blob]);
+  const parseQuery = useQuery({
+    queryKey: ["agent-link", "mcp-import-parse", debouncedBlob],
+    queryFn: () => callImportParse({ blob: debouncedBlob }),
+    enabled: mode === "import" && debouncedBlob.trim().length > 0,
+  });
+  const parsed = parseQuery.data;
+  const parsedNames = (parsed?.servers ?? []).map((entry) => entry.name).join("|");
+  useEffect(() => {
+    setPicked(parsedNames ? parsedNames.split("|") : []);
+    setImportResult(null);
+  }, [parsedNames]);
+
+  const invalidate = () => void queryClient.invalidateQueries({ queryKey: ["agent-link"] });
+  const fail = (error: unknown) => setFlash({ tone: "error", text: clampLines(errorText(error), 12) });
+  const report = (result: { ok: boolean; message: string }) => {
+    setFlash({ tone: result.ok ? "ok" : "error", text: clampLines(result.message, 12) || (result.ok ? "Done." : "Refused.") });
+    if (result.ok) invalidate();
+  };
+
+  const selectServer = (name: string) => {
+    setMode("browse");
+    setSelected(name);
+    setEditing(null);
+    setRevealed(false);
+    setRenameTo("");
+  };
   const closeEditor = () => {
-    setEditServer(null);
-    setEditRows([]);
-    setEditDest(null);
+    setEditing(null);
     setRevealed(false);
   };
 
-  const loadEditor = (name: string, reveal: boolean) => {
-    void callDefAll({ name, reveal }).then((result) => {
-      setEditServer(name);
-      setEditRows(result.rows);
-      setRevealed(reveal);
-      setEditDest(null);
-      setExpanded(name);
-    });
-  };
-
-  const selectRow = (row: McpDefRow) => {
-    setEditDest(row.destId);
-    setRowKind(row.kind);
-    setRowUrl(row.url);
-    setRowCommand(row.command);
-    setRowKv(row.kvLines);
-  };
-
   const addMutation = useMutation({
-    mutationFn: () => {
-      const targets = formTargets.size > 0 ? [...formTargets] : destinations.map((dest) => dest.id);
-      return callAdd({ name: formName.trim(), kind: formKind, command: formCommand, url: formUrl, kvLines: formKv, targets });
-    },
-    onSuccess: (result) => {
-      onResult(result);
-      if (result.ok) {
-        setShowAdd(false);
-        setFormName("");
-        setFormUrl("");
-        setFormCommand("");
-        setFormKv("");
-        setFormTargets(new Set());
-      }
-    },
-  });
-  const editOneMutation = useMutation({
-    mutationFn: (destId: string) =>
-      callEditOne({
-        name: editServer as string,
-        destId,
-        kind: rowKind,
-        command: rowCommand,
-        url: rowUrl,
-        kvLines: rowKv,
+    mutationFn: () =>
+      callAdd({
+        name: addName.trim(),
+        kind: addKind,
+        command: addCommand,
+        url: addUrl,
+        kvLines: addKv,
+        targets: addTargets.ids,
       }),
+    onError: fail,
     onSuccess: (result) => {
-      onResult(result);
-      if (result.ok && editServer) loadEditor(editServer, revealed);
-    },
-  });
-  const renameMutation = useMutation({
-    mutationFn: (serverName: string) => callRename({ name: serverName, newName: renameTo.trim() }),
-    onSuccess: (result) => {
-      onResult(result);
-      if (result.ok) {
-        closeEditor();
-        setRenameTo("");
-      }
+      report(result);
+      if (!result.ok) return;
+      const name = addName.trim();
+      setAddName("");
+      setAddUrl("");
+      setAddCommand("");
+      setAddKv("");
+      addTargets.reset();
+      setMode("browse");
+      setSelected(name);
     },
   });
   const applyMutation = useMutation({
     mutationFn: (input: { name: string; targets: string[]; sourceDestId?: string }) => callApply(input),
-    onSuccess: (result) => {
-      onResult(result);
-      if (editServer) loadEditor(editServer, revealed);
-    },
+    onError: fail,
+    onSuccess: report,
   });
   const removeMutation = useMutation({
     mutationFn: (input: { name: string; targets: string[] }) => callRemove(input),
-    onSuccess: onResult,
+    onError: fail,
+    onSuccess: report,
   });
-  const syncMutation = useMutation({ mutationFn: () => callSync({}), onSuccess: onResult });
+  const renameMutation = useMutation({
+    mutationFn: (input: { name: string; newName: string }) => callRename(input),
+    onError: fail,
+    onSuccess: (result, input) => {
+      report(result);
+      if (!result.ok) return;
+      setRenameTo("");
+      setSelected(input.newName);
+      setEditing(null);
+    },
+  });
+  const editOneMutation = useMutation({
+    mutationFn: (input: { destId: string; kind: Kind; command: string; url: string; kvLines: string }) =>
+      callEditOne({ name: selected as string, ...input }),
+    onError: fail,
+    onSuccess: report,
+  });
+  const syncMutation = useMutation({
+    mutationFn: () => callSync({}),
+    onError: fail,
+    onSuccess: (result) => report({ ok: result.ok, message: result.log }),
+  });
+  const healthMutation = useMutation({
+    mutationFn: () => callHealth({}),
+    onError: fail,
+    onSuccess: (result) => {
+      setHealth(new Map(result.results.map((entry) => [entry.name, entry])));
+      const bad = result.results.filter((entry) => entry.status !== "ok" && entry.status !== "unknown").length;
+      setFlash({
+        tone: bad > 0 ? "attention" : "ok",
+        text: `Checked ${result.results.length} servers — ${bad} need attention.`,
+      });
+    },
+  });
+  const importMutation = useMutation({
+    mutationFn: () =>
+      callImportApply({
+        servers: (parsed?.servers ?? [])
+          .filter((entry) => picked.includes(entry.name))
+          .map((entry) => ({ name: entry.name, json: entry.json })),
+        targets: importTargets.ids,
+        overwrite,
+        allowPlaceholders,
+      }),
+    onError: fail,
+    onSuccess: (result) => {
+      report(result);
+      setImportResult({ written: result.written, skipped: result.skipped, issues: result.issues });
+    },
+  });
+  const loginMutation = useMutation({
+    mutationFn: (input: { accountDir: string; account: string; server: string }) =>
+      callLogin({ provider: "claude", ...input }),
+    onError: fail,
+    onSuccess: (result) => {
+      setFlash({ tone: result.ok ? "ok" : "error", text: result.message });
+      setLiveLogin(true);
+      void queryClient.invalidateQueries({ queryKey: ["agent-link", "mcp-login-status"] });
+    },
+  });
+  const loginCancelMutation = useMutation({
+    mutationFn: (key: string) => callLoginCancel({ key }),
+    onError: fail,
+    onSuccess: (result) => {
+      setFlash({ tone: result.ok ? "ok" : "error", text: result.message });
+      void queryClient.invalidateQueries({ queryKey: ["agent-link", "mcp-login-status"] });
+    },
+  });
+  const logoutMutation = useMutation({
+    mutationFn: (input: { accountDir: string; server: string }) => callLogout({ provider: "claude", ...input }),
+    onError: fail,
+    onSuccess: report,
+  });
 
-  const runHealth = () => {
-    setHealthRunning(true);
-    void callHealth({})
-      .then((result) => setHealth(new Map(result.results.map((entry) => [entry.name, entry]))))
-      .finally(() => setHealthRunning(false));
+  const putJson = async (destId: string, json: string, dryRun: boolean): Promise<PutResult | null> => {
+    try {
+      const result = await callRawPut({ name: selected as string, destId, json, dryRun });
+      if (!dryRun) report(result);
+      return result;
+    } catch (error) {
+      fail(error);
+      return null;
+    }
   };
 
-  const filtered = servers.filter((server) => {
-    if (search && !server.name.toLowerCase().includes(search.toLowerCase())) return false;
-    if (filterTab === "gaps" && server.presentIn.length >= destinations.length) return false;
-    if (filterTab === "issues") {
-      const entry = health?.get(server.name);
-      if (!entry || entry.status === "ok" || entry.status === "unknown") return false;
-    }
+  const query = search.trim().toLowerCase();
+  const gapCount = servers.filter((server) => server.presentIn.length < destinations.length).length;
+  const isIssue = (server: McpServerRow) => {
+    const entry = health?.get(server.name);
+    return Boolean(entry && entry.status !== "ok" && entry.status !== "unknown");
+  };
+  const issueCount = health ? servers.filter(isIssue).length : 0;
+  const shown = servers.filter((server) => {
+    if (query && !server.name.toLowerCase().includes(query)) return false;
+    if (filter === "gaps" && server.presentIn.length >= destinations.length) return false;
+    if (filter === "issues" && !isIssue(server)) return false;
     return true;
   });
 
-  const inputStyle = styles.input;
-  // On a phone the destination row stacks: label above, actions below, so the
-  // label is never squeezed to nothing by the buttons.
-  const tableRow = {
-    flexDirection: layout.compact ? ("column" as const) : ("row" as const),
-    alignItems: layout.compact ? ("flex-start" as const) : ("center" as const),
-    gap: layout.compact ? 4 : 8,
-    paddingVertical: layout.compact ? 6 : 4,
-    borderTopWidth: 1,
-    borderTopColor: theme.colors.foregroundMuted + "1f",
-  };
+  const server = selected ? servers.find((entry) => entry.name === selected) : undefined;
+  const serverHealth = server ? health?.get(server.name) : undefined;
+  const missing = server ? destinations.filter((dest) => !server.presentIn.includes(dest.id)) : [];
+  const rawRows: RawDefRow[] = rawQuery.data?.rows ?? [];
+  const defRows: McpDefRow[] = defQuery.data?.rows ?? [];
+  const paneOwnsPrimary = mode !== "browse" || editing !== null;
 
-  const renderEditor = (serverName: string) => (
-    <View style={{ gap: 8 }}>
-      <View style={styles.rowBetween}>
-        <Text style={styles.strong}>Edit '{serverName}' — per destination</Text>
-        <View style={styles.row}>
-          <Button
-            label={revealed ? "Hide secrets" : "Reveal secrets"}
-            kind="quiet"
-            theme={theme}
-            onPress={() => loadEditor(serverName, !revealed)}
-          />
-          <Button label="Close editor" kind="quiet" theme={theme} onPress={closeEditor} />
+  const toolbarActions = [
+    <Button
+      key="add"
+      label="Add server"
+      variant={paneOwnsPrimary ? "secondary" : "primary"}
+      grow={layout.compact}
+      onPress={() => {
+        setMode("add");
+        setEditing(null);
+      }}
+    />,
+    <Button key="paste" label="Paste JSON" grow={layout.compact} onPress={() => setMode("import")} />,
+    <Button
+      key="sync"
+      label="Sync accounts"
+      grow={layout.compact}
+      loading={syncMutation.isPending}
+      onPress={() => syncMutation.mutate()}
+    />,
+    <Button
+      key="health"
+      label="Health check"
+      grow={layout.compact}
+      loading={healthMutation.isPending}
+      onPress={() => healthMutation.mutate()}
+    />,
+    <Button key="refresh" label="Refresh" variant="ghost" grow={layout.compact} onPress={invalidate} />,
+  ];
+
+  const filters = (
+    <View style={{ flexDirection: layout.compact ? "column" : "row", alignItems: layout.compact ? "stretch" : "center", gap: t.space.md }}>
+      <View style={{ flex: layout.compact ? undefined : 1, minWidth: 0 }}>
+        <Field value={search} onChangeText={setSearch} placeholder="Search servers" />
+      </View>
+      <Segmented
+        value={filter}
+        onChange={setFilter}
+        options={[
+          { value: "all", label: `All ${servers.length}` },
+          { value: "gaps", label: `Gaps ${gapCount}` },
+          { value: "issues", label: `Issues ${issueCount}`, disabled: !health },
+        ]}
+      />
+    </View>
+  );
+
+  const list = (
+    <Card padded={false}>
+      {matrixQuery.isLoading ? <Loading label="Reading configs…" /> : null}
+      {matrixQuery.error ? (
+        <View style={{ padding: t.space.md }}>
+          <ErrorText>{errorText(matrixQuery.error)}</ErrorText>
         </View>
-      </View>
-      <Text style={styles.muted}>
-        Each destination keeps its own definition — different auth per account is expected. Masked (•••) values keep that
-        destination's stored secret on save.
-      </Text>
-      <View style={styles.row}>
-        <TextInput
-          placeholder="rename to…"
-          placeholderTextColor={theme.colors.foregroundMuted}
-          value={renameTo}
-          onChangeText={setRenameTo}
-          autoCapitalize="none"
-          style={[inputStyle, { minWidth: 160 }]}
-        />
-        <Button
-          label={renameMutation.isPending ? "Renaming…" : "Rename everywhere"}
-          kind="quiet"
-          theme={theme}
-          disabled={renameMutation.isPending || !renameTo.trim()}
-          onPress={() => renameMutation.mutate(serverName)}
-        />
-      </View>
-      {editRows.every((row) => !row.found) ? (
-        <Text style={styles.danger}>No destination has a readable definition for this server.</Text>
       ) : null}
-      {editRows
-        .filter((row) => row.found)
-        .map((row) => {
-          const dest = destById(row.destId);
-          if (!dest) return null;
-          const selected = editDest === row.destId;
-          return (
-            <View key={row.destId} style={{ gap: 6 }}>
-              <View style={tableRow}>
-                <Text style={[styles.text, { flex: 1 }]} numberOfLines={1}>
-                  {dest.label}
+      {!matrixQuery.isLoading && shown.length === 0 ? (
+        <EmptyState
+          title="Nothing here"
+          body={
+            servers.length === 0
+              ? "No MCP server is defined in any destination yet."
+              : "No server matches this search and filter."
+          }
+        />
+      ) : null}
+      {shown.map((entry, index) => {
+        const entryHealth = health?.get(entry.name);
+        return (
+          <Row
+            key={entry.name}
+            first={index === 0}
+            selected={selected === entry.name}
+            onPress={() => selectServer(entry.name)}
+            title={entry.name}
+            meta={
+              <Coverage
+                present={entry.presentIn.length}
+                total={destinations.length}
+                label={`${entry.presentIn.length} of ${destinations.length} destinations`}
+              />
+            }
+            trailing={
+              entryHealth ? <StatusPill status={healthStatus(entryHealth.status)} label={healthWord(entryHealth.status)} /> : undefined
+            }
+          />
+        );
+      })}
+    </Card>
+  );
+
+  const back = layout.compact ? (
+    <Button
+      label="← All servers"
+      variant="ghost"
+      onPress={() => {
+        setMode("browse");
+        setSelected(null);
+        setEditing(null);
+      }}
+    />
+  ) : null;
+
+  const emptyPane = (
+    <View style={{ gap: t.space.lg }}>
+      <EmptyState
+        title="Pick a server"
+        body={`${servers.length} servers across ${destinations.length} destinations. Choose one to see where it is defined, edit it per destination, or authorise it per account.`}
+      />
+      <Disclosure title="How this works">
+        <Text style={t.text.body}>
+          These are user-level servers — each CLI's global config, available in every project. A repo's own .mcp.json is
+          project-level and is never touched here.
+        </Text>
+        <Text style={t.text.body}>
+          Every destination keeps its own definition, so different auth per account is expected. Masked ••• values keep
+          that destination's stored secret when you save.
+        </Text>
+        <Text style={t.text.body}>
+          Definitions sync; grants do not. A server still has to be authorised once per account — that is what "not
+          connected" means inside a session.
+        </Text>
+        <Text style={t.text.body}>Every write backs the target config up first.</Text>
+        {authQuery.data && authQuery.data.projectServers.length > 0 ? (
+          <Text style={t.text.body}>
+            Project-scoped servers seen nearby, not managed here:{" "}
+            {[...new Set(authQuery.data.projectServers.map((entry) => entry.name))].join(", ")}
+          </Text>
+        ) : null}
+      </Disclosure>
+    </View>
+  );
+
+  const addPane = (
+    <View style={{ gap: t.space.lg }}>
+      {back}
+      <Card>
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: t.space.sm }}>
+          <Text style={t.text.heading}>Add a server</Text>
+          <Button label="Cancel" variant="ghost" onPress={() => setMode("browse")} />
+        </View>
+        <Field label="Name" value={addName} onChangeText={setAddName} placeholder="my-server" autoFocus />
+        <Segmented
+          value={addKind}
+          onChange={setAddKind}
+          options={[
+            { value: "http", label: "HTTP" },
+            { value: "stdio", label: "Command" },
+          ]}
+        />
+        {addKind === "http" ? (
+          <Field label="URL" value={addUrl} onChangeText={setAddUrl} placeholder="https://example.com/mcp" />
+        ) : (
+          <Field label="Command" value={addCommand} onChangeText={setAddCommand} placeholder="npx -y some-mcp-server" />
+        )}
+        <Field
+          label={addKind === "http" ? "Headers" : "Environment"}
+          value={addKv}
+          onChangeText={setAddKv}
+          multiline
+          mono
+          placeholder={addKind === "http" ? "Authorization=Bearer …" : "API_KEY=…"}
+          hint="One KEY=value per line."
+        />
+      </Card>
+      <Targets
+        title="Write it to"
+        destinations={destinations}
+        selected={addTargets.ids}
+        onToggle={addTargets.toggle}
+        onAll={addTargets.all}
+        onNone={addTargets.none}
+      />
+      <View style={{ flexDirection: "row", gap: t.space.sm }}>
+        <Button
+          label={`Add to ${addTargets.ids.length} destinations`}
+          variant="primary"
+          loading={addMutation.isPending}
+          disabled={
+            !addName.trim() ||
+            addTargets.ids.length === 0 ||
+            (addKind === "http" ? !addUrl.trim() : !addCommand.trim())
+          }
+          onPress={() => addMutation.mutate()}
+        />
+      </View>
+    </View>
+  );
+
+  const pickedServers: ParsedServer[] = (parsed?.servers ?? []).filter((entry) => picked.includes(entry.name));
+  const stillPlaceholders = pickedServers.filter((entry) => entry.hasPlaceholders.length > 0);
+  const importPane = (
+    <View style={{ gap: t.space.lg }}>
+      {back}
+      <Card>
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: t.space.sm }}>
+          <Text style={t.text.heading}>Paste a server definition</Text>
+          <Button label="Cancel" variant="ghost" onPress={() => setMode("browse")} />
+        </View>
+        <Field
+          value={blob}
+          onChangeText={setBlob}
+          multiline
+          mono
+          minHeight={t.text.mono.lineHeight * 10}
+          placeholder={'{ "mcpServers": { "example": { "type": "http", "url": "https://…" } } }'}
+          hint="Straight from a README — code fences, comments and a wrapper key are handled."
+        />
+      </Card>
+      {parseQuery.isFetching ? <Loading label="Reading it…" /> : null}
+      {parseQuery.error ? <ErrorText>{errorText(parseQuery.error)}</ErrorText> : null}
+      {parsed && parsed.normalisations.length > 0 ? (
+        <Section title="Cleaned up on the way in">
+          <Lines items={parsed.normalisations} />
+        </Section>
+      ) : null}
+      {parsed && parsed.issues.length > 0 ? <Issues source={debouncedBlob} issues={parsed.issues} /> : null}
+      {parsed && parsed.servers.length > 0 ? (
+        <>
+          <Section title={`Found ${parsed.servers.length}`}>
+            <Card padded={false}>
+              {parsed.servers.map((entry, index) => {
+                const on = picked.includes(entry.name);
+                return (
+                  <Row
+                    key={entry.name}
+                    first={index === 0}
+                    selected={on}
+                    onPress={() =>
+                      setPicked((previous) =>
+                        previous.includes(entry.name)
+                          ? previous.filter((name) => name !== entry.name)
+                          : [...previous, entry.name],
+                      )
+                    }
+                    title={entry.name}
+                    subtitle={entry.summary}
+                    meta={
+                      <Facts
+                        items={[
+                          { value: entry.kind },
+                          entry.hasPlaceholders.length > 0
+                            ? { value: `fill in ${entry.hasPlaceholders.join(", ")}`, tone: "attention" as Status }
+                            : null,
+                        ]}
+                      />
+                    }
+                    trailing={on ? <Tag label="import" tone="ok" /> : <Tag label="skip" />}
+                  />
+                );
+              })}
+            </Card>
+          </Section>
+          <Targets
+            title="Write it to"
+            destinations={destinations}
+            selected={importTargets.ids}
+            onToggle={importTargets.toggle}
+            onAll={importTargets.all}
+            onNone={importTargets.none}
+          />
+          <Section title="If a server of that name is already there">
+            <Segmented
+              value={overwrite ? "overwrite" : "keep"}
+              onChange={(value) => setOverwrite(value === "overwrite")}
+              options={[
+                { value: "keep", label: "Keep what is there" },
+                { value: "overwrite", label: "Overwrite it" },
+              ]}
+            />
+          </Section>
+          {stillPlaceholders.length > 0 ? (
+            <Notice tone="attention">
+              <View style={{ gap: t.space.sm }}>
+                <Text style={t.text.body}>
+                  {`Placeholders still in ${stillPlaceholders.map((entry) => entry.name).join(", ")} — imported as they are, they fail at connect time.`}
                 </Text>
-                <Badge label={row.kind} theme={theme} />
-                {selected ? null : <Button label="Edit" kind="quiet" theme={theme} onPress={() => selectRow(row)} />}
-                <Button
-                  label="Use for ALL"
-                  kind="quiet"
-                  theme={theme}
-                  onPress={() =>
-                    applyMutation.mutate({
-                      name: serverName,
-                      targets: destinations.filter((d) => d.id !== row.destId).map((d) => d.id),
-                      sourceDestId: row.destId,
-                    })
-                  }
+                <Segmented
+                  value={allowPlaceholders ? "allow" : "block"}
+                  onChange={(value) => setAllowPlaceholders(value === "allow")}
+                  options={[
+                    { value: "block", label: "Fix them first" },
+                    { value: "allow", label: "Import anyway" },
+                  ]}
                 />
               </View>
-              {selected ? (
-                <View style={{ gap: 6, paddingLeft: 8 }}>
-                  {rowKind === "http" ? (
-                    <TextInput value={rowUrl} onChangeText={setRowUrl} autoCapitalize="none" style={inputStyle} placeholder="https://…" placeholderTextColor={theme.colors.foregroundMuted} />
-                  ) : (
-                    <TextInput value={rowCommand} onChangeText={setRowCommand} autoCapitalize="none" style={inputStyle} placeholder="command args…" placeholderTextColor={theme.colors.foregroundMuted} />
-                  )}
-                  <TextInput
-                    value={rowKv}
-                    onChangeText={setRowKv}
-                    autoCapitalize="none"
-                    multiline
-                    numberOfLines={3}
-                    style={[inputStyle, { minHeight: 56, fontFamily: styles.mono }]}
-                    placeholder={rowKind === "http" ? "Authorization=Bearer …" : "API_KEY=…"}
-                    placeholderTextColor={theme.colors.foregroundMuted}
-                  />
-                  <View style={styles.row}>
-                    <Button
-                      label={editOneMutation.isPending ? "Saving…" : "Save this destination"}
-                      theme={theme}
-                      onPress={() => editOneMutation.mutate(row.destId)}
-                      disabled={editOneMutation.isPending}
-                    />
-                    <Button label="Cancel" kind="quiet" theme={theme} onPress={() => setEditDest(null)} />
-                  </View>
-                </View>
-              ) : (
-                <Text style={[styles.monoText, { paddingLeft: 8 }]} numberOfLines={2}>
-                  {row.kind === "http" ? row.url : row.command}
-                  {row.kvLines ? `\n${row.kvLines}` : ""}
-                </Text>
-              )}
-            </View>
-          );
-        })}
-      {editRows.some((row) => !row.found) ? (
-        <View style={styles.row}>
-          <Text style={styles.muted}>Missing in:</Text>
-          {editRows
-            .filter((row) => !row.found)
-            .map((row) => {
-              const dest = destById(row.destId);
-              return dest ? (
-                <Button
-                  key={row.destId}
-                  label={`+ ${shortLabel(dest)}`}
-                  kind="quiet"
-                  theme={theme}
-                  onPress={() => applyMutation.mutate({ name: serverName, targets: [row.destId] })}
-                />
-              ) : null;
-            })}
-        </View>
+            </Notice>
+          ) : null}
+          <View style={{ flexDirection: "row", gap: t.space.sm }}>
+            <Button
+              label={`Import ${pickedServers.length} into ${importTargets.ids.length} destinations`}
+              variant="primary"
+              loading={importMutation.isPending}
+              disabled={
+                pickedServers.length === 0 ||
+                importTargets.ids.length === 0 ||
+                (stillPlaceholders.length > 0 && !allowPlaceholders)
+              }
+              onPress={() => importMutation.mutate()}
+            />
+          </View>
+        </>
+      ) : null}
+      {importResult ? (
+        <>
+          {importResult.written.length > 0 ? (
+            <Section title="Written">
+              <Lines items={importResult.written} />
+            </Section>
+          ) : null}
+          {importResult.skipped.length > 0 ? (
+            <Section title="Skipped">
+              <Lines items={importResult.skipped} />
+            </Section>
+          ) : null}
+          <Issues source={debouncedBlob} issues={importResult.issues} />
+        </>
       ) : null}
     </View>
   );
 
-  const tab = (id: "all" | "gaps" | "issues", label: string) => (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={`Filter: ${label}`}
-      onPress={() => setFilterTab(id)}
-      style={{
-        paddingVertical: 4,
-        paddingHorizontal: 12,
-        borderRadius: 999,
-        backgroundColor: filterTab === id ? theme.colors.accent : "transparent",
-        borderWidth: 1,
-        borderColor: filterTab === id ? theme.colors.accent : theme.colors.foregroundMuted + "44",
-      }}
-    >
-      <Text style={{ color: filterTab === id ? theme.colors.accentForeground : theme.colors.foregroundMuted, fontSize: 11, fontWeight: "600" }}>
-        {label}
-      </Text>
-    </Pressable>
-  );
-
-  return (
-    <ScrollView style={styles.screen} contentContainerStyle={styles.content} stickyHeaderIndices={[1]}>
-      <View style={styles.headerRow}>
-        <Text style={styles.title}>MCP</Text>
-        <View style={styles.row}>
-          <Button label={healthRunning ? "Checking…" : "Health check"} onPress={runHealth} theme={theme} kind="quiet" disabled={healthRunning} />
-          <Button label={showAdd ? "Close" : "Add server"} onPress={() => setShowAdd((v) => !v)} theme={theme} />
-          <Button label={syncMutation.isPending ? "Syncing…" : "Sync accounts"} onPress={() => syncMutation.mutate()} theme={theme} kind="quiet" disabled={syncMutation.isPending} />
-          <Button label="Refresh" onPress={refresh} theme={theme} kind="quiet" />
-        </View>
-      </View>
-
-      <View style={{ backgroundColor: theme.colors.surface0, paddingVertical: 6, gap: 8 }}>
-        <View style={styles.row}>
-          <TextInput
-            placeholder="Search servers…"
-            placeholderTextColor={theme.colors.foregroundMuted}
-            value={search}
-            onChangeText={setSearch}
-            autoCapitalize="none"
-            style={[inputStyle, { flex: 1, minWidth: 140 }]}
-          />
-          {tab("all", `All (${servers.length})`)}
-          {tab("gaps", "Gaps")}
-          {tab("issues", "Issues")}
-        </View>
-        <Text style={styles.muted}>
-          🟢 healthy · 🟠 auth needed · 🔴 down · ⚪ unchecked — {filtered.length}/{servers.length} shown · {destinations.length} destinations
-        </Text>
-      </View>
-
-      <Text style={styles.muted}>
-        These are USER-LEVEL servers (each provider's global config) — available in every project. Project-level servers
-        (a repo's own .mcp.json) belong to that repo and are not touched here.
-      </Text>
-
-      {filterTab === "issues" && !health ? (
-        <Text style={styles.muted}>Run Health check first — Issues shows servers that fail it.</Text>
-      ) : null}
-
-      {editServer ? <View style={styles.card}>{renderEditor(editServer)}</View> : null}
-
-      {showAdd ? (
-        <View style={styles.card}>
-          <Text style={styles.strong}>Add MCP server</Text>
-          <TextInput placeholder="name (e.g. my-server)" placeholderTextColor={theme.colors.foregroundMuted} value={formName} onChangeText={setFormName} autoCapitalize="none" style={inputStyle} />
-          <View style={styles.row}>
-            <Button label={`type: ${formKind}`} kind="quiet" theme={theme} onPress={() => setFormKind((k) => (k === "http" ? "stdio" : "http"))} />
-          </View>
-          {formKind === "http" ? (
-            <TextInput placeholder="https://example.com/mcp" placeholderTextColor={theme.colors.foregroundMuted} value={formUrl} onChangeText={setFormUrl} autoCapitalize="none" style={inputStyle} />
-          ) : (
-            <TextInput placeholder="command with args, e.g. npx -y some-mcp-server" placeholderTextColor={theme.colors.foregroundMuted} value={formCommand} onChangeText={setFormCommand} autoCapitalize="none" style={inputStyle} />
-          )}
-          <TextInput
-            placeholder={formKind === "http" ? "headers: Authorization=Bearer …" : "env: API_KEY=…"}
-            placeholderTextColor={theme.colors.foregroundMuted}
-            value={formKv}
-            onChangeText={setFormKv}
-            autoCapitalize="none"
-            multiline
-            numberOfLines={2}
-            style={[inputStyle, { minHeight: 48 }]}
-          />
-          <Text style={styles.muted}>Targets — none selected = all:</Text>
-          <View style={styles.row}>
-            {destinations.map((dest) => {
-              const selected = formTargets.has(dest.id);
-              return (
-                <Pressable
-                  key={dest.id}
-                  accessibilityRole="button"
-                  accessibilityLabel={`${dest.label}: ${selected ? "selected" : "not selected"}`}
-                  onPress={() =>
-                    setFormTargets((previous) => {
-                      const next = new Set(previous);
-                      if (next.has(dest.id)) next.delete(dest.id);
-                      else next.add(dest.id);
-                      return next;
-                    })
-                  }
-                  style={{
-                    borderWidth: 1,
-                    borderColor: selected ? theme.colors.accent : theme.colors.foregroundMuted + "55",
-                    backgroundColor: selected ? theme.colors.accent + "22" : "transparent",
-                    borderRadius: 999,
-                    paddingVertical: 3,
-                    paddingHorizontal: 9,
-                  }}
-                >
-                  <Text style={{ color: selected ? theme.colors.accent : theme.colors.foregroundMuted, fontSize: 10, fontWeight: "600" }}>
-                    {shortLabel(dest)}
-                  </Text>
-                </Pressable>
-              );
-            })}
-          </View>
-          <View style={styles.row}>
-            <Button
-              label={addMutation.isPending ? "Adding…" : formTargets.size > 0 ? `Add to ${formTargets.size} selected` : "Add to ALL"}
-              theme={theme}
-              onPress={() => addMutation.mutate()}
-              disabled={addMutation.isPending || !formName.trim()}
-            />
-          </View>
-        </View>
-      ) : null}
-
-      {authQuery.data ? (
-        <View style={styles.card}>
-          <Text style={styles.strong}>Authentication by account</Text>
-          <Text style={styles.muted}>
-            A server has to be authorized once per account — that is what "not connected" means. Definitions sync; grants
-            do not.
+  const serverPane = server ? (
+    <View style={{ gap: t.space.lg }}>
+      {back}
+      <Card>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: t.space.sm }}>
+          <Text style={[t.text.display, { flexShrink: 1 }]} numberOfLines={1}>
+            {server.name}
           </Text>
-          {authQuery.data.accounts.map((account) => (
-            <View key={account.dir} style={{ gap: 3, paddingTop: 4 }}>
-              <View style={styles.row}>
-                <Dot color={account.needsAuth.length === 0 ? theme.colors.accent : theme.colors.statusDanger} />
-                <Text style={styles.strong}>{account.email}</Text>
-                {account.isPrimary ? <Badge label="primary" theme={theme} tone="accent" /> : null}
-                <Text style={styles.muted}>
-                  {account.definedServers} servers ·{" "}
-                  {account.needsAuth.length === 0 ? "all authorized" : `${account.needsAuth.length} need sign-in`}
-                </Text>
-              </View>
-              {account.needsAuth.length > 0 ? (
-                <>
-                  <Text style={styles.danger}>{account.needsAuth.join(", ")}</Text>
-                  <Text style={styles.monoText}>
-                    {account.isPrimary
-                      ? `claude mcp login ${account.needsAuth[0]}`
-                      : `CLAUDE_CONFIG_DIR="${account.dir}" claude mcp login ${account.needsAuth[0]}`}
-                  </Text>
-                </>
-              ) : null}
-            </View>
-          ))}
-          {authQuery.data.projectServers.length > 0 ? (
-            <Text style={styles.muted}>
-              Project-scoped servers (defined in a repo's .mcp.json, not managed here):{" "}
-              {[...new Set(authQuery.data.projectServers.map((entry) => entry.name))].join(", ")}
-            </Text>
+          <Tag label={server.transport} />
+          {serverHealth ? (
+            <StatusPill status={healthStatus(serverHealth.status)} label={healthWord(serverHealth.status)} />
           ) : null}
         </View>
+        <Facts
+          items={[
+            { value: `${server.presentIn.length} of ${destinations.length} destinations` },
+            server.detail ? { value: server.detail } : null,
+          ]}
+        />
+        {serverHealth && serverHealth.status !== "ok" && serverHealth.note ? (
+          <Text style={t.text.body}>{serverHealth.note}</Text>
+        ) : null}
+        <View style={{ flexDirection: "row", gap: t.space.sm }}>
+          {missing.length > 0 ? (
+            <Button
+              label={`Add to ${missing.length} missing`}
+              loading={applyMutation.isPending}
+              onPress={() => applyMutation.mutate({ name: server.name, targets: missing.map((dest) => dest.id) })}
+            />
+          ) : null}
+          <Button
+            label={revealed ? "Hide secrets" : "Reveal secrets"}
+            onPress={() => setRevealed((value) => !value)}
+          />
+        </View>
+        <Disclosure title="Rename this server everywhere">
+          <Field label="New name" value={renameTo} onChangeText={setRenameTo} placeholder={server.name} />
+          <Button
+            label="Rename everywhere"
+            loading={renameMutation.isPending}
+            disabled={!renameTo.trim() || renameTo.trim() === server.name}
+            onPress={() => renameMutation.mutate({ name: server.name, newName: renameTo.trim() })}
+          />
+        </Disclosure>
+      </Card>
+
+      {revealed ? (
+        <Notice tone="error">
+          <View style={{ gap: t.space.sm }}>
+            <Text style={t.text.body}>
+              Secrets are in clear text on this pane. They re-mask when the editor closes or you leave this server.
+            </Text>
+            <View style={{ flexDirection: "row", gap: t.space.sm }}>
+              <Button label="Hide secrets" onPress={() => setRevealed(false)} />
+            </View>
+          </View>
+        </Notice>
       ) : null}
 
-      {message ? <Text style={styles.monoText}>{message}</Text> : null}
-      {matrixQuery.isLoading ? <Text style={styles.muted}>Reading configs…</Text> : null}
-      {matrixQuery.error ? <Text style={styles.danger}>{String(matrixQuery.error)}</Text> : null}
-
-      {filtered.map((server) => {
-        const serverHealth = health?.get(server.name);
-        const isOpen = expanded === server.name;
-        return (
-          <View key={server.name} style={styles.card}>
-            <View style={styles.rowBetween}>
-                <View style={styles.row}>
-                  <Dot color={serverHealth ? healthTone(theme, serverHealth.status) : theme.colors.foregroundMuted} />
-                  <Text style={styles.strong}>{server.name}</Text>
-                  <Badge label={server.transport} theme={theme} />
-                  <Badge label={server.authStyle === "inline-credentials" ? "creds inline" : "OAuth / none"} theme={theme} />
-                  {serverHealth ? <Badge label={healthLabel(serverHealth.status)} theme={theme} tone={serverHealth.status === "ok" ? "accent" : serverHealth.status === "unknown" ? undefined : "danger"} /> : null}
-                  <Text style={styles.muted}>
-                    {server.presentIn.length}/{destinations.length}
-                  </Text>
-                </View>
-                <View style={styles.row}>
-                  <Button label={isOpen ? "Hide" : "Details"} kind="quiet" theme={theme} onPress={() => setExpanded(isOpen ? null : server.name)} />
-                  <Button label="Edit" theme={theme} onPress={() => loadEditor(server.name, false)} />
-                  {server.presentIn.length < destinations.length ? (
+      <Section title="Destinations">
+        <Card padded={false}>
+          {destinations.map((dest, index) => {
+            const present = server.presentIn.includes(dest.id);
+            const rawRow = rawRows.find((entry) => entry.destId === dest.id);
+            const defRow = defRows.find((entry) => entry.destId === dest.id);
+            const open = editing === dest.id && present;
+            return (
+              <Row
+                key={dest.id}
+                first={index === 0}
+                tone={present ? undefined : "attention"}
+                title={dest.label}
+                subtitle={
+                  present
+                    ? rawRow?.nativePreview ?? (rawQuery.isFetching ? "reading…" : undefined)
+                    : "not defined here"
+                }
+                trailing={
+                  present ? (
+                    open ? undefined : (
+                      <>
+                        <Button
+                          label="Edit"
+                          onPress={() => {
+                            setEditing(dest.id);
+                            setEditTab("fields");
+                          }}
+                        />
+                        <ConfirmButton
+                          label="Remove"
+                          confirmLabel="Remove from here"
+                          onConfirm={() => removeMutation.mutate({ name: server.name, targets: [dest.id] })}
+                        />
+                      </>
+                    )
+                  ) : (
                     <Button
-                      label="Add to all"
-                      kind="quiet"
-                      theme={theme}
-                      onPress={() =>
+                      label="Add here"
+                      onPress={() => applyMutation.mutate({ name: server.name, targets: [dest.id] })}
+                    />
+                  )
+                }
+                expanded={
+                  open ? (
+                    <DestinationEditor
+                      tab={editTab}
+                      onTab={setEditTab}
+                      defRow={defRow}
+                      rawRow={rawRow}
+                      saving={editOneMutation.isPending}
+                      otherCount={destinations.length - 1}
+                      onSaveFields={(input) => editOneMutation.mutate({ destId: dest.id, ...input })}
+                      onPut={(json, dryRun) => putJson(dest.id, json, dryRun)}
+                      onCopyEverywhere={() =>
                         applyMutation.mutate({
                           name: server.name,
-                          targets: destinations.filter((dest) => !server.presentIn.includes(dest.id)).map((dest) => dest.id),
+                          targets: destinations.filter((other) => other.id !== dest.id).map((other) => other.id),
+                          sourceDestId: dest.id,
                         })
                       }
+                      onClose={closeEditor}
                     />
-                  ) : null}
-                </View>
-              </View>
-            {serverHealth && serverHealth.status !== "ok" ? <Text style={styles.danger}>{serverHealth.note}</Text> : null}
-            {serverHealth?.status === "auth-required" ? (
-              <Text style={styles.muted}>
-                Authenticate per provider (OAuth is per account): Claude Code — run /mcp inside a session on that account;
-                other CLIs — their own MCP login flow.
-              </Text>
-            ) : null}
-            {server.detail ? <Text style={styles.monoText}>{server.detail}</Text> : null}
+                  ) : undefined
+                }
+              />
+            );
+          })}
+        </Card>
+      </Section>
 
-            {isOpen ? (
-                <View>
-                  {destinations.map((dest) => {
-                    const present = server.presentIn.includes(dest.id);
-                    const confirming = pendingRemove?.name === server.name && pendingRemove.destId === dest.id;
-                    return (
-                      <View key={dest.id} style={tableRow}>
-                        <Text style={[styles.text, layout.compact ? { width: "100%" as const } : { flex: 1 }]} numberOfLines={1}>
-                          <Text style={present ? { color: theme.colors.accent } : styles.muted}>{present ? "✓ " : "— "}</Text>
-                          {dest.label}
-                        </Text>
-                        {confirming ? (
-                          <>
-                            <Button label="Confirm remove" kind="danger" theme={theme} onPress={() => removeMutation.mutate({ name: server.name, targets: [dest.id] })} />
-                            <Button label="Cancel" kind="quiet" theme={theme} onPress={() => setPendingRemove(null)} />
-                          </>
-                        ) : present ? (
-                          <Button label="Remove" kind="quiet" theme={theme} onPress={() => setPendingRemove({ name: server.name, destId: dest.id })} />
-                        ) : (
-                          <Button label="Add" kind="quiet" theme={theme} onPress={() => applyMutation.mutate({ name: server.name, targets: [dest.id] })} />
-                        )}
-                      </View>
-                    );
-                  })}
-                </View>
+      {authQuery.data ? (
+        <AuthRows
+          server={server.name}
+          accounts={authQuery.data.accounts}
+          destinations={destinations}
+          presentIn={server.presentIn}
+          sessions={sessions}
+          daemonIsLocal={daemonIsLocal}
+          pendingDir={loginMutation.isPending ? loginMutation.variables?.accountDir ?? null : null}
+          onAuthorise={(account) =>
+            loginMutation.mutate({ accountDir: account.dir, account: account.email, server: server.name })
+          }
+          onCancel={(key) => loginCancelMutation.mutate(key)}
+          onSignOut={(account) => logoutMutation.mutate({ accountDir: account.dir, server: server.name })}
+          onCopied={(ok) =>
+            setFlash(
+              ok
+                ? { tone: "ok", text: "Sign-in link copied." }
+                : { tone: "attention", text: "No clipboard here — the link above is selectable." },
+            )
+          }
+        />
+      ) : null}
+    </View>
+  ) : (
+    emptyPane
+  );
+
+  const detail = mode === "add" ? addPane : mode === "import" ? importPane : selected ? serverPane : emptyPane;
+
+  return (
+    <Screen t={t}>
+      <Toolbar
+        title="MCP"
+        subtitle="User-level servers, shared by every project on this machine."
+        actions={
+          layout.compact ? (
+            <View style={{ gap: t.space.sm, flex: 1 }}>
+              <View style={{ flexDirection: "row", gap: t.space.sm }}>{toolbarActions.slice(0, 2)}</View>
+              <View style={{ flexDirection: "row", gap: t.space.sm }}>{toolbarActions.slice(2)}</View>
+            </View>
+          ) : (
+            toolbarActions
+          )
+        }
+        below={
+          <View style={{ gap: t.space.md }}>
+            {flash ? (
+              <Notice tone={flash.tone} onDismiss={() => setFlash(null)}>
+                {flash.text.includes("\n") ? <CodeBlock tone={flash.tone}>{flash.text}</CodeBlock> : flash.text}
+              </Notice>
             ) : null}
+            {filters}
           </View>
-        );
-      })}
-
-      <Text style={styles.muted}>
-        Tap a server to expand its destination table; Edit shows each destination's own definition. Every write backs up
-        the target config first.
-      </Text>
-    </ScrollView>
+        }
+      />
+      <SplitView list={list} detail={detail} showDetail={mode !== "browse" || Boolean(selected)} />
+    </Screen>
   );
 }

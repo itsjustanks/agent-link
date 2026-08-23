@@ -30,23 +30,31 @@ A universal manager for **user-level** MCP servers across every provider on the 
 - **Reveal secrets** — masked (`•••last4`) by default; one tap shows the stored values. Masked values are preserved on save, so editing one account can never copy its token into another. (Deliberate cross-account copies — **Add to all** and **Use for ALL** — do carry a definition's inline credentials, which is the point of those buttons.)
 - **Rename everywhere** — rewrites a server's key across every config that has it (copy-then-delete, so a failure can never lose the definition)
 - **Add server** — http or stdio, headers/env as `KEY=VALUE` lines, targeting all destinations or specific ones
+- **Edit as JSON** — a `Fields | JSON` switch on every destination. You always type the shape people actually paste out of a README (Claude's), and TOML destinations are translated on the way in and out, so you never have to know that Codex spells headers `http_headers`. Validate before saving, Preview shows exactly what the destination will hold in its own format with any dropped keys named, and errors point at a line and column with a caret.
+- **Paste JSON to import** — accepts `{"mcpServers":{…}}`, `{"servers":{…}}`, a single named entry, a bare definition, a `claude mcp add-json` command, or a TOML block; strips code fences, comments and trailing commas and tells you what it had to clean up. Unfilled placeholders like `<YOUR_TOKEN>` block the write until you say otherwise. Validation covers every server × destination pair before anything is written, so a bad import writes nothing at all rather than half of it.
+- **Authorise from the panel** — OAuth servers are authorised once per account, and this runs `claude mcp login` / `codex mcp login` under the right account for you, shows the URL to open, and watches for it to finish. Sign out is there too. (The callback lands on the daemon machine's localhost, so when Paseo's daemon is somewhere else the panel hands you the command instead of pretending.)
 - **Sync accounts** — pushes user-level definitions and project trust from each primary into its account slots
 
-Every write backs up the target config first (last 5 kept). A config file that exists but cannot be parsed is never overwritten.
+Every write backs up the target config first (last 20 kept — one "apply to all" is seven files in one press), replaces it atomically, and keeps the permissions it had, because these files hold bearer tokens. A config that exists but cannot be parsed is never overwritten. An edit is **lossless**: the stored entry is loaded and only the fields you changed are modified, so keys the plugin does not model — Claude's `type`, Codex's `enabled` and `startup_timeout_sec` — survive it.
 
 ## 🖼 Canvas
 
-Agents write HTML — dashboards, reports, diagrams — and it lands in a worktree you would otherwise have to go find in a terminal. This tab lists it and makes it openable, the way Cursor's canvases are:
+Agents write HTML, Markdown, SVG and images — dashboards, reports, diagrams — into worktrees you would otherwise have to go and find in a terminal. This tab finds them and **renders them inside Paseo**.
 
-- **Finds it automatically** — every Paseo workspace's top level plus the folders agents actually write to (`artifacts/`, `reports/`, `dashboards/`, `canvas/`), and your own `~/Artifacts`, `~/Diagrams`, `~/Canvas`. Newest first, with the page's own `<title>`.
-- **Preview** — serves the file from the daemon machine on `127.0.0.1` and opens it. Sibling assets (CSS, images) load, because the file's own folder is what gets served.
-- **Share** — starts a [Cloudflare quick tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/) and gives you an `https://…trycloudflare.com` link that works on a phone or in someone else's browser. No Cloudflare account, no upload: the file is read from disk on each request.
-- **Missing dependency, not a dead button** — sharing needs `cloudflared`. Without it, preview still works and the tab tells you the one command to install (`brew install cloudflared` and the equivalent elsewhere) instead of failing.
-- **Stop / Unshare** — per file or all at once. Everything dies with the plugin: the tunnel is a child process and the links stop working when Paseo stops.
+- **It renders in the app, not in a browser.** A Paseo surface is React Native, so there is no WebView to put a page in. The artifact is rasterised on the daemon with headless Chrome over the DevTools protocol — full page height, not a viewport crop — and the picture is what you see in the panel. That is also the only thing that works when **the daemon is a server somewhere else**: opening a browser on that machine would show the page to nobody. Renders are ~0.5s warm, WebP, and cached against the file's own mtime, so reopening one is instant.
+- **Four kinds, one path.** HTML renders as authored. Markdown becomes a typeset report — headings, tables, task lists, code blocks — drawn in *your* Paseo theme, so a report matches the app around it. SVG and images are framed the same way. Markdown matters because an agent asked for a report writes `.md` far more often than a styled page.
+- **Where it looks** — every workspace's top level, the folders agents actually write to (`artifacts/`, `reports/`, `dashboards/`, `canvas/`), your own `~/Artifacts`, `~/Diagrams`, `~/Canvas`, and **Claude Code's own session scratchpads**, which is where the Artifact tool leaves a page before it is published anywhere.
+- **New canvas** — describe a dashboard and an agent builds it. It is dispatched into the workspace you pick, through your rotating provider, with the brief that decides whether the result renders at all: one self-contained file, no CDN, a real `<title>`. When the agent has written it, it appears in the list.
+- **Share** — a [Cloudflare quick tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/) for when someone needs the live, interactive page instead of a picture of it. The page is read from disk on every request, so a shared link keeps showing the current file — unlike an uploaded snapshot, which is frozen the moment it is published. A Markdown artifact is turned into a page at request time too.
+- **Missing dependency, not a dead button.** Rendering needs Chrome or Chromium (a `chrome-headless-shell` from a Playwright or Puppeteer cache is preferred when present, and is faster); sharing needs `cloudflared`. Without either, the tab names the one command that fixes it and everything else keeps working.
 
-A shared link is **public while it is up** — the URL carries an unguessable token, but anyone holding it can open the file. Only the artifact's own folder is reachable, path traversal out of it is refused, and nothing is writable.
+A shared link is **public while it is up** — the URL carries an unguessable token, only the artifact's own folder is reachable, path traversal out of it is refused, nothing is writable, and the tunnel dies with the plugin.
 
-The link is held back until it actually resolves. cloudflared prints the hostname before DNS carries it, and a lookup made in that window gets cached as a failure by the machine that made it — so the tab shows "opening" for a few seconds rather than handing you a link that appears broken.
+The link is held back until it actually resolves. cloudflared prints the hostname before DNS carries it, and a lookup made in that window is cached as a failure by the machine that made it — so the tab shows "opening" for a few seconds rather than handing you a link that appears broken.
+
+### About Claude artifacts
+
+Claude Code's Artifact tool writes a real file to disk and then publishes it to `claude.ai`. The **local file** is what this tab shows — including the ones sitting in session scratchpads that nothing else surfaces. The published copy lives behind a login and has no local registry, so no panel can list or update it; anything claiming otherwise would be guessing.
 
 ### Built for narrow screens
 

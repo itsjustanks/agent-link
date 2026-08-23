@@ -1,12 +1,14 @@
 import type { PluginContext } from "@getpaseo/plugin";
 import { AgentSyncSurface } from "./agents.client";
 import { CanvasSurface } from "./canvas.client";
-import { canvasCopy, canvasOpen, canvasServe, canvasState, canvasStop } from "./canvas.shared";
+import { canvasCopy, canvasOpen, canvasRender, canvasServe, canvasSource, canvasState, canvasStop } from "./canvas.shared";
 import {
   canvasShutdown,
   handleCanvasCopy,
   handleCanvasOpen,
+  handleCanvasRender,
   handleCanvasServe,
+  handleCanvasSource,
   handleCanvasState,
   handleCanvasStop,
 } from "./canvas.server";
@@ -49,7 +51,35 @@ import {
   handleWireProvider,
 } from "./handlers.server";
 import { McpSurface } from "./mcp.client";
+import {
+  mcpExport,
+  mcpExportFile,
+  mcpImportApply,
+  mcpImportParse,
+  mcpLogin,
+  mcpLoginCancel,
+  mcpLoginStatus,
+  mcpLogout,
+  mcpRawGet,
+  mcpRawPut,
+} from "./mcpjson.shared";
+import {
+  handleMcpExport,
+  handleMcpExportFile,
+  handleMcpImportApply,
+  handleMcpImportParse,
+  handleMcpLogin,
+  handleMcpLoginCancel,
+  handleMcpLoginStatus,
+  handleMcpLogout,
+  handleMcpRawGet,
+  handleMcpRawPut,
+  mcpLoginShutdown,
+} from "./mcpjson.server";
 
+// Every contract defined in a *.shared.ts must be registered here. One that is
+// not simply fails when the panel calls it, with nothing in the logs to explain
+// why — so this list is the thing to check first when a button does nothing.
 export default function contribute(plugin: PluginContext) {
   plugin.handle(scan, handleScan);
   plugin.handle(wireProvider, handleWireProvider);
@@ -73,6 +103,18 @@ export default function contribute(plugin: PluginContext) {
   plugin.handle(canvasStop, handleCanvasStop);
   plugin.handle(canvasOpen, handleCanvasOpen);
   plugin.handle(canvasCopy, handleCanvasCopy);
+  plugin.handle(canvasRender, handleCanvasRender);
+  plugin.handle(canvasSource, handleCanvasSource);
+  plugin.handle(mcpRawGet, handleMcpRawGet);
+  plugin.handle(mcpRawPut, handleMcpRawPut);
+  plugin.handle(mcpImportParse, handleMcpImportParse);
+  plugin.handle(mcpImportApply, handleMcpImportApply);
+  plugin.handle(mcpExport, handleMcpExport);
+  plugin.handle(mcpExportFile, handleMcpExportFile);
+  plugin.handle(mcpLogin, handleMcpLogin);
+  plugin.handle(mcpLoginStatus, handleMcpLoginStatus);
+  plugin.handle(mcpLoginCancel, handleMcpLoginCancel);
+  plugin.handle(mcpLogout, handleMcpLogout);
 
   plugin.addSurface("agent-sync", AgentSyncSurface);
   plugin.addSurface("mcp", McpSurface);
@@ -112,5 +154,10 @@ export default function contribute(plugin: PluginContext) {
   });
   // The local server and any quick tunnel belong to this process, and nothing
   // they serve should outlive it.
-  return () => canvasShutdown();
+  return () => {
+    canvasShutdown();
+    // A login child is deliberately kept alive across its RPC, so nothing else
+    // would ever reap it.
+    mcpLoginShutdown();
+  };
 }

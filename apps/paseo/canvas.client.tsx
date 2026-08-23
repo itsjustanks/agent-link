@@ -1,10 +1,41 @@
 import type { PluginSurfaceProps } from "@getpaseo/plugin";
-import { useRpc } from "@getpaseo/plugin";
+import { usePaseo, useRpc } from "@getpaseo/plugin";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import React, { useMemo, useState } from "react";
-import { ScrollView, Text, View } from "react-native";
-import { canvasCopy, canvasOpen, canvasServe, canvasState, canvasStop, type Artifact, type CanvasState } from "./canvas.shared";
-import { Badge, Btn, Dot, STATUS, makeStyles } from "./ui.client";
+import { Text, View } from "react-native";
+import {
+  canvasCopy,
+  canvasOpen,
+  canvasRender,
+  canvasServe,
+  canvasSource,
+  canvasState,
+  canvasStop,
+  type Artifact,
+  type CanvasState,
+} from "./canvas.shared";
+import {
+  Button,
+  Card,
+  CodeBlock,
+  Disclosure,
+  EmptyState,
+  Facts,
+  Field,
+  Figure,
+  Loading,
+  Notice,
+  Row,
+  Screen,
+  Section,
+  Segmented,
+  SplitView,
+  StatusPill,
+  Tag,
+  Toolbar,
+  useUi,
+  type Status,
+} from "./ui.client";
 
 function ago(epoch: number): string {
   const seconds = Math.max(0, Math.floor(Date.now() / 1000) - epoch);
@@ -22,211 +53,462 @@ function size(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+const KIND_LABEL: Record<Artifact["kind"], string> = {
+  html: "page",
+  markdown: "report",
+  svg: "diagram",
+  image: "image",
+};
+
+/**
+ * What an agent is told when you ask for a dashboard. The rules are the ones
+ * that decide whether the result renders at all: one file, nothing fetched at
+ * runtime, and a title — the panel rasterises it on the daemon with no network
+ * guarantees and lists it by that title.
+ */
+function brief(request: string, name: string): string {
+  return [
+    `Build a self-contained HTML dashboard and save it as artifacts/${name}.html in this workspace.`,
+    "",
+    request.trim(),
+    "",
+    "Requirements:",
+    "- One file. Inline all CSS and JavaScript; no CDN links, no external fonts, no runtime fetches.",
+    "- Give it a <title> — that is the name it appears under.",
+    "- Lay it out for a 1200px-wide page, and make it readable on a dark background.",
+    "- Use real data you can read from this repository; where you cannot, label the number as an estimate.",
+    "- When it is written, reply with just the path.",
+  ].join("\n");
+}
+
 export function CanvasSurface({ theme, layout }: PluginSurfaceProps) {
+  const t = useUi(theme, layout.compact);
+  const paseo = usePaseo();
   const queryClient = useQueryClient();
   const callState = useRpc(canvasState);
+  const callRender = useRpc(canvasRender);
   const callServe = useRpc(canvasServe);
   const callStop = useRpc(canvasStop);
   const callOpen = useRpc(canvasOpen);
   const callCopy = useRpc(canvasCopy);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [copied, setCopied] = useState<string | null>(null);
-  const styles = useMemo(() => makeStyles(theme, layout.compact), [theme, layout.compact]);
-  const Button = (props: React.ComponentProps<typeof Btn>) => <Btn compact={layout.compact} {...props} />;
+  const callSource = useRpc(canvasSource);
 
-  const query = useQuery({
+  const [selected, setSelected] = useState<string | null>(null);
+  const [mode, setMode] = useState<"view" | "create">("view");
+  const [scale, setScale] = useState<"1" | "2">("2");
+  const [search, setSearch] = useState("");
+  const [notice, setNotice] = useState<{ tone: Status; text: string } | null>(null);
+  const [request, setRequest] = useState("");
+  const [name, setName] = useState("dashboard");
+  const [target, setTarget] = useState<{ id: string; name: string } | null>(null);
+
+  const state = useQuery({
     queryKey: ["agent-link", "canvas"],
     queryFn: () => callState({}),
-    // A tunnel takes a few seconds to come up; poll while one is starting.
     refetchInterval: (result) => (result.state.data?.tunnel.state === "starting" ? 2_000 : false),
   });
   const apply = (next: CanvasState) => queryClient.setQueryData(["agent-link", "canvas"], next);
+  const data = state.data;
+
+  const artifacts = data?.artifacts ?? [];
+  const current = artifacts.find((artifact) => artifact.path === selected) ?? null;
+  const filtered = useMemo(() => {
+    const needle = search.trim().toLowerCase();
+    if (!needle) return artifacts;
+    return artifacts.filter((artifact) =>
+      `${artifact.title} ${artifact.name} ${artifact.where} ${artifact.dir}`.toLowerCase().includes(needle),
+    );
+  }, [artifacts, search]);
+
+  // Paseo's own palette goes into generated pages, so a rendered report looks
+  // like it belongs in the app rather than like a browser print-out.
+  const pageTheme = {
+    background: theme.colors.surface0,
+    foreground: theme.colors.foreground,
+    muted: theme.colors.foregroundMuted,
+    accent: theme.colors.accent,
+  };
+
+  const render = useQuery({
+    queryKey: ["agent-link", "canvas-render", current?.path, current?.modified, scale, theme.colors.surface0],
+    queryFn: () =>
+      callRender({ path: current!.path, width: 1200, scale: Number(scale), theme: pageTheme }),
+    enabled: Boolean(current) && Boolean(data?.renderer.installed),
+    staleTime: Infinity,
+    retry: false,
+  });
+
+  const source = useQuery({
+    queryKey: ["agent-link", "canvas-source", current?.path, current?.modified],
+    queryFn: () => callSource({ path: current!.path }),
+    enabled: false,
+    retry: false,
+  });
+
+  const workspaces = useQuery({
+    queryKey: ["agent-link", "canvas-workspaces"],
+    queryFn: async () => {
+      const result = (await paseo.workspaces.list({ page: { limit: 200 } })) as {
+        entries: Array<Record<string, unknown>>;
+      };
+      return (result.entries ?? [])
+        .filter((entry) => !entry.archivingAt)
+        .map((entry) => ({ id: String(entry.id), name: String(entry.name ?? entry.id) }));
+    },
+    enabled: mode === "create",
+  });
+
+  const providers = useQuery({
+    queryKey: ["agent-link", "canvas-providers"],
+    queryFn: async () => {
+      const { config } = (await paseo.config.get()) as { config: Record<string, unknown> };
+      const shape = config as { providers?: Record<string, unknown>; agents?: { providers?: Record<string, unknown> } };
+      // The daemon returns providers flattened; older shapes nest them.
+      const ids = Object.keys(shape.providers ?? shape.agents?.providers ?? {});
+      const preferred = ids.find((id) => id === "claude-auto") ?? ids.find((id) => id.startsWith("claude")) ?? ids[0];
+      return { ids, preferred: preferred ?? "claude" };
+    },
+    enabled: mode === "create",
+  });
 
   const serveMutation = useMutation({
-    mutationFn: (input: { path: string; share: boolean }) => callServe(input),
+    mutationFn: (input: { path: string; share: boolean }) => callServe({ ...input, theme: pageTheme }),
     onSuccess: (next, input) => {
       apply(next);
       const artifact = next.artifacts.find((candidate) => candidate.path === input.path);
-      if (input.share && next.tunnel.state === "failed") setNotice(next.tunnel.error);
-      else if (input.share && artifact?.publicUrl) setNotice("Public link ready — anyone with it can open this file.");
-      else if (input.share) setNotice("Opening a public link. Cloudflare takes a few seconds to publish the address.");
-      else if (artifact?.localUrl) setNotice("Serving locally. Open it on this machine, or press Share for a link.");
+      if (input.share && next.tunnel.state === "failed") setNotice({ tone: "error", text: next.tunnel.error });
+      else if (input.share && artifact?.publicUrl)
+        setNotice({ tone: "ok", text: "Public link ready — anyone holding it can open this file." });
+      else if (input.share)
+        setNotice({ tone: "attention", text: "Opening a public link. Cloudflare takes a few seconds to publish the address." });
     },
-    onError: (error: Error) => setNotice(error.message),
+    onError: (error: Error) => setNotice({ tone: "error", text: error.message }),
   });
   const stopMutation = useMutation({
     mutationFn: (path?: string) => callStop(path ? { path } : {}),
     onSuccess: apply,
+    onError: (error: Error) => setNotice({ tone: "error", text: error.message }),
   });
-  const copy = async (url: string) => {
-    await callCopy({ url });
-    setCopied(url);
-    setTimeout(() => setCopied((current) => (current === url ? null : current)), 1_500);
-  };
+  const openMutation = useMutation({
+    mutationFn: (url: string) => callOpen({ url }),
+    onSuccess: (result) => setNotice({ tone: result.opened ? "ok" : "error", text: result.message }),
+    onError: (error: Error) => setNotice({ tone: "error", text: error.message }),
+  });
+  const copyMutation = useMutation({
+    mutationFn: (url: string) => callCopy({ url }),
+    onSuccess: () => setNotice({ tone: "ok", text: "Link copied on the daemon machine. It is also selectable above." }),
+    onError: (error: Error) => setNotice({ tone: "error", text: error.message }),
+  });
+  const rescan = useMutation({
+    mutationFn: () => callState({ refresh: true }),
+    onSuccess: apply,
+    onError: (error: Error) => setNotice({ tone: "error", text: error.message }),
+  });
 
-  const data = query.data;
-  const groups = useMemo(() => {
-    const map = new Map<string, Artifact[]>();
-    for (const artifact of data?.artifacts ?? []) {
-      const list = map.get(artifact.where) ?? [];
-      list.push(artifact);
-      map.set(artifact.where, list);
-    }
-    return [...map.entries()];
-  }, [data?.artifacts]);
+  const create = useMutation({
+    mutationFn: async () => {
+      if (!target) throw new Error("Pick a workspace for the new canvas.");
+      const provider = providers.data?.preferred ?? "claude";
+      const slug = (name.trim() || "dashboard").replace(/[^a-zA-Z0-9._-]/g, "-");
+      const workspace = paseo.workspaces.ref(target.id) as unknown as {
+        agents: { create: (options: Record<string, unknown>) => Promise<unknown> };
+      };
+      await workspace.agents.create({
+        config: { provider },
+        title: `Canvas: ${slug}`,
+        prompt: brief(request, slug),
+      });
+      return slug;
+    },
+    onSuccess: (slug) => {
+      setMode("view");
+      setRequest("");
+      setNotice({
+        tone: "ok",
+        text: `An agent is building ${slug}.html in ${target?.name}. Press Rescan when it reports back and it appears here.`,
+      });
+    },
+    onError: (error: Error) => setNotice({ tone: "error", text: error.message }),
+  });
 
   const tunnelState = data?.tunnel.state ?? "off";
-  const tunnelColor =
-    tunnelState === "on" ? STATUS.green : tunnelState === "starting" ? STATUS.orange : tunnelState === "failed" ? STATUS.red : theme.colors.foregroundMuted;
+  const tunnelStatus: Status =
+    tunnelState === "on" ? "ok" : tunnelState === "starting" ? "busy" : tunnelState === "failed" ? "error" : "neutral";
+  const sharing = (data?.serving.length ?? 0) > 0;
 
-  return (
-    <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
-      <View style={styles.headerRow}>
-        <View style={{ gap: 2, flexShrink: 1 }}>
-          <Text style={styles.title}>Canvas</Text>
-          <Text style={styles.subtitle}>
-            The HTML your agents write — dashboards, reports, diagrams. Preview one here, or hand out a link that works anywhere.
-          </Text>
-        </View>
-        <View style={styles.row}>
-          <Button label={query.isFetching ? "Scanning…" : "Rescan"} kind="quiet" theme={theme} onPress={() => void callState({ refresh: true }).then(apply)} />
-          {(data?.serving.length ?? 0) > 0 ? (
-            <Button label="Stop all" kind="danger" theme={theme} onPress={() => stopMutation.mutate(undefined)} />
-          ) : null}
-        </View>
+  const list = (
+    <Card padded={false}>
+      <View style={{ padding: t.space.md, gap: t.space.sm }}>
+        <Field value={search} onChangeText={setSearch} placeholder={`Search ${artifacts.length} artifacts`} />
       </View>
-
-      {notice ? (
-        <View style={styles.banner}>
-          <Text style={styles.bannerText}>{notice}</Text>
-        </View>
+      {filtered.length === 0 ? (
+        <EmptyState
+          title={artifacts.length === 0 ? "Nothing built yet" : "No match"}
+          body={
+            artifacts.length === 0
+              ? "Anything an agent writes as .html, .md or .svg in a workspace — or in artifacts/, reports/, dashboards/ — shows up here. Or press New canvas and describe what you want."
+              : "No artifact matches that search."
+          }
+        />
       ) : null}
+      {filtered.slice(0, 200).map((artifact, index) => (
+        <Row
+          key={artifact.path}
+          first={index === 0}
+          selected={artifact.path === current?.path}
+          onPress={() => {
+            setSelected(artifact.path);
+            setMode("view");
+          }}
+          title={artifact.title || artifact.name}
+          subtitle={artifact.where}
+          meta={
+            <Facts
+              items={[
+                { value: KIND_LABEL[artifact.kind] },
+                { value: ago(artifact.modified) },
+                artifact.publicUrl ? { value: "shared", tone: "ok" } : null,
+              ]}
+            />
+          }
+        />
+      ))}
+    </Card>
+  );
 
-      {/* What sharing needs, said once, before anyone presses a button. */}
-      <View style={styles.card}>
-        <View style={styles.rowBetween}>
-          <View style={styles.row}>
-            <Dot color={data?.cloudflared.installed ? tunnelColor : STATUS.orange} />
-            <Text style={styles.strong}>
-              {!data?.cloudflared.installed
-                ? "Public links need cloudflared"
-                : tunnelState === "on"
-                  ? "Sharing is live"
-                  : tunnelState === "starting"
-                    ? "Opening a tunnel…"
-                    : tunnelState === "failed"
-                      ? "The tunnel failed"
-                      : "Ready to share"}
+  const detail = mode === "create" ? (
+    <Card>
+      <Section title="New canvas">
+        <Text style={t.text.body}>
+          Describe the dashboard and an agent builds it in the workspace you choose, as a single self-contained page.
+          It appears in this list when the agent has written it.
+        </Text>
+      </Section>
+      <Field
+        label="What should it show?"
+        value={request}
+        onChangeText={setRequest}
+        multiline
+        minHeight={110}
+        placeholder="A dashboard of this repo's test suite: pass rate over the last 30 days, slowest tests, and which files changed most."
+      />
+      <Field label="File name" value={name} onChangeText={setName} hint={`Saved as artifacts/${(name.trim() || "dashboard").replace(/[^a-zA-Z0-9._-]/g, "-")}.html`} />
+      <Section title="Workspace">
+        {workspaces.isPending ? <Loading label="Reading workspaces…" /> : null}
+        <View style={{ maxHeight: 220 }}>
+          <Card level={2} padded={false}>
+            {(workspaces.data ?? []).slice(0, 40).map((workspace, index) => (
+              <Row
+                key={workspace.id}
+                first={index === 0}
+                selected={target?.id === workspace.id}
+                onPress={() => setTarget(workspace)}
+                title={workspace.name}
+              />
+            ))}
+          </Card>
+        </View>
+      </Section>
+      <View style={{ flexDirection: "row", gap: t.space.sm, alignItems: "center" }}>
+        <Button
+          label="Build it"
+          variant="primary"
+          loading={create.isPending}
+          disabled={!request.trim() || !target}
+          onPress={() => create.mutate()}
+        />
+        <Button label="Cancel" variant="ghost" onPress={() => setMode("view")} />
+        {providers.data ? <Tag label={`via ${providers.data.preferred}`} /> : null}
+      </View>
+    </Card>
+  ) : !current ? (
+    <Card>
+      <EmptyState
+        title="Pick an artifact"
+        body="It renders here, inside Paseo — the page is rasterised on the daemon machine, so this works the same when the daemon is a server somewhere else. Sharing is separate: that hands out a live link to the real page."
+        action={<Button label="New canvas" variant="primary" onPress={() => setMode("create")} />}
+      />
+    </Card>
+  ) : (
+    <View style={{ gap: t.space.md }}>
+      <Card>
+        <View style={{ flexDirection: t.compact ? "column" : "row", justifyContent: "space-between", gap: t.space.md }}>
+          <View style={{ flex: 1, minWidth: 0, gap: 4 }}>
+            <Text style={t.text.heading} numberOfLines={2}>
+              {current.title || current.name}
+            </Text>
+            <Facts
+              items={[
+                { value: KIND_LABEL[current.kind] },
+                { value: size(current.bytes) },
+                { value: ago(current.modified) },
+              ]}
+            />
+            <Text selectable style={t.text.mono} numberOfLines={1}>
+              {current.dir}/{current.name}
             </Text>
           </View>
-          {tunnelState === "on" ? <Badge label="public" theme={theme} tone="danger" /> : null}
+          <View style={{ flexDirection: "row", gap: t.space.sm, alignItems: "flex-start", flexShrink: 0 }}>
+            <Segmented
+              value={scale}
+              onChange={setScale}
+              options={[
+                { value: "1", label: "1×" },
+                { value: "2", label: "2×" },
+              ]}
+            />
+            <Button label="Refresh" variant="ghost" loading={render.isFetching} onPress={() => void render.refetch()} />
+          </View>
         </View>
 
-        {!data?.cloudflared.installed ? (
-          <View style={{ gap: 6 }}>
-            <Text style={styles.muted}>
-              Local preview works without it. For a link other people can open, install cloudflared and press Share again:
-            </Text>
-            <Text selectable style={styles.monoText}>
-              {data?.cloudflared.install ?? "brew install cloudflared"}
-            </Text>
-          </View>
+        {data?.renderer.installed ? (
+          <Figure
+            uri={render.data?.dataUri}
+            width={render.data?.width}
+            height={render.data?.height}
+            loading={render.isFetching}
+            label={current.title || current.name}
+            note={
+              render.data?.truncated
+                ? "Cut off at 12,000px — share it and open the link for the whole page."
+                : render.data
+                  ? `${render.data.width}×${render.data.height} · ${size(render.data.bytes)}${render.data.fromCache ? " · cached" : ` · ${render.data.ms}ms`}`
+                  : undefined
+            }
+            placeholder={
+              render.error ? (
+                <View style={{ padding: t.space.lg }}>
+                  <Notice tone="error">{(render.error as Error).message}</Notice>
+                </View>
+              ) : null
+            }
+          />
         ) : (
-          <Text style={styles.muted}>
-            {tunnelState === "starting"
-              ? "Cloudflare needs a few seconds to publish the address. The link appears once it answers — waiting saves you a failed lookup your machine would cache."
-              : data?.tunnel.error || data?.cloudflared.note}
-          </Text>
+          <Notice tone="attention">
+            <View style={{ gap: t.space.sm }}>
+              <Text style={t.text.body}>{data?.renderer.note}</Text>
+              <CodeBlock>{data?.renderer.install ?? ""}</CodeBlock>
+            </View>
+          </Notice>
         )}
 
-        {tunnelState === "on" ? (
-          <View style={styles.rowBetween}>
-            <Text selectable style={styles.monoText}>
-              {data?.tunnel.url}
-            </Text>
-            <Button label="Stop sharing" kind="danger" theme={theme} onPress={() => stopMutation.mutate(undefined)} />
-          </View>
-        ) : null}
-      </View>
-
-      {data && data.artifacts.length === 0 ? (
-        <View style={styles.card}>
-          <Text style={styles.strong}>Nothing to show yet</Text>
-          <Text style={styles.muted}>
-            Ask an agent for a dashboard or report and save it as an .html file in the workspace root or an artifacts/ folder — it appears here.
-          </Text>
-          {data.roots.length > 0 ? <Text style={styles.monoText}>looked in: {data.roots.length} folder{data.roots.length === 1 ? "" : "s"}</Text> : null}
-          {data.error ? <Text style={styles.danger}>{data.error}</Text> : null}
+        <View style={{ flexDirection: "row", gap: t.space.sm, flexWrap: "wrap" }}>
+          {current.publicUrl ? (
+            <>
+              <Button label="Copy link" variant="primary" onPress={() => copyMutation.mutate(current.publicUrl)} />
+              <Button label="Open" variant="secondary" onPress={() => openMutation.mutate(current.publicUrl)} />
+              <Button label="Stop sharing this" variant="danger" onPress={() => stopMutation.mutate(current.path)} />
+            </>
+          ) : (
+            <>
+              <Button
+                label={tunnelState === "starting" ? "Opening…" : "Share a link"}
+                variant="primary"
+                loading={serveMutation.isPending || tunnelState === "starting"}
+                onPress={() => serveMutation.mutate({ path: current.path, share: true })}
+              />
+              {current.localUrl ? (
+                <Button label="Open on the daemon" variant="secondary" onPress={() => openMutation.mutate(current.localUrl)} />
+              ) : (
+                <Button
+                  label="Serve locally"
+                  variant="secondary"
+                  onPress={() => serveMutation.mutate({ path: current.path, share: false })}
+                />
+              )}
+            </>
+          )}
         </View>
+
+        {current.publicUrl ? (
+          <Text selectable style={t.text.mono}>
+            {current.publicUrl}
+          </Text>
+        ) : null}
+      </Card>
+
+      {current.kind !== "image" ? (
+        <Card>
+          <Disclosure title="Source">
+            <Button label={source.data ? "Reload" : "Read the file"} variant="ghost" onPress={() => void source.refetch()} />
+            {source.isFetching ? <Loading /> : null}
+            {source.data ? (
+              <CodeBlock>
+                {source.data.text.slice(0, 8000) + (source.data.truncated || source.data.text.length > 8000 ? "\n…" : "")}
+              </CodeBlock>
+            ) : null}
+          </Disclosure>
+        </Card>
+      ) : null}
+    </View>
+  );
+
+  return (
+    <Screen t={t}>
+      <Toolbar
+        title="Canvas"
+        subtitle="What your agents built — rendered here, or handed out as a link."
+        actions={
+          <>
+            <Button label="New canvas" variant="primary" onPress={() => setMode("create")} />
+            <Button label="Rescan" variant="ghost" loading={rescan.isPending} onPress={() => rescan.mutate()} />
+          </>
+        }
+        below={
+          sharing || tunnelState !== "off" ? (
+            <Card level={2}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: t.space.md, flexWrap: "wrap" }}>
+                <StatusPill
+                  status={tunnelStatus}
+                  label={
+                    tunnelState === "on"
+                      ? "Sharing live"
+                      : tunnelState === "starting"
+                        ? "Opening a link"
+                        : tunnelState === "failed"
+                          ? "Sharing failed"
+                          : "Serving locally"
+                  }
+                />
+                <Text style={[t.text.caption, { flex: 1, minWidth: 160 }]}>
+                  {tunnelState === "on"
+                    ? "Read from disk on every request, so the link always shows the current file. It stops when Paseo stops."
+                    : tunnelState === "starting"
+                      ? "Cloudflare takes a few seconds to publish the address. The link appears once it answers."
+                      : data?.tunnel.error || `${data?.serving.length ?? 0} file(s) served on this machine.`}
+                </Text>
+                <Button label="Stop all" variant="danger" onPress={() => stopMutation.mutate(undefined)} />
+              </View>
+            </Card>
+          ) : undefined
+        }
+      />
+
+      {notice ? (
+        <Notice tone={notice.tone} onDismiss={() => setNotice(null)}>
+          {notice.text}
+        </Notice>
       ) : null}
 
-      {groups.map(([where, artifacts]) => (
-        <View key={where} style={styles.card}>
-          <Text style={styles.sectionTitle}>{where}</Text>
-          {artifacts.map((artifact) => {
-            const live = Boolean(artifact.localUrl);
-            const url = artifact.publicUrl || artifact.localUrl;
-            return (
-              <View key={artifact.path} style={[styles.divider, { paddingTop: styles.gap, gap: 6 }]}>
-                <View style={styles.rowBetween}>
-                  <View style={{ gap: 2, flexShrink: 1 }}>
-                    <View style={styles.row}>
-                      <Dot color={artifact.publicUrl ? STATUS.green : live ? STATUS.orange : theme.colors.foregroundMuted + "88"} />
-                      <Text style={styles.strong}>{artifact.title || artifact.name}</Text>
-                      {artifact.publicUrl ? <Badge label="shared" theme={theme} tone="danger" /> : null}
-                    </View>
-                    <Text style={styles.monoText}>
-                      {artifact.dir}/{artifact.name}
-                    </Text>
-                    <Text style={styles.muted}>
-                      {size(artifact.bytes)} · {ago(artifact.modified)}
-                    </Text>
-                  </View>
-                </View>
+      {state.isPending ? <Loading label="Looking for artifacts…" /> : null}
+      {data?.error ? <Notice tone="attention">{data.error}</Notice> : null}
 
-                <View style={styles.row}>
-                  <Button
-                    label={live ? "Open" : "Preview"}
-                    theme={theme}
-                    kind={live ? "primary" : "quiet"}
-                    onPress={() => {
-                      if (live) void callOpen({ url: artifact.localUrl }).then((result) => setNotice(result.message));
-                      else serveMutation.mutate({ path: artifact.path, share: false });
-                    }}
-                  />
-                  {artifact.publicUrl ? (
-                    <>
-                      <Button label={copied === artifact.publicUrl ? "Copied" : "Copy link"} kind="quiet" theme={theme} onPress={() => void copy(artifact.publicUrl)} />
-                      <Button label="Unshare" kind="danger" theme={theme} onPress={() => stopMutation.mutate(artifact.path)} />
-                    </>
-                  ) : (
-                    <Button
-                      label={tunnelState === "starting" ? "Opening…" : "Share"}
-                      kind="quiet"
-                      theme={theme}
-                      disabled={serveMutation.isPending || tunnelState === "starting"}
-                      onPress={() => serveMutation.mutate({ path: artifact.path, share: true })}
-                    />
-                  )}
-                  {live && !artifact.publicUrl ? (
-                    <Button label="Stop" kind="quiet" theme={theme} onPress={() => stopMutation.mutate(artifact.path)} />
-                  ) : null}
-                </View>
+      <SplitView
+        list={list}
+        detail={detail}
+        showDetail={Boolean(current) || mode === "create"}
+      />
 
-                {url ? (
-                  <Text selectable style={styles.monoText}>
-                    {url}
-                  </Text>
-                ) : null}
-              </View>
-            );
-          })}
-        </View>
-      ))}
-
-      <Text style={styles.muted}>
-        Files are read from disk on request — nothing is uploaded or copied. A shared link is public while it is up and stops working when Paseo stops.
-      </Text>
-    </ScrollView>
+      {t.compact && (current || mode === "create") ? (
+        <Button
+          label="Back to all artifacts"
+          variant="ghost"
+          onPress={() => {
+            setSelected(null);
+            setMode("view");
+          }}
+        />
+      ) : null}
+    </Screen>
   );
 }

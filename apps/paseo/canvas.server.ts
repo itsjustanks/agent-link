@@ -4,8 +4,13 @@ import { randomBytes } from "node:crypto";
 import { createReadStream, existsSync, openSync, readSync, closeSync, readdirSync, realpathSync, statSync, type Dirent, type Stats } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { homedir, platform } from "node:os";
+import { readFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { basename, extname, join, resolve, sep } from "node:path";
-import type { Artifact, CanvasState } from "./canvas.shared";
+import { tmpdir } from "node:os";
+import type { Artifact, ArtifactKind, CanvasState, Render } from "./canvas.shared";
+import { markdownToHtml, wrapDocument, wrapSvg, type PageTheme } from "./markdown.server";
+import { chromeHint, closeBrowser, findChrome, renderUrl } from "./render.server";
 
 const HOME = homedir();
 
@@ -17,8 +22,62 @@ const SKIP_DIRS = new Set([
 ]);
 // Personal folders outside any workspace — where a one-off report tends to land.
 const PERSONAL_ROOTS = [join(HOME, "Artifacts"), join(HOME, "Diagrams"), join(HOME, "Canvas")];
+// Claude Code writes an artifact into its per-session scratchpad before (or
+// instead of) publishing it. Those pages are otherwise unreachable: the folder
+// is a temp path nobody browses, and a published artifact lives behind a login.
+const CLAUDE_SCRATCH = "/private/tmp";
+const CLAUDE_SCRATCH_ROOTS = 8;
+
+function claudeScratchpads(): Root[] {
+  const found: Array<{ dir: string; at: number }> = [];
+  for (const uid of listDirNames(CLAUDE_SCRATCH, /^claude-\d+$/)) {
+    for (const project of listDirNames(join(CLAUDE_SCRATCH, uid), /^-/)) {
+      for (const session of listDirNames(join(CLAUDE_SCRATCH, uid, project), /./)) {
+        const dir = join(CLAUDE_SCRATCH, uid, project, session, "scratchpad");
+        try {
+          found.push({ dir, at: statSync(dir).mtimeMs });
+        } catch {
+          // no scratchpad in this session
+        }
+      }
+    }
+  }
+  return found
+    .sort((a, b) => b.at - a.at)
+    .slice(0, CLAUDE_SCRATCH_ROOTS)
+    .map((entry) => ({ dir: entry.dir, label: "Claude artifacts", personal: true }));
+}
+
+function listDirNames(root: string, match: RegExp): string[] {
+  try {
+    return readdirSync(root, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && match.test(entry.name))
+      .map((entry) => entry.name);
+  } catch {
+    return [];
+  }
+}
 const MAX_PER_ROOT = 120;
 const MAX_DEPTH = 2;
+
+// What the panel can render, and how. Markdown matters as much as HTML: an
+// agent asked for a report writes .md far more often than a styled page.
+const KINDS: Record<string, ArtifactKind> = {
+  ".html": "html",
+  ".htm": "html",
+  ".md": "markdown",
+  ".markdown": "markdown",
+  ".svg": "svg",
+  ".png": "image",
+  ".jpg": "image",
+  ".jpeg": "image",
+  ".webp": "image",
+  ".gif": "image",
+};
+
+function kindOf(name: string): ArtifactKind | null {
+  return KINDS[extname(name).toLowerCase()] ?? null;
+}
 
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -45,14 +104,20 @@ const MIME: Record<string, string> = {
 
 // ------------------------------------------------------------------ discovery
 
-function titleOf(path: string): string {
+function titleOf(path: string, kind: ArtifactKind): string {
+  if (kind === "image") return "";
   // Only the head of the file: a generated dashboard can be megabytes of data.
   let fd: number | null = null;
   try {
     fd = openSync(path, "r");
     const buffer = Buffer.alloc(4096);
     const read = readSync(fd, buffer, 0, buffer.length, 0);
-    const match = /<title[^>]*>([\s\S]{1,200}?)<\/title>/i.exec(buffer.subarray(0, read).toString("utf8"));
+    const head = buffer.subarray(0, read).toString("utf8");
+    if (kind === "markdown") {
+      const heading = /^\s{0,3}#{1,6}\s+(.+)$/m.exec(head);
+      return heading ? heading[1]!.replace(/[*_`#]/g, "").trim().slice(0, 120) : "";
+    }
+    const match = /<title[^>]*>([\s\S]{1,200}?)<\/title>/i.exec(head);
     return match ? match[1]!.replace(/\s+/g, " ").trim() : "";
   } catch {
     return "";
@@ -71,7 +136,7 @@ function display(dir: string): string {
   return dir === HOME ? "~" : dir.startsWith(HOME + sep) ? `~${dir.slice(HOME.length)}` : dir;
 }
 
-function collect(dir: string, where: string, depth: number, found: Artifact[]): void {
+function collect(dir: string, where: string, depth: number, found: Artifact[], images = true): void {
   if (found.length >= MAX_PER_ROOT || depth > MAX_DEPTH) return;
   let entries: Dirent[];
   try {
@@ -85,11 +150,16 @@ function collect(dir: string, where: string, depth: number, found: Artifact[]): 
     const full = join(dir, entry.name);
     if (entry.isDirectory()) {
       if (SKIP_DIRS.has(entry.name)) continue;
-      if (depth < MAX_DEPTH) collect(full, where, depth + 1, found);
+      if (depth < MAX_DEPTH) collect(full, where, depth + 1, found, images);
       continue;
     }
     if (!entry.isFile()) continue;
-    if (!/\.html?$/i.test(entry.name)) continue;
+    const kind = kindOf(entry.name);
+    if (!kind) continue;
+    // Every repo root has a logo and a screenshot; those are not artifacts.
+    if (kind === "image" && !images) continue;
+    // A README in every repo root is noise, not an artifact someone made.
+    if (kind === "markdown" && /^(readme|changelog|license|contributing|agents|claude)\b/i.test(entry.name)) continue;
     let stats: Stats;
     try {
       stats = statSync(full);
@@ -99,9 +169,10 @@ function collect(dir: string, where: string, depth: number, found: Artifact[]): 
     found.push({
       path: full,
       name: entry.name,
-      title: stats.size < 2_000_000 ? titleOf(full) : "",
+      title: stats.size < 2_000_000 ? titleOf(full, kind) : "",
       dir: display(dir),
       where,
+      kind,
       bytes: stats.size,
       modified: Math.floor(stats.mtimeMs / 1000),
       localUrl: "",
@@ -110,7 +181,7 @@ function collect(dir: string, where: string, depth: number, found: Artifact[]): 
   }
 }
 
-type Root = { dir: string; label: string };
+type Root = { dir: string; label: string; personal: boolean };
 
 async function workspaceRoots(paseo: PluginHandlerContext["paseo"]): Promise<{ roots: Root[]; error: string }> {
   const roots: Root[] = [];
@@ -128,12 +199,13 @@ async function workspaceRoots(paseo: PluginHandlerContext["paseo"]): Promise<{ r
             ? entry.projectRootPath
             : "";
       if (!dir) continue;
-      roots.push({ dir, label: String(entry.name ?? basename(dir)) });
+      roots.push({ dir, label: String(entry.name ?? basename(dir)), personal: false });
     }
   } catch (caught) {
     error = caught instanceof Error ? caught.message : String(caught);
   }
-  for (const dir of PERSONAL_ROOTS) if (existsSync(dir)) roots.push({ dir, label: `~/${basename(dir)}` });
+  for (const dir of PERSONAL_ROOTS) if (existsSync(dir)) roots.push({ dir, label: `~/${basename(dir)}`, personal: true });
+  roots.push(...claudeScratchpads());
   // Two workspaces can point at one directory; scan it once.
   const seen = new Set<string>();
   return { roots: roots.filter((root) => (seen.has(root.dir) ? false : seen.add(root.dir))), error };
@@ -150,10 +222,10 @@ async function discover(paseo: PluginHandlerContext["paseo"], refresh: boolean):
     // Files sitting at the top of the folder, then the conventional artifact
     // folders in full. Starting at MAX_DEPTH takes the files and recurses no
     // further, which is what keeps a whole worktree out of the list.
-    collect(root.dir, root.label, MAX_DEPTH, found);
+    collect(root.dir, root.label, MAX_DEPTH, found, root.personal);
     for (const name of ARTIFACT_DIRS) {
       const dir = join(root.dir, name);
-      if (existsSync(dir)) collect(dir, root.label, 1, found);
+      if (existsSync(dir)) collect(dir, root.label, 1, found, true);
     }
     artifacts.push(...found);
   }
@@ -168,7 +240,7 @@ async function discover(paseo: PluginHandlerContext["paseo"], refresh: boolean):
 
 // -------------------------------------------------------------- local serving
 
-type Share = { token: string; root: string; entry: string };
+type Share = { token: string; root: string; entry: string; kind: ArtifactKind; theme?: PageTheme };
 
 const shares = new Map<string, Share>(); // key: absolute artifact path
 let server: Server | null = null;
@@ -179,34 +251,65 @@ function send(response: import("node:http").ServerResponse, code: number, body: 
   response.end(body);
 }
 
+async function serveRequest(
+  request: import("node:http").IncomingMessage,
+  response: import("node:http").ServerResponse,
+): Promise<void> {
+  const url = new URL(request.url ?? "/", "http://127.0.0.1");
+  const parts = url.pathname.split("/").filter(Boolean);
+  if (parts[0] !== "s" || !parts[1]) return send(response, 404, "Not found.");
+  const share = [...shares.values()].find((candidate) => candidate.token === parts[1]);
+  if (!share) return send(response, 404, "This link is no longer shared.");
+  const rest = parts.slice(2).map(decodeURIComponent).join("/");
+  const target = rest ? resolve(share.root, rest) : share.entry;
+  // The token names a directory; a request must not climb out of it.
+  if (target !== share.root && !target.startsWith(share.root + sep)) return send(response, 403, "Forbidden.");
+
+  // A markdown report or a bare SVG becomes a page at request time rather than
+  // being frozen into one at share time — so the link keeps showing the file as
+  // it is now, which is the whole difference from uploading a copy somewhere.
+  if (target === share.entry && share.kind !== "html") {
+    try {
+      const html = await pageFor(share.entry, share.kind, share.theme, "./");
+      const body = Buffer.from(html, "utf8");
+      response.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+        "content-length": String(body.byteLength),
+        "cache-control": "no-store",
+        "x-content-type-options": "nosniff",
+        "referrer-policy": "no-referrer",
+      });
+      response.end(body);
+    } catch {
+      send(response, 404, "That file could not be read.");
+    }
+    return;
+  }
+
+  let stats: Stats;
+  try {
+    stats = statSync(target);
+  } catch {
+    return send(response, 404, "Not found.");
+  }
+  if (stats.isDirectory()) return send(response, 404, "Not found.");
+  response.writeHead(200, {
+    "content-type": MIME[extname(target).toLowerCase()] ?? "application/octet-stream",
+    "content-length": String(stats.size),
+    "cache-control": "no-store",
+    // A shared canvas is a document, not a frame host for someone else.
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer",
+  });
+  createReadStream(target).pipe(response);
+}
+
 async function ensureServer(): Promise<number> {
   if (server && serverPort) return serverPort;
   const instance = createServer((request, response) => {
-    const url = new URL(request.url ?? "/", "http://127.0.0.1");
-    const parts = url.pathname.split("/").filter(Boolean);
-    if (parts[0] !== "s" || !parts[1]) return send(response, 404, "Not found.");
-    const share = [...shares.values()].find((candidate) => candidate.token === parts[1]);
-    if (!share) return send(response, 404, "This link is no longer shared.");
-    const rest = parts.slice(2).map(decodeURIComponent).join("/");
-    const target = rest ? resolve(share.root, rest) : share.entry;
-    // The token names a directory; a request must not climb out of it.
-    if (target !== share.root && !target.startsWith(share.root + sep)) return send(response, 403, "Forbidden.");
-    let stats: Stats;
-    try {
-      stats = statSync(target);
-    } catch {
-      return send(response, 404, "Not found.");
-    }
-    if (stats.isDirectory()) return send(response, 404, "Not found.");
-    response.writeHead(200, {
-      "content-type": MIME[extname(target).toLowerCase()] ?? "application/octet-stream",
-      "content-length": String(stats.size),
-      "cache-control": "no-store",
-      // A shared canvas is a document, not a frame host for someone else.
-      "x-content-type-options": "nosniff",
-      "referrer-policy": "no-referrer",
+    void serveRequest(request, response).catch(() => {
+      if (!response.headersSent) send(response, 500, "That request failed.");
     });
-    createReadStream(target).pipe(response);
   });
 
   const port = await new Promise<number>((resolveport, reject) => {
@@ -360,12 +463,21 @@ function decorate(artifacts: Artifact[]): Artifact[] {
 async function state(paseo: PluginHandlerContext["paseo"], refresh: boolean): Promise<CanvasState> {
   const found = await discover(paseo, refresh);
   const binary = whichCloudflared();
+  const chrome = findChrome();
   return {
     artifacts: decorate(found.artifacts),
     roots: found.roots,
     serving: [...shares.keys()],
     serverUrl: serverPort ? `http://127.0.0.1:${serverPort}` : "",
     tunnel,
+    renderer: {
+      installed: Boolean(chrome),
+      path: chrome,
+      install: chromeHint(),
+      note: chrome
+        ? "Artifacts are rendered on the daemon and shown here as an image."
+        : "Chrome or Chromium renders artifacts for the panel. Without it you can still share a link.",
+    },
     cloudflared: {
       installed: Boolean(binary),
       path: binary,
@@ -386,17 +498,24 @@ export async function handleCanvasState(
 }
 
 export async function handleCanvasServe(
-  { path, share }: { path: string; share: boolean },
+  { path, share, theme }: { path: string; share: boolean; theme?: PageTheme },
   { paseo }: PluginHandlerContext,
 ): Promise<CanvasState> {
   // The path comes from our own scan, but it reaches the filesystem and then a
   // public URL, so re-prove it before serving anything from its folder.
   const target = realpathSync(path);
   if (!statSync(target).isFile()) throw new Error("That is not a file.");
-  if (!/\.html?$/i.test(target)) throw new Error("Only HTML artifacts can be served.");
+  const kind = kindOf(target);
+  if (!kind) throw new Error("That file type cannot be shared.");
 
   if (!shares.has(target)) {
-    shares.set(target, { token: randomBytes(12).toString("hex"), root: realpathSync(join(target, "..")), entry: target });
+    shares.set(target, {
+      token: randomBytes(12).toString("hex"),
+      root: realpathSync(join(target, "..")),
+      entry: target,
+      kind,
+      theme,
+    });
   }
   await ensureServer();
   if (share) startTunnel();
@@ -459,11 +578,133 @@ export function handleCanvasCopy({ url }: { url: string }): { copied: boolean } 
   }
 }
 
-/** Nothing outlives the plugin: close the server and kill the tunnel. */
+
+// -------------------------------------------------------------------- render
+
+/**
+ * Rendered pages, keyed by file + mtime + size + theme. An artifact is a file
+ * on disk, so its mtime is a perfect cache key: edit it and the next render is
+ * a miss, leave it alone and reopening is instant.
+ */
+const renders = new Map<string, Render>();
+let renderBytes = 0;
+const RENDER_CACHE_BYTES = 48 * 1024 * 1024;
+
+function remember(key: string, render: Render): void {
+  renders.set(key, render);
+  renderBytes += render.bytes;
+  while (renderBytes > RENDER_CACHE_BYTES && renders.size > 1) {
+    const oldest = renders.keys().next().value as string | undefined;
+    if (!oldest) break;
+    renderBytes -= renders.get(oldest)?.bytes ?? 0;
+    renders.delete(oldest);
+  }
+}
+
+function themeKey(theme?: PageTheme): string {
+  return theme ? `${theme.background}${theme.foreground}${theme.muted}${theme.accent}` : "-";
+}
+
+/** Markdown, SVG and images become a small page so one renderer serves all. */
+async function pageFor(file: string, kind: ArtifactKind, theme?: PageTheme, base?: string): Promise<string> {
+  const baseHref = base ?? `file://${join(file, "..")}/`;
+  const title = basename(file);
+  if (kind === "markdown") {
+    const text = await readFile(file, "utf8");
+    return wrapDocument(markdownToHtml(text), { title, baseHref, theme });
+  }
+  if (kind === "svg") {
+    return wrapSvg(await readFile(file, "utf8"), { title, baseHref, theme });
+  }
+  const source = encodeURIComponent(basename(file));
+  return wrapDocument(
+    `<div style="display:flex;justify-content:center"><img src="${source}" alt="${title}"></div>`,
+    { title, baseHref, theme, wide: true },
+  );
+}
+
+async function renderAt(
+  file: string,
+  kind: ArtifactKind,
+  width: number,
+  scale: number,
+  theme?: PageTheme,
+): Promise<Awaited<ReturnType<typeof renderUrl>>> {
+  if (kind === "html") return renderUrl(`file://${file}`, { width, scale });
+  const work = await mkdtemp(join(tmpdir(), "agent-link-page-"));
+  const page = join(work, "page.html");
+  try {
+    await writeFile(page, await pageFor(file, kind, theme), "utf8");
+    return await renderUrl(`file://${page}`, { width, scale });
+  } finally {
+    await rm(work, { recursive: true, force: true });
+  }
+}
+
+export async function handleCanvasRender(
+  { path, width, scale, theme }: { path: string; width: number; scale: number; theme?: PageTheme },
+): Promise<Render> {
+  const file = realpathSync(path);
+  const stats = statSync(file);
+  if (!stats.isFile()) throw new Error("That is not a file.");
+  const kind = kindOf(file);
+  if (!kind) throw new Error("That file type cannot be shown here.");
+  if (!findChrome()) throw new Error(`Rendering needs Chrome or Chromium — ${chromeHint()}`);
+
+  // An HTML artifact brings its own styling, so the app theme is not part of
+  // its identity; a generated page is drawn in the theme and so it is.
+  const key = `${file}:${stats.mtimeMs}:${width}:${scale}:${kind === "html" ? "-" : themeKey(theme)}`;
+  const hit = renders.get(key);
+  if (hit) return { ...hit, fromCache: true, ms: 0 };
+
+  const started = Date.now();
+  let shot = await renderAt(file, kind, width, scale, theme);
+
+  // A very long page at 2x turns into a payload nobody wants to push over a
+  // remote connection. Halve it rather than refuse it.
+  if (shot.bytes > 3_000_000 && scale > 1) {
+    const lighter = await renderAt(file, kind, width, 1, theme);
+    if (lighter.bytes < shot.bytes) shot = lighter;
+  }
+
+  const render: Render = {
+    dataUri: `data:image/${shot.format};base64,${shot.base64}`,
+    width: shot.width,
+    height: shot.height,
+    bytes: shot.bytes,
+    truncated: shot.truncated,
+    title: shot.title || basename(file),
+    fromCache: false,
+    ms: Date.now() - started,
+  };
+  remember(key, render);
+  return render;
+}
+
+const MAX_SOURCE_BYTES = 400_000;
+
+/** The file as text, for reading a report rather than looking at a picture. */
+export async function handleCanvasSource({ path }: { path: string }): Promise<{ text: string; truncated: boolean; bytes: number }> {
+  const file = realpathSync(path);
+  const stats = statSync(file);
+  const kind = kindOf(file);
+  if (!kind || kind === "image") throw new Error("That artifact has no text to show.");
+  const text = await readFile(file, "utf8");
+  return {
+    text: text.slice(0, MAX_SOURCE_BYTES),
+    truncated: text.length > MAX_SOURCE_BYTES,
+    bytes: stats.size,
+  };
+}
+
+/** Nothing outlives the plugin: close the server, tunnel and browser. */
 export function canvasShutdown(): void {
   stopTunnel();
   shares.clear();
+  renders.clear();
+  renderBytes = 0;
   server?.close();
   server = null;
   serverPort = 0;
+  void closeBrowser();
 }

@@ -1,12 +1,93 @@
 import type { PluginSurfaceProps } from "@getpaseo/plugin";
 import { useRpc } from "@getpaseo/plugin";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import React, { useMemo, useState } from "react";
-import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
-import { accountUsage, addAccount, diagnoseProvider, providerHealth, scan, setCooldown, wireAuto, wireProvider, type Slot } from "./contracts.shared";
-import { Badge, Btn, Dot, Meter, Spark, STATUS, makeStyles } from "./ui.client";
+import React, { useState } from "react";
+import { Text, View } from "react-native";
+import {
+  accountUsage,
+  addAccount,
+  diagnoseProvider,
+  providerHealth,
+  scan,
+  setCooldown,
+  wireAuto,
+  wireProvider,
+  type AccountUsage,
+  type AutoRouter,
+  type Slot,
+} from "./contracts.shared";
+import {
+  Button,
+  Card,
+  CodeBlock,
+  Disclosure,
+  ErrorText,
+  Facts,
+  Field,
+  Loading,
+  Meter,
+  Notice,
+  Row,
+  Screen,
+  Section,
+  Spark,
+  StatusPill,
+  Tag,
+  Toolbar,
+  useUi,
+  type Status,
+} from "./ui.client";
+
+/**
+ * Agent Link's account surface.
+ *
+ * The product is the router: one Paseo provider that hands each new agent to a
+ * live account. So the router is the hero and holds the view's only primary
+ * button; accounts are the evidence underneath it, and everything that repairs
+ * a single account (its login command, its own pinned provider, its usage
+ * detail) lives in that account's row rather than in a shared block of copy.
+ */
+
+type ProviderId = "claude" | "codex";
+
+const CARD_TITLE: Record<ProviderId, string> = { claude: "Claude Code", codex: "Codex" };
+const SHORT: Record<ProviderId, string> = { claude: "Claude", codex: "Codex" };
+
+const OTHERS = [
+  { id: "kimi", title: "Kimi Code" },
+  { id: "grok", title: "Grok" },
+];
+
+function agoLabel(epoch: number): string {
+  const mins = Math.max(0, Math.round((Date.now() - epoch * 1000) / 60000));
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  return hours < 24 ? `${hours}h ago` : `${Math.round(hours / 24)}d ago`;
+}
+
+function remainingLabel(until: number): string {
+  const mins = Math.max(1, Math.round((until * 1000 - Date.now()) / 60000));
+  return mins < 60 ? `${mins}m` : `${Math.round(mins / 60)}h`;
+}
+
+function formatTokens(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  return value >= 1000 ? `${Math.round(value / 1000)}k` : `${value}`;
+}
+
+// Cache reads are input the account did not pay full price for.
+function cachePercent(row: AccountUsage): number {
+  const total = row.inputTokens + row.cacheReadTokens + row.cacheCreationTokens;
+  return total > 0 ? Math.round((row.cacheReadTokens / total) * 100) : 0;
+}
+
+function plural(count: number, one: string, many: string): string {
+  return `${count} ${count === 1 ? one : many}`;
+}
 
 export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
+  const t = useUi(theme, layout.compact);
   const queryClient = useQueryClient();
   const callScan = useRpc(scan);
   const callWire = useRpc(wireProvider);
@@ -16,19 +97,17 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const callCooldown = useRpc(setCooldown);
   const callAddAccount = useRpc(addAccount);
   const callUsage = useRpc(accountUsage);
+
   const [diagnosis, setDiagnosis] = useState<Record<string, string>>({});
+  const [openRows, setOpenRows] = useState<Record<string, boolean>>({});
   const [notice, setNotice] = useState<string | null>(null);
-  const [addingFor, setAddingFor] = useState<"claude" | "codex" | null>(null);
-  const [showHelp, setShowHelp] = useState(false);
+  const [addingFor, setAddingFor] = useState<ProviderId | null>(null);
   const [newEmail, setNewEmail] = useState("");
-  const styles = useMemo(() => makeStyles(theme, layout.compact), [theme, layout.compact]);
-  // Every button inherits the compact (touch) sizing without repeating it.
-  const Button = (props: React.ComponentProps<typeof Btn>) => <Btn compact={layout.compact} {...props} />;
 
   const scanQuery = useQuery({ queryKey: ["agent-link", "scan"], queryFn: () => callScan({}) });
-  // Diagnostics spawn a real process per provider — for ACP providers (kimi,
-  // grok) that starts an agent session. Only on request, never on mount.
-  // Aggregating transcripts costs real IO, so it is on request like health.
+  // Health spawns a real process per provider — for the ACP providers that
+  // starts an agent session — and usage re-reads every transcript on disk.
+  // Both cost real work, so they run on request, never on mount.
   const usageQuery = useQuery({
     queryKey: ["agent-link", "account-usage"],
     queryFn: () => callUsage({ days: 7 }),
@@ -41,19 +120,26 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   });
   const refresh = () => void queryClient.invalidateQueries({ queryKey: ["agent-link"] });
 
-  const wireMutation = useMutation({
-    mutationFn: (slot: Slot) => callWire({ provider: slot.provider, email: slot.email, dir: slot.dir }),
-    onSuccess: refresh,
+  const routerMutation = useMutation({
+    mutationFn: async (providers: ProviderId[]) => {
+      const lines: string[] = [];
+      for (const provider of providers) lines.push((await callWireAuto({ provider })).message);
+      return lines.join("\n");
+    },
+    onSuccess: (message) => {
+      setNotice(message);
+      refresh();
+    },
   });
-  const autoMutation = useMutation({
-    mutationFn: (provider: "claude" | "codex") => callWireAuto({ provider }),
+  const pinMutation = useMutation({
+    mutationFn: (slot: Slot) => callWire({ provider: slot.provider, email: slot.email, dir: slot.dir }),
     onSuccess: (result) => {
-      setNotice(result.message);
+      setNotice(`'${result.providerId}' wired — it always uses that one account`);
       refresh();
     },
   });
   const addMutation = useMutation({
-    mutationFn: (input: { provider: "claude" | "codex"; email: string }) => callAddAccount(input),
+    mutationFn: (input: { provider: ProviderId; email: string }) => callAddAccount(input),
     onSuccess: (result) => {
       setNotice(result.message);
       if (result.ok) {
@@ -64,7 +150,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
     },
   });
   const cooldownMutation = useMutation({
-    mutationFn: (input: { provider: "claude" | "codex"; email: string; minutes: number }) => callCooldown(input),
+    mutationFn: (input: { provider: ProviderId; email: string; minutes: number }) => callCooldown(input),
     onSuccess: (result) => {
       setNotice(result.message);
       refresh();
@@ -72,8 +158,11 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   });
 
   const slots = scanQuery.data?.slots ?? [];
-  const primaries = scanQuery.data?.primaryAccounts;
+  const primaryAccounts = scanQuery.data?.primaryAccounts;
+  const routers = scanQuery.data?.autoRouters ?? [];
   const healthById = new Map((healthQuery.data?.providers ?? []).map((provider) => [provider.id, provider]));
+  const primaryInfo = (provider: ProviderId) => (scanQuery.data?.primaries ?? []).find((entry) => entry.provider === provider);
+  const primaryEmail = (provider: ProviderId) => (provider === "claude" ? primaryAccounts?.claude : primaryAccounts?.codex) ?? "";
 
   // A rate limit belongs to an ACCOUNT, so two entries signed into the same
   // account are one pool wearing two hats — the failure mode where you think
@@ -84,377 +173,588 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
     const key = `${provider}:${email}`;
     accountUses.set(key, (accountUses.get(key) ?? 0) + 1);
   };
-  countAccount("claude", primaries?.claude ?? "");
-  countAccount("codex", primaries?.codex ?? "");
+  countAccount("claude", primaryAccounts?.claude ?? "");
+  countAccount("codex", primaryAccounts?.codex ?? "");
   for (const slot of slots) countAccount(slot.provider, slot.actualEmail || slot.email);
   const isShared = (provider: string, email: string) => (accountUses.get(`${provider}:${email}`) ?? 0) > 1;
-  const distinctPools = [...accountUses.keys()].length;
+  const distinctPools = accountUses.size;
   const totalEntries = [...accountUses.values()].reduce((sum, count) => sum + count, 0);
 
-  const tableRow = {
-    flexDirection: "row" as const,
-    alignItems: "center" as const,
-    gap: 8,
-    paddingVertical: 4,
-    borderTopWidth: 1,
-    borderTopColor: theme.colors.foregroundMuted + "1a",
+  const maxLaunches = Math.max(
+    1,
+    ...slots.map((slot) => slot.launches),
+    ...(scanQuery.data?.primaries ?? []).map((entry) => entry.launches),
+  );
+
+  // The server already picked who takes the next agent; resolve it to a row so
+  // the tag lands on that row and not on a duplicate of the same address.
+  const nextUpKey = (provider: ProviderId): string => {
+    const email = (scanQuery.data?.nextUp ?? []).find((entry) => entry.provider === provider)?.email ?? "";
+    if (!email) return "";
+    const info = primaryInfo(provider);
+    if (email === primaryEmail(provider) && info && !info.duplicated) return `primary-${provider}`;
+    const slot = slots.find(
+      (entry) => entry.provider === provider && entry.email === email && entry.loggedIn && !entry.blocked && entry.cooldownUntil === 0,
+    );
+    return slot ? slot.dir : "";
+  };
+  const nextUpKeys: Record<ProviderId, string> = { claude: nextUpKey("claude"), codex: nextUpKey("codex") };
+
+  const usageFor = (email: string): AccountUsage | null =>
+    (usageQuery.data?.accounts ?? []).find((entry) => entry.email === email) ?? null;
+
+  const pad = t.compact ? t.space.md : t.space.lg;
+  const toggleRow = (key: string) => setOpenRows((previous) => ({ ...previous, [key]: !previous[key] }));
+  const runDiagnose = (providerId: string, key: string) => {
+    void callDiagnose({ providerId }).then((result) =>
+      setDiagnosis((previous) => ({ ...previous, [key]: previous[key] ? "" : result.summary })),
+    );
   };
 
-  const maxLaunches = Math.max(1, ...slots.map((entry) => entry.launches));
-  const agoLabel = (epoch: number) => {
-    const mins = Math.max(0, Math.round((Date.now() - epoch * 1000) / 60000));
-    if (mins < 1) return "just now";
-    if (mins < 60) return `${mins}m ago`;
-    const hours = Math.round(mins / 60);
-    return hours < 24 ? `${hours}h ago` : `${Math.round(hours / 24)}d ago`;
+  // ------------------------------------------------------------------ routing
+
+  const pending = routers.filter((entry) => !entry.wiredProviderId && entry.launcherExists).map((entry) => entry.provider);
+  const noLauncher = routers.filter((entry) => !entry.wiredProviderId && !entry.launcherExists);
+  const wired = routers.filter((entry) => entry.wiredProviderId).length;
+  const routingStatus: Status = routers.length > 0 && wired === routers.length ? "ok" : "attention";
+  const routingLabel = wired === 0 ? "not installed" : wired === routers.length ? "installed" : "half installed";
+
+  const inRotation = (provider: ProviderId) => {
+    const info = primaryInfo(provider);
+    const own = primaryEmail(provider) && info && !info.duplicated && !info.blocked && info.cooldownUntil === 0 ? 1 : 0;
+    return own + slots.filter((slot) => slot.provider === provider && slot.loggedIn && !slot.blocked && slot.cooldownUntil === 0).length;
   };
 
-  const fmt = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : `${n}`);
-  const usageFor = (email: string) => {
-    const row = (usageQuery.data?.accounts ?? []).find((entry) => entry.email === email);
-    if (!row) return null;
-    if (row.sessions === 0) return <Text style={styles.muted}>7 days: no sessions</Text>;
-    // Cache reads are input the account did not pay full price for.
-    const totalIn = row.inputTokens + row.cacheReadTokens + row.cacheCreationTokens;
-    const cachePct = totalIn > 0 ? Math.round((row.cacheReadTokens / totalIn) * 100) : 0;
+  const routerRow = (entry: AutoRouter) => {
+    const next = (scanQuery.data?.nextUp ?? []).find((item) => item.provider === entry.provider)?.email ?? "";
+    const count = inRotation(entry.provider);
     return (
-      <View style={{ gap: 3 }}>
-        <View style={styles.row}>
-          <Spark values={row.daily} color={theme.colors.accent} theme={theme} />
-          <Text style={styles.muted}>
-            {row.sessions} {row.sessions === 1 ? "session" : "sessions"} · {fmt(row.outputTokens)} out · {cachePct}% cached
-          </Text>
+      <Row
+        key={`router-${entry.provider}`}
+        tone={entry.wiredProviderId ? "ok" : "attention"}
+        title={CARD_TITLE[entry.provider]}
+        subtitle={
+          entry.wiredProviderId
+            ? `pick "${SHORT[entry.provider]} (Dynamic Agent Link)" when you start an agent`
+            : entry.launcherExists
+              ? "not wired yet — new agents still go to one fixed account"
+              : "no launcher on disk"
+        }
+        meta={
+          <Facts
+            items={[
+              { value: `${plural(count, "account", "accounts")} in rotation` },
+              next ? { value: `next: ${next}` } : { value: "no account available", tone: "attention" },
+            ]}
+          />
+        }
+        trailing={<StatusPill status={entry.wiredProviderId ? "ok" : "attention"} label={entry.wiredProviderId ? "routing" : "off"} />}
+      />
+    );
+  };
+
+  const routingCard = (
+    <Card padded={false} tone={routingStatus}>
+      <View>
+        <View style={{ padding: pad, gap: t.space.md }}>
+          <View
+            style={{
+              flexDirection: t.compact ? "column" : "row",
+              alignItems: t.compact ? "stretch" : "flex-start",
+              justifyContent: "space-between",
+              gap: t.space.md,
+            }}
+          >
+            <View style={{ flex: 1, minWidth: 0, gap: t.space.xs }}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: t.space.sm }}>
+                <Text style={t.text.heading}>Routing</Text>
+                <StatusPill status={routingStatus} label={routingLabel} />
+              </View>
+              <Text style={[t.text.body, { color: t.color.muted }]}>
+                One provider that hands each new agent to the least-recently-used healthy account, and skips any account
+                that is parked or out of credit.
+              </Text>
+              <Facts
+                items={[
+                  { value: plural(totalEntries, "signed-in entry", "signed-in entries") },
+                  {
+                    value: plural(distinctPools, "quota pool", "quota pools"),
+                    tone: totalEntries > distinctPools ? "attention" : undefined,
+                  },
+                ]}
+              />
+            </View>
+            {pending.length > 0 ? (
+              <View style={{ flexShrink: 0 }}>
+                <Button
+                  label={pending.length > 1 ? "Install for both" : `Install for ${SHORT[pending[0]!]}`}
+                  variant="primary"
+                  loading={routerMutation.isPending}
+                  onPress={() => routerMutation.mutate(pending)}
+                />
+              </View>
+            ) : null}
+          </View>
+          {totalEntries > distinctPools ? (
+            <Notice tone="attention">
+              An account below is signed in twice, so those entries draw on one rate limit — parking one does not free
+              the other.
+            </Notice>
+          ) : null}
+          {noLauncher.length > 0 ? (
+            <View style={{ gap: t.space.xs }}>
+              <Text style={t.text.caption}>
+                {`No launcher for ${noLauncher.map((entry) => SHORT[entry.provider]).join(" and ")} yet. Create it in a terminal:`}
+              </Text>
+              <CodeBlock tone="attention">agent-link auto</CodeBlock>
+            </View>
+          ) : null}
+          {routerMutation.error ? <ErrorText>{String(routerMutation.error)}</ErrorText> : null}
         </View>
-        {row.limitHits > 0 ? (
-          <Text style={styles.danger}>
-            {row.limitHits} limit {row.limitHits === 1 ? "refusal" : "refusals"} in 7 days
-            {row.limitLast > 0 ? ` · last ${agoLabel(row.limitLast)}` : ""} — park it or probe the model
-          </Text>
-        ) : null}
-        <View style={styles.row}>
-          {row.models.slice(0, 4).map((model) => (
-            <Badge key={model} label={model.replace("claude-", "")} theme={theme} />
-          ))}
-          {row.topProject ? <Text style={styles.muted}>mostly {row.topProject}</Text> : null}
+        {routers.map(routerRow)}
+      </View>
+    </Card>
+  );
+
+  // ----------------------------------------------------------------- accounts
+
+  const usageSummary = (row: AccountUsage) => {
+    if (row.sessions === 0) return <Facts items={[{ value: "no sessions in 7 days" }]} />;
+    return (
+      <View style={{ flexDirection: "row", alignItems: "center", gap: t.space.sm }}>
+        <Spark values={row.daily} tone="busy" />
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <Facts
+            items={[
+              { value: plural(row.sessions, "session", "sessions") },
+              { value: `${formatTokens(row.outputTokens)} out` },
+              { value: `${cachePercent(row)}% cached` },
+            ]}
+          />
         </View>
       </View>
     );
   };
 
-  const slotDot = (slot: Slot) => (slot.wrongAccount ? STATUS.red : slot.loggedIn ? STATUS.green : STATUS.orange);
+  const usageDetail = (provider: ProviderId, row: AccountUsage) => (
+    <Section title="last 7 days">
+      {row.models.length > 0 ? (
+        <View style={{ flexDirection: "row", alignItems: "center", gap: t.space.xs }}>
+          {row.models.slice(0, 3).map((model) => (
+            <Tag key={model} label={model.replace("claude-", "")} />
+          ))}
+        </View>
+      ) : null}
+      <Facts
+        items={[
+          { value: `${formatTokens(row.inputTokens)} in` },
+          row.topProject ? { value: `mostly ${row.topProject}` } : null,
+          row.lastActive > 0 ? { value: `last active ${agoLabel(row.lastActive)}` } : null,
+        ]}
+      />
+      {row.limitHits > 0 ? (
+        <View style={{ gap: t.space.xs }}>
+          <ErrorText>
+            {`${plural(row.limitHits, "limit refusal", "limit refusals")} in 7 days${
+              row.limitLast > 0 ? ` · last ${agoLabel(row.limitLast)}` : ""
+            } — an account can be healthy and still refuse one model`}
+          </ErrorText>
+          <CodeBlock tone="error">{`agent-link probe ${provider} <model> --park`}</CodeBlock>
+        </View>
+      ) : null}
+    </Section>
+  );
 
-  const diagnoseBtn = (providerId: string, key: string) => (
+  const loginCommand = (slot: Slot): string => {
+    if (scanQuery.data?.agentAuthInstalled) return `agent-link login ${slot.provider} ${slot.email}`;
+    return slot.provider === "claude"
+      ? `CLAUDE_CONFIG_DIR="${slot.dir}" claude auth login --email ${slot.email}`
+      : `CODEX_HOME="${slot.dir}" codex login`;
+  };
+
+  const parkButton = (provider: ProviderId, email: string, parked: boolean) => (
     <Button
-      label="Diagnose"
-      kind="quiet"
-      theme={theme}
-      onPress={() => {
-        void callDiagnose({ providerId }).then((result) =>
-          setDiagnosis((previous) => ({ ...previous, [key]: previous[key] ? "" : result.summary })),
-        );
-      }}
+      label={parked ? "Resume" : "Park 3h"}
+      onPress={() => cooldownMutation.mutate({ provider, email, minutes: parked ? 0 : 180 })}
     />
   );
 
-  const providerCard = (
-    provider: "claude" | "codex" | "kimi" | "grok",
-    title: string,
-    rows: React.ReactNode,
-  ) => {
-    const health = healthById.get(provider);
-    const auto = (scanQuery.data?.autoRouters ?? []).find((entry) => entry.provider === provider);
+  const slotDetail = (slot: Slot) => {
+    const usage = usageFor(slot.actualEmail || slot.email);
+    const pinning = pinMutation.variables?.dir === slot.dir;
     return (
-      <View key={provider} style={styles.card}>
-        <View style={styles.rowBetween}>
-          <View style={styles.row}>
-            <Dot color={health ? (health.ok ? STATUS.green : STATUS.red) : theme.colors.foregroundMuted} />
-            <Text style={styles.strong}>{title}</Text>
-            {health ? (
-              <Text style={health.ok ? styles.muted : styles.danger}>{health.summary}</Text>
-            ) : (
-              <Text style={styles.muted}>{healthQuery.isFetching ? "checking…" : ""}</Text>
-            )}
+      <View style={{ gap: t.space.sm }}>
+        {!slot.loggedIn || slot.wrongAccount ? (
+          <View style={{ gap: t.space.xs }}>
+            <Text style={t.text.caption}>
+              {slot.wrongAccount ? "Sign this folder back into its own account:" : "Finish the sign-in in a terminal:"}
+            </Text>
+            <CodeBlock tone="attention">{loginCommand(slot)}</CodeBlock>
           </View>
-          {diagnoseBtn(provider, provider)}
-        </View>
-        {diagnosis[provider] ? <Text style={styles.monoText}>{diagnosis[provider]}</Text> : null}
-        {auto ? (
-          accountRow(
-            `auto-${provider}`,
-            auto.wiredProviderId ? STATUS.green : theme.colors.foregroundMuted,
-            "Dynamic Agent Link",
-            auto.wiredProviderId
-              ? `installed as "${provider === "claude" ? "Claude" : "Codex"} (Dynamic Agent Link)" · new agents rotate across these accounts`
-              : auto.launcherExists
-                ? `install one provider that rotates new agents across these accounts`
-                : "run `agent-link auto` in a terminal to enable",
-            false,
-            auto.wiredProviderId ? undefined : auto.launcherExists ? (
-              <Button label="Install" theme={theme} onPress={() => autoMutation.mutate(provider as "claude" | "codex")} />
-            ) : undefined,
-          )
         ) : null}
-        {rows}
-        {provider === "claude" || provider === "codex" ? (
-          addingFor === provider ? (
-            <View style={{ gap: 6, paddingTop: 6 }}>
-              <TextInput
-                placeholder={`new ${provider} account email`}
-                placeholderTextColor={theme.colors.foregroundMuted}
-                value={newEmail}
-                onChangeText={setNewEmail}
-                autoCapitalize="none"
-                style={{
-                  borderWidth: 1,
-                  borderColor: theme.colors.foregroundMuted + "44",
-                  borderRadius: 7,
-                  paddingVertical: 6,
-                  paddingHorizontal: 9,
-                  color: theme.colors.foreground,
-                  fontSize: 12,
-                }}
+        <Facts
+          items={[
+            { value: slot.source === "external" ? "external folder" : "agent-link slot" },
+            slot.outputStyle ? { value: `style: ${slot.outputStyle}` } : null,
+            slot.settingsDrift.length > 0
+              ? { value: `settings differ from primary: ${slot.settingsDrift.join(", ")}`, tone: "attention" }
+              : null,
+          ]}
+        />
+        <CodeBlock>{slot.dir}</CodeBlock>
+        {usage ? usageDetail(slot.provider, usage) : null}
+        {slot.wiredProviderId ? (
+          <View style={{ gap: t.space.xs }}>
+            <Facts items={[{ value: `own provider: ${slot.wiredProviderId}` }]} />
+            <View style={{ flexDirection: "row", gap: t.space.sm }}>
+              <Button label="Diagnose provider" variant="ghost" onPress={() => runDiagnose(slot.wiredProviderId!, slot.dir)} />
+            </View>
+          </View>
+        ) : slot.loggedIn ? (
+          <View style={{ gap: t.space.xs }}>
+            <Text style={t.text.caption}>A provider pinned to this account alone, for work that must stay on it.</Text>
+            <View style={{ flexDirection: "row", gap: t.space.sm }}>
+              <Button
+                label="Pin as its own provider"
+                loading={pinning && pinMutation.isPending}
+                onPress={() => pinMutation.mutate(slot)}
               />
-              <View style={styles.row}>
-                <Button
-                  label={addMutation.isPending ? "Starting…" : "Create & sign in"}
-                  theme={theme}
-                  disabled={addMutation.isPending || !newEmail.trim()}
-                  onPress={() => addMutation.mutate({ provider, email: newEmail.trim() })}
-                />
-                <Button label="Cancel" kind="quiet" theme={theme} onPress={() => setAddingFor(null)} />
-              </View>
-              <Text style={styles.muted}>
-Creates the slot and gives you the one command to finish the browser sign-in — that step needs a terminal because the CLI asks you to paste a code back.
-              </Text>
             </View>
-          ) : (
-            <View style={tableRow}>
-              <Text style={[styles.muted, { flex: 1 }]}>Add another account to this provider</Text>
-              <Button label="+ Add account" kind="quiet" theme={theme} onPress={() => { setAddingFor(provider); setNewEmail(""); }} />
-            </View>
-          )
+          </View>
         ) : null}
+        {diagnosis[slot.dir] ? <CodeBlock>{diagnosis[slot.dir]}</CodeBlock> : null}
+        {pinMutation.error && pinning ? <ErrorText>{String(pinMutation.error)}</ErrorText> : null}
       </View>
     );
   };
-
-  // Two lines per account: who it is on top, everything else muted underneath.
-  // Badges used to squeeze the email out of the row entirely on a narrow panel.
-  const accountRow = (
-    key: string,
-    dot: string,
-    email: string,
-    meta: string,
-    warn: boolean,
-    action?: React.ReactNode,
-    extra?: React.ReactNode,
-    usage?: React.ReactNode,
-  ) => (
-    <View key={key} style={{ paddingVertical: 6, borderTopWidth: 1, borderTopColor: theme.colors.foregroundMuted + "1a" }}>
-      <View style={styles.rowBetween}>
-        <View style={[styles.row, { flexShrink: 1 }]}>
-          <Dot color={dot} />
-          <Text style={[styles.strong, { flexShrink: 1 }]} numberOfLines={1}>
-            {email}
-          </Text>
-        </View>
-        {action}
-      </View>
-      <View style={[styles.row, { paddingLeft: 17 }]}>
-        <Text style={warn ? styles.danger : styles.muted}>{meta}</Text>
-        {extra}
-      </View>
-      {usage}
-    </View>
-  );
 
   const slotRow = (slot: Slot) => {
-    const shared = slot.loggedIn && isShared(slot.provider, slot.actualEmail || slot.email);
     const parked = slot.cooldownUntil > 0;
-    const bits: string[] = [];
-    if (!slot.loggedIn) bits.push("login needed");
-    else if (slot.wrongAccount) bits.push(`signed in as ${slot.actualEmail}`);
-    else if (parked)
-      bits.push(
-        `parked ${Math.max(1, Math.round((slot.cooldownUntil * 1000 - Date.now()) / 60000))}m — ${
-          slot.parkReason || "routing skips it"
-        }`,
-      );
-    else bits.push("in rotation");
-    if (slot.source === "external") bits.push("external folder");
-    if (slot.wiredProviderId) bits.push(`provider: ${slot.wiredProviderId}`);
-    if (shared) bits.push("shares one quota with another entry");
-    if (slot.creditNote) bits.push(slot.creditNote);
-    if (slot.settingsDrift.length > 0) bits.push(`settings differ from primary: ${slot.settingsDrift.join(", ")} — press Sync`);
-    else if (slot.outputStyle) bits.push(`style: ${slot.outputStyle}`);
-    return accountRow(
-      slot.dir,
-      slotDot(slot),
-      slot.email,
-      bits.join(" · "),
-      shared || slot.wrongAccount || !slot.loggedIn || slot.creditNote !== "",
-      slot.loggedIn ? (
-        <Button
-          label={parked ? "Resume" : "Park 3h"}
-          kind="quiet"
-          theme={theme}
-          onPress={() =>
-            cooldownMutation.mutate({ provider: slot.provider, email: slot.email, minutes: parked ? 0 : 180 })
-          }
-        />
-      ) : undefined,
-      slot.wiredProviderId ? diagnoseBtn(slot.wiredProviderId, slot.dir) : undefined,
-      slot.loggedIn ? (
-        <View style={{ paddingLeft: 17, paddingTop: 2, gap: 3 }}>
-        <View style={styles.row}>
-          <Meter
-            fraction={maxLaunches > 0 ? slot.launches / maxLaunches : 0}
-            color={parked ? STATUS.orange : theme.colors.accent}
-            theme={theme}
-          />
-          <Text style={styles.muted}>
-            {slot.launches} {slot.launches === 1 ? "launch" : "launches"}
-            {slot.lastUsed > 0 ? ` · ${agoLabel(slot.lastUsed)}` : ""}
-          </Text>
-        </View>
-        {usageFor(slot.actualEmail || slot.email)}
-        </View>
-      ) : undefined,
+    const shared = slot.loggedIn && isShared(slot.provider, slot.actualEmail || slot.email);
+    const usage = usageFor(slot.actualEmail || slot.email);
+    const status: Status = !slot.loggedIn
+      ? "attention"
+      : slot.wrongAccount || slot.blocked
+        ? "error"
+        : parked
+          ? "neutral"
+          : slot.creditNote
+            ? "attention"
+            : "ok";
+    const label = !slot.loggedIn
+      ? "sign-in needed"
+      : slot.wrongAccount
+        ? "wrong account"
+        : slot.blocked
+          ? "spend limit"
+          : parked
+            ? `parked ${remainingLabel(slot.cooldownUntil)}`
+            : slot.creditNote
+              ? "credit limited"
+              : "in rotation";
+    const facts: Array<{ value: string; tone?: Status } | null> = [
+      slot.lastUsed > 0 ? { value: `last agent ${agoLabel(slot.lastUsed)}` } : null,
+      slot.creditNote ? { value: slot.creditNote, tone: "attention" } : null,
+      usage && usage.limitHits > 0 ? { value: plural(usage.limitHits, "limit refusal", "limit refusals"), tone: "error" } : null,
+    ];
+    const open = Boolean(openRows[slot.dir]);
+    return (
+      <Row
+        key={slot.dir}
+        tone={status}
+        title={slot.email}
+        subtitle={
+          slot.wrongAccount
+            ? `signed in as ${slot.actualEmail}`
+            : parked && slot.parkReason
+              ? slot.parkReason
+              : undefined
+        }
+        onPress={() => toggleRow(slot.dir)}
+        meta={
+          <View style={{ gap: t.space.xs }}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: t.space.sm }}>
+              <StatusPill status={status} label={label} />
+              {nextUpKeys[slot.provider] === slot.dir ? <Tag label="next up" tone="busy" /> : null}
+              {shared ? <Tag label="shared quota" tone="attention" /> : null}
+            </View>
+            <Facts items={facts.slice(0, 3)} />
+            {slot.loggedIn ? (
+              <Meter
+                fraction={slot.launches / maxLaunches}
+                tone={parked ? "attention" : "busy"}
+                label={
+                  slot.launches === 0
+                    ? "no agents yet"
+                    : `${plural(slot.launches, "launch", "launches")} · ${
+                        slot.launches === maxLaunches ? "most in rotation" : `busiest has ${maxLaunches}`
+                      }`
+                }
+              />
+            ) : null}
+            {usage ? usageSummary(usage) : null}
+          </View>
+        }
+        trailing={
+          <>
+            {slot.loggedIn ? parkButton(slot.provider, slot.email, parked) : null}
+            <Button label={open ? "Hide" : "Details"} variant="ghost" onPress={() => toggleRow(slot.dir)} />
+          </>
+        }
+        expanded={open ? slotDetail(slot) : undefined}
+      />
     );
   };
 
-  const primaryRow = (provider: "claude" | "codex") => {
-    const info = (scanQuery.data?.primaries ?? []).find((entry) => entry.provider === provider);
-    const account = (provider === "claude" ? primaries?.claude : primaries?.codex) ?? "";
-    const shared = account !== "" && isShared(provider, account);
+  const primaryRow = (provider: ProviderId) => {
+    const key = `primary-${provider}`;
+    const info = primaryInfo(provider);
+    const account = primaryEmail(provider);
     const parked = (info?.cooldownUntil ?? 0) > 0;
-    const bits = [`primary — what plain \`${provider}\` uses`];
-    if (info?.duplicated) bits.push("duplicated by an account below");
-    else if (parked)
-      bits.push(`parked ${Math.max(1, Math.round(((info?.cooldownUntil ?? 0) * 1000 - Date.now()) / 60000))}m — routing skips it`);
-    else bits.push(`in rotation · ${info?.launches ?? 0} launches`);
-    if (shared) bits.push("shares one quota with an account below");
-    const credit = provider === "claude" ? (scanQuery.data?.primaryCreditNote ?? "") : "";
-    if (credit) bits.push(credit);
-    return accountRow(
-      `primary-${provider}`,
-      account ? (parked ? STATUS.red : STATUS.green) : STATUS.orange,
-      account || "not logged in",
-      bits.join(" · "),
-      shared || credit !== "" || parked,
-      account ? (
-        <Button
-          label={parked ? "Resume" : "Park 3h"}
-          kind="quiet"
-          theme={theme}
-          onPress={() => cooldownMutation.mutate({ provider, email: "primary", minutes: parked ? 0 : 180 })}
-        />
-      ) : undefined,
-      undefined,
-      account ? <View style={{ paddingLeft: 17, paddingTop: 2 }}>{usageFor(account)}</View> : undefined,
+    const shared = account !== "" && isShared(provider, account);
+    const credit = provider === "claude" ? scanQuery.data?.primaryCreditNote ?? "" : "";
+    const usage = account ? usageFor(account) : null;
+    const launches = info?.launches ?? 0;
+    const status: Status = !account ? "attention" : parked ? "neutral" : credit || info?.duplicated ? "attention" : "ok";
+    const label = !account
+      ? "sign-in needed"
+      : parked
+        ? `parked ${remainingLabel(info?.cooldownUntil ?? 0)}`
+        : info?.duplicated
+          ? "duplicated"
+          : credit
+            ? "credit limited"
+            : "in rotation";
+    const open = Boolean(openRows[key]);
+    return (
+      <Row
+        key={key}
+        tone={status}
+        title={account || "not signed in"}
+        subtitle={`primary — the account plain \`${provider}\` uses`}
+        onPress={() => toggleRow(key)}
+        meta={
+          <View style={{ gap: t.space.xs }}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: t.space.sm }}>
+              <StatusPill status={status} label={label} />
+              {nextUpKeys[provider] === key ? <Tag label="next up" tone="busy" /> : null}
+              {shared ? <Tag label="shared quota" tone="attention" /> : null}
+            </View>
+            <Facts
+              items={[
+                credit ? { value: credit, tone: "attention" } : null,
+                info?.duplicated ? { value: "an account below holds it too — routing uses that row", tone: "attention" } : null,
+                usage && usage.limitHits > 0
+                  ? { value: plural(usage.limitHits, "limit refusal", "limit refusals"), tone: "error" }
+                  : null,
+              ]}
+            />
+            {account ? (
+              <Meter
+                fraction={launches / maxLaunches}
+                tone={parked ? "attention" : "busy"}
+                label={
+                  launches === 0
+                    ? "no agents yet"
+                    : `${plural(launches, "launch", "launches")} · ${
+                        launches === maxLaunches ? "most in rotation" : `busiest has ${maxLaunches}`
+                      }`
+                }
+              />
+            ) : null}
+            {usage ? usageSummary(usage) : null}
+          </View>
+        }
+        trailing={
+          <>
+            {account ? parkButton(provider, "primary", parked) : null}
+            <Button label={open ? "Hide" : "Details"} variant="ghost" onPress={() => toggleRow(key)} />
+          </>
+        }
+        expanded={
+          open ? (
+            <View style={{ gap: t.space.sm }}>
+              {account ? null : (
+                <View style={{ gap: t.space.xs }}>
+                  <Text style={t.text.caption}>Sign in to the default account in a terminal:</Text>
+                  <CodeBlock tone="attention">{provider === "claude" ? "claude auth login" : "codex login"}</CodeBlock>
+                </View>
+              )}
+              <Facts items={[{ value: "managed by the CLI itself, not by a slot folder" }]} />
+              {usage ? usageDetail(provider, usage) : null}
+            </View>
+          ) : undefined
+        }
+      />
     );
   };
+
+  const addRow = (provider: ProviderId) => {
+    const open = addingFor === provider;
+    return (
+      <Row
+        key={`add-${provider}`}
+        title={<Text style={[t.text.body, { color: t.color.muted }]}>Add another {SHORT[provider]} account</Text>}
+        trailing={
+          open ? undefined : (
+            <Button
+              label="+ Add account"
+              onPress={() => {
+                setAddingFor(provider);
+                setNewEmail("");
+              }}
+            />
+          )
+        }
+        expanded={
+          open ? (
+            <View style={{ gap: t.space.sm }}>
+              <Field
+                label="Account email"
+                value={newEmail}
+                onChangeText={setNewEmail}
+                placeholder={`new ${provider} account email`}
+                autoFocus
+                hint="Creates the slot and hands you the one command that finishes the browser sign-in — that step needs a terminal, because the CLI asks you to paste a code back."
+              />
+              <View style={{ flexDirection: "row", gap: t.space.sm }}>
+                {/* The router install is the view's primary action; when it is
+                    already done, finishing this account is what's left. */}
+                <Button
+                  label="Create & sign in"
+                  variant={pending.length > 0 ? "secondary" : "primary"}
+                  loading={addMutation.isPending}
+                  disabled={newEmail.trim() === ""}
+                  onPress={() => addMutation.mutate({ provider, email: newEmail.trim() })}
+                />
+                <Button label="Cancel" variant="ghost" onPress={() => setAddingFor(null)} />
+              </View>
+              {addMutation.error ? <ErrorText>{String(addMutation.error)}</ErrorText> : null}
+            </View>
+          ) : undefined
+        }
+      />
+    );
+  };
+
+  const providerCard = (provider: ProviderId) => {
+    const health = healthById.get(provider);
+    const status: Status = healthQuery.isFetching ? "busy" : !health ? "neutral" : health.ok ? "ok" : "error";
+    const label = healthQuery.isFetching ? "checking" : !health ? "not checked" : health.ok ? "healthy" : "failing";
+    return (
+      <Card key={provider} padded={false}>
+        <View>
+          <View style={{ padding: pad, gap: t.space.sm }}>
+            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: t.space.sm }}>
+              <View style={{ flex: 1, minWidth: 0, gap: t.space.xs }}>
+                <Text numberOfLines={1} style={t.text.heading}>
+                  {CARD_TITLE[provider]}
+                </Text>
+                <StatusPill status={status} label={label} />
+              </View>
+              <Button label="Diagnose" variant="ghost" onPress={() => runDiagnose(provider, provider)} />
+            </View>
+            {health ? (
+              health.ok ? (
+                <Text style={t.text.caption}>{health.summary}</Text>
+              ) : (
+                <ErrorText>{health.summary}</ErrorText>
+              )
+            ) : null}
+            {diagnosis[provider] ? <CodeBlock>{diagnosis[provider]}</CodeBlock> : null}
+          </View>
+          {primaryRow(provider)}
+          {slots.filter((slot) => slot.provider === provider).map(slotRow)}
+          {addRow(provider)}
+        </View>
+      </Card>
+    );
+  };
+
+  const othersCard = (
+    <Card padded={false}>
+      <View>
+        <View style={{ padding: pad, gap: t.space.xs }}>
+          <Text style={t.text.heading}>Other providers</Text>
+          <Text style={[t.text.body, { color: t.color.muted }]}>
+            One account each, held by their own CLI — Agent Link only checks that they answer.
+          </Text>
+        </View>
+        {OTHERS.map((entry) => {
+          const health = healthById.get(entry.id);
+          const status: Status = healthQuery.isFetching ? "busy" : !health ? "neutral" : health.ok ? "ok" : "error";
+          const label = healthQuery.isFetching ? "checking" : !health ? "not checked" : health.ok ? "healthy" : "failing";
+          return (
+            <Row
+              key={entry.id}
+              title={entry.title}
+              subtitle={health?.summary}
+              meta={<StatusPill status={status} label={label} />}
+              trailing={<Button label="Diagnose" variant="ghost" onPress={() => runDiagnose(entry.id, entry.id)} />}
+              expanded={diagnosis[entry.id] ? <CodeBlock>{diagnosis[entry.id]}</CodeBlock> : undefined}
+            />
+          );
+        })}
+      </View>
+    </Card>
+  );
 
   return (
-    <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
-      <View style={styles.headerRow}>
-        <Text style={styles.title}>Agent Link</Text>
-        <View style={styles.row}>
-          <Button
-            label={usageQuery.isFetching ? "Reading…" : "7-day usage"}
-            onPress={() => void usageQuery.refetch()}
-            theme={theme}
-            kind="quiet"
-            disabled={usageQuery.isFetching}
-          />
-          <Button
-            label={healthQuery.isFetching ? "Checking…" : "Check health"}
-            onPress={() => void healthQuery.refetch()}
-            theme={theme}
-            kind="quiet"
-            disabled={healthQuery.isFetching}
-          />
-          <Button label="Refresh" onPress={refresh} theme={theme} kind="quiet" />
-        </View>
-      </View>
-      <Text style={styles.subtitle}>
-        Every provider and the accounts under it. A rate limit belongs to an account, so two entries on the same account
-        share one limit.
-      </Text>
-      <Text style={styles.muted}>status: 🟢 logged in / healthy · 🟠 login needed · 🔴 wrong account / failing</Text>
-      <View style={styles.card}>
-        <Text style={styles.strong}>
-          {totalEntries} logged-in {totalEntries === 1 ? "entry" : "entries"} → {distinctPools} independent quota{" "}
-          {distinctPools === 1 ? "pool" : "pools"}
-        </Text>
-        <Text style={styles.muted}>
-          A rate limit belongs to an account. Wire the auto-router once and every new agent goes to the least-recently-used
-          healthy account; accounts that are parked or out of credit are skipped automatically. Running agents are never
-          re-routed, and resuming a chat always returns to the account that owns it.
-        </Text>
-        <Pressable accessibilityRole="button" accessibilityLabel="How to use this" onPress={() => setShowHelp((v) => !v)}>
-          <Text style={{ color: theme.colors.accent, fontSize: styles.compact ? 11 : 12, fontWeight: "600" }}>
-            {showHelp ? "Hide the basics" : "How do I use this?"}
-          </Text>
-        </Pressable>
-        {showHelp ? (
-          <View style={{ gap: 4 }}>
-            <Text style={styles.muted}>1. Install the Dynamic Agent Link provider below, then pick it in Paseo when starting agents.</Text>
-            <Text style={styles.muted}>2. Add accounts with + Add account; finish the browser sign-in with the command it gives you.</Text>
-            <Text style={styles.muted}>3. Accounts refused for a limit park themselves — later launches skip them with no action from you.</Text>
-            <Text style={styles.muted}>4. 7-day usage reads each account's own transcripts: sessions, tokens and models it ran.</Text>
-            <Text style={styles.muted}>5. An account can be healthy yet refuse a specific model. Check with: agent-link probe claude claude-fable-5 --park</Text>
-            <Text style={styles.muted}>6. The MCP tab manages servers across every account and provider at once.</Text>
-            <Text style={styles.monoText}>terminal equivalents: agent-link status · agent-link auto · agent-link cooldown</Text>
-          </View>
-        ) : null}
-      </View>
+    <Screen t={t}>
+      <Toolbar
+        title="Agent Link"
+        actions={
+          <>
+            <Button
+              label={usageQuery.isFetching ? "Reading…" : "7-day usage"}
+              loading={usageQuery.isFetching}
+              onPress={() => void usageQuery.refetch()}
+            />
+            <Button
+              label={healthQuery.isFetching ? "Checking…" : "Check health"}
+              loading={healthQuery.isFetching}
+              onPress={() => void healthQuery.refetch()}
+            />
+            <Button label="Refresh" variant="ghost" onPress={refresh} />
+          </>
+        }
+      />
 
       {scanQuery.data?.needsRestart ? (
-        <View style={styles.banner}>
-          <Text style={styles.bannerText}>
-            Provider wiring changed — restart the Paseo daemon (when no agents are mid-task) to load new providers.
-          </Text>
-        </View>
+        <Notice tone="attention">
+          Provider wiring changed — restart the Paseo daemon, when no agent is mid-task, to load it.
+        </Notice>
       ) : null}
-      {notice ? <Text style={styles.monoText}>{notice}</Text> : null}
-      {scanQuery.error ? <Text style={styles.danger}>{String(scanQuery.error)}</Text> : null}
-      {wireMutation.error ? <Text style={styles.danger}>{String(wireMutation.error)}</Text> : null}
+      {notice ? <Notice onDismiss={() => setNotice(null)}>{notice}</Notice> : null}
+      {scanQuery.error ? <ErrorText>{String(scanQuery.error)}</ErrorText> : null}
 
-      {providerCard(
-        "claude",
-        "Claude Code",
+      {scanQuery.data ? (
         <>
-          {primaryRow("claude")}
-          {slots.filter((slot) => slot.provider === "claude").map(slotRow)}
-        </>,
-      )}
-      {providerCard(
-        "codex",
-        "Codex",
-        <>
-          {primaryRow("codex")}
-          {slots.filter((slot) => slot.provider === "codex").map(slotRow)}
-        </>,
-      )}
-      {providerCard("kimi", "Kimi Code", null)}
-      {providerCard("grok", "Grok", null)}
-
-      {slots.some((slot) => !slot.loggedIn || slot.wrongAccount) ? (
-        scanQuery.data?.agentAuthInstalled ? (
-          <Text style={styles.monoText}>{"fix logins in a terminal: agent-link login all"}</Text>
-        ) : (
-          <Text style={styles.monoText}>
-            {'fix logins in a terminal (per account):\nCLAUDE_CONFIG_DIR="<slot folder>" claude auth login --email <email>\nCODEX_HOME="<slot folder>" codex login'}
-          </Text>
-        )
+          {routingCard}
+          {providerCard("claude")}
+          {providerCard("codex")}
+          {othersCard}
+        </>
+      ) : scanQuery.isLoading ? (
+        <Loading label="Reading accounts…" />
       ) : null}
-      {scanQuery.data && !scanQuery.data.agentAuthInstalled ? (
-        <Text style={styles.muted}>
-          Optional: the agent-link CLI (github.com/itsjustanks/agent-link) turns logins into one command and adds
-          hot-switching — this panel works fine without it.
+
+      <Disclosure title="How this works">
+        <Text style={t.text.body}>
+          1. Install the router above, then pick it as the provider when you start an agent — each new agent lands on a
+          live account, and resuming a chat always returns to the account that owns it.
         </Text>
-      ) : null}
-    </ScrollView>
+        <Text style={t.text.body}>
+          2. Add accounts with + Add account, and finish each browser sign-in with the command that row gives you.
+        </Text>
+        <CodeBlock>{"agent-link status\nagent-link auto\nagent-link login all\nagent-link cooldown"}</CodeBlock>
+        {scanQuery.data && !scanQuery.data.agentAuthInstalled ? (
+          <Text style={t.text.caption}>
+            The agent-link CLI (github.com/itsjustanks/agent-link) turns those sign-ins into one command and adds
+            hot-switching. This panel works without it.
+          </Text>
+        ) : null}
+      </Disclosure>
+    </Screen>
   );
 }

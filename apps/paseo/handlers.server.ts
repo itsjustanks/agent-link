@@ -4,6 +4,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameS
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, join } from "node:path";
 import type { Destination, Slot } from "./contracts.shared";
+import type { Dialect } from "./mcpjson.shared";
 
 const HOME = homedir();
 // Home dir: prefer whichever location actually holds accounts. Picking a
@@ -53,7 +54,7 @@ function listDirs(root: string): string[] {
   }
 }
 
-function readJson(path: string): Record<string, unknown> | null {
+export function readJson(path: string): Record<string, unknown> | null {
   try {
     return JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
   } catch {
@@ -61,13 +62,16 @@ function readJson(path: string): Record<string, unknown> | null {
   }
 }
 
-const BACKUP_KEEP = 5;
+const BACKUP_KEEP = 20;
 
-function backupFile(path: string): void {
+export function backupFile(path: string): void {
   if (!existsSync(path)) return;
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   copyFileSync(path, `${path}.bak-agent-link-${stamp}`);
-  // Keep only the most recent few so config dirs do not fill with backups.
+  // Keep the most recent few so config dirs do not fill with backups. The count
+  // is per file and generous on purpose: applying one server to seven
+  // destinations is a single user action that writes seven files, and a tighter
+  // cap would push the pre-change copy out within two such presses.
   try {
     const dir = dirname(path);
     const prefix = `${basename(path)}.bak-agent-link-`;
@@ -81,10 +85,20 @@ function backupFile(path: string): void {
   }
 }
 
-function writeJsonAtomic(path: string, value: unknown): void {
+/**
+ * Replace a file's contents in one step, keeping the permissions it already
+ * had. These files hold bearer tokens, so a fresh one is created private, and
+ * an existing 0600 config is never widened by being edited here.
+ */
+export function writeTextAtomic(path: string, text: string): void {
+  const mode = existsSync(path) ? statSync(path).mode & 0o777 : 0o600;
   const tmp = `${path}.tmp-agent-link`;
-  writeFileSync(tmp, JSON.stringify(value, null, 2), { mode: 0o600 });
+  writeFileSync(tmp, text, { mode });
   renameSync(tmp, path);
+}
+
+export function writeJsonAtomic(path: string, value: unknown): void {
+  writeTextAtomic(path, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 // ---------------------------------------------------------------- accounts / slots
@@ -205,7 +219,7 @@ function slugForEmail(provider: string, email: string): string {
 // Resolve the login shell's PATH once per process.
 let cachedSearchPath: string[] | null = null;
 
-function searchPath(): string[] {
+export function searchPath(): string[] {
   if (cachedSearchPath === null) {
     let raw = process.env.PATH ?? "";
     try {
@@ -227,7 +241,7 @@ function agentLinkInstalled(): boolean {
 
 // ---------------------------------------------------------------- MCP formats
 
-type McpDef = {
+export type McpDef = {
   command?: string;
   args?: string[];
   env?: Record<string, string>;
@@ -238,11 +252,63 @@ type McpDef = {
   // startup_timeout_sec, …). Carried through so a rename or a copy never
   // silently drops settings it did not understand.
   extra?: string[];
+  // Which subtable this destination keeps HTTP headers in. Codex uses
+  // `http_headers`; Grok uses `headers`. Reading the wrong one reports a server
+  // as credential-free, and writing the wrong one deletes its token.
+  headerTable?: "headers" | "http_headers";
 };
+
+/**
+ * What each config language actually accepts, in one table so nothing has to
+ * guess twice. Measured on this machine: ~/.claude.json holds 19 servers, 18
+ * carrying `type`; ~/.codex/config.toml holds 27, 7 of them with an
+ * `http_headers` subtable and 26 with `enabled`.
+ *
+ * Reading is forgiving — either header spelling is understood, so a file
+ * already written with the wrong one is recovered rather than reported as
+ * credential-free. Writing is strict: only the dialect's own spelling is
+ * emitted, and a key the target has no word for is reported as dropped.
+ */
+export const DIALECTS: Record<
+  Dialect,
+  {
+    format: "json-mcp" | "toml-mcp";
+    label: string;
+    headerKey: "headers" | "http_headers";
+    writesType: boolean;
+    supportsEnabled: boolean;
+  }
+> = {
+  "claude-json": { format: "json-mcp", label: "Claude", headerKey: "headers", writesType: true, supportsEnabled: false },
+  "kimi-json": { format: "json-mcp", label: "Kimi", headerKey: "headers", writesType: false, supportsEnabled: false },
+  "codex-toml": { format: "toml-mcp", label: "Codex", headerKey: "http_headers", writesType: false, supportsEnabled: true },
+  "grok-toml": { format: "toml-mcp", label: "Grok", headerKey: "headers", writesType: false, supportsEnabled: true },
+};
+
+export function dialectOf(dest: Destination): Dialect {
+  if (dest.provider === "claude") return "claude-json";
+  if (dest.provider === "kimi") return "kimi-json";
+  if (dest.provider === "codex") return "codex-toml";
+  if (dest.provider === "grok") return "grok-toml";
+  // A destination contributed by some other provider id still has to land in a
+  // real language. Path, not provider name, is the reliable tell for Codex.
+  if (dest.format === "json-mcp") return dest.configPath.endsWith(".claude.json") ? "claude-json" : "kimi-json";
+  return /codex/i.test(dest.configPath) ? "codex-toml" : "grok-toml";
+}
+
+/** TOML-only bookkeeping that must never be written into a JSON config. */
+export function jsonSafeDef(def: McpDef, dialect: "claude-json" | "other"): McpDef {
+  const { extra: _extra, headerTable: _headerTable, ...rest } = def;
+  const clean: McpDef = { ...rest };
+  // Claude Code needs `type` to treat an entry as HTTP; 18 of the 19 servers in
+  // a real config carry it, and an entry that loses it stops loading.
+  if (dialect === "claude-json" && !clean.type) clean.type = clean.url ? "http" : "stdio";
+  return clean;
+}
 
 // json-mcp: a JSON file with a top-level `mcpServers` object. Claude Code's
 // ~/.claude.json and Kimi Code's mcp.json both use this shape.
-function jsonMcpRead(path: string): Record<string, McpDef> {
+export function jsonMcpRead(path: string): Record<string, McpDef> {
   const config = readJson(path);
   return (config?.mcpServers as Record<string, McpDef> | undefined) ?? {};
 }
@@ -257,7 +323,7 @@ function jsonMcpWrite(path: string, name: string, def: McpDef | null): void {
   }
   const servers = (config.mcpServers as Record<string, McpDef> | undefined) ?? {};
   if (def === null) delete servers[name];
-  else servers[name] = def;
+  else servers[name] = jsonSafeDef(def, path.endsWith(".claude.json") ? "claude-json" : "other");
   config.mcpServers = servers;
   backupFile(path);
   writeJsonAtomic(path, config);
@@ -270,7 +336,7 @@ function tomlString(value: string): string {
 
 // Table headers may be indented — valid TOML, and missing it once caused a
 // duplicate table to be appended (which makes the whole file unparseable).
-function tomlMcpNames(path: string): string[] {
+export function tomlMcpNames(path: string): string[] {
   try {
     const text = readFileSync(path, "utf8");
     return [...new Set([...text.matchAll(/^[ \t]*\[mcp_servers\.([^\].]+)/gm)].map((match) => match[1] ?? ""))];
@@ -295,7 +361,7 @@ function tomlUnquote(raw: string): string | null {
   return null;
 }
 
-function tomlServerBlock(text: string, name: string): { start: number; end: number } | null {
+export function tomlServerBlock(text: string, name: string): { start: number; end: number } | null {
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const header = new RegExp(`^[ \\t]*\\[mcp_servers\\.${escaped}(?:\\.[^\\]]+)?\\]`, "m");
   const startMatch = header.exec(text);
@@ -313,13 +379,17 @@ function tomlServerBlock(text: string, name: string): { start: number; end: numb
 }
 
 // Minimal parse of one server block — enough to re-create the definition elsewhere.
-function tomlMcpReadOne(path: string, name: string): McpDef | null {
-  let text = "";
+export function tomlMcpReadOne(path: string, name: string): McpDef | null {
   try {
-    text = readFileSync(path, "utf8");
+    return tomlMcpReadOneFromText(readFileSync(path, "utf8"), name);
   } catch {
     return null;
   }
+}
+
+// Same parse against a buffer rather than a file, so a computed document can be
+// re-read and compared before anything is written to disk.
+export function tomlMcpReadOneFromText(text: string, name: string): McpDef | null {
   const block = tomlServerBlock(text, name);
   if (!block) return null;
   const body = text.slice(block.start, block.end);
@@ -351,7 +421,7 @@ function tomlMcpReadOne(path: string, name: string): McpDef | null {
     extra.push(line.trim());
   }
   if (extra.length > 0) def.extra = extra;
-  for (const sub of ["env", "headers"] as const) {
+  for (const sub of ["env", "headers", "http_headers"] as const) {
     const subHeader = new RegExp(`^[ \\t]*\\[mcp_servers\\.${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.${sub}\\]`, "m").exec(body);
     if (!subHeader) continue;
     const subBody = body.slice(subHeader.index).split("\n").slice(1);
@@ -363,7 +433,12 @@ function tomlMcpReadOne(path: string, name: string): McpDef | null {
       const value = tomlUnquote(pair[2]);
       if (value !== null) record[pair[1]] = value;
     }
-    if (Object.keys(record).length > 0) def[sub] = record;
+    if (Object.keys(record).length === 0) continue;
+    if (sub === "env") def.env = record;
+    else {
+      def.headers = { ...def.headers, ...record };
+      def.headerTable = sub;
+    }
   }
   // A block we could not read meaningfully must not be treated as a definition:
   // re-serializing an empty def would silently destroy the real one.
@@ -373,14 +448,37 @@ function tomlMcpReadOne(path: string, name: string): McpDef | null {
 
 // A bare TOML table key. Anything else (dots, quotes, spaces, brackets) would
 // either nest the table under a different server or make the file unparseable.
-const TOML_SAFE_NAME = /^[A-Za-z0-9_-]+$/;
+export const TOML_SAFE_NAME = /^[A-Za-z0-9_-]+$/;
+
+/**
+ * Which subtable a brand-new block should use. Codex reads `http_headers`;
+ * Grok reads `headers`. Only consulted when neither the file nor the source
+ * definition already answers the question.
+ */
+export function headerTableFor(configPath: string): "headers" | "http_headers" {
+  return /codex/i.test(configPath) ? "http_headers" : "headers";
+}
 
 // Pure text transform so callers can apply several servers in memory and write once.
-function tomlApply(text: string, name: string, def: McpDef | null): string {
+// `forceHeaderTable` is how a dialect-aware caller corrects a file that was
+// written with the other CLI's spelling; without it the file's own choice wins.
+export function tomlApply(
+  text: string,
+  name: string,
+  def: McpDef | null,
+  fileHint = "",
+  forceHeaderTable?: "headers" | "http_headers",
+): string {
   if (!TOML_SAFE_NAME.test(name)) {
     throw new Error(`'${name}' is not a valid TOML table name (letters, numbers, - and _ only)`);
   }
   let next = text;
+  // Whichever subtable this file already used for headers wins: rewriting a
+  // Codex block's `http_headers` as `headers` deletes the token Codex reads.
+  const existingHeaderTable = new RegExp(
+    `^[ \\t]*\\[mcp_servers\\.${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.(http_headers|headers)\\]`,
+    "m",
+  ).exec(text)?.[1] as "headers" | "http_headers" | undefined;
   let block = tomlServerBlock(next, name);
   while (block) {
     next = next.slice(0, block.start) + next.slice(block.end);
@@ -392,8 +490,11 @@ function tomlApply(text: string, name: string, def: McpDef | null): string {
     if (def.args?.length) lines.push(`args = [${def.args.map(tomlString).join(", ")}]`);
     if (def.url) lines.push(`url = ${tomlString(def.url)}`);
     for (const line of def.extra ?? []) lines.push(line);
-    for (const sub of ["env", "headers"] as const) {
-      const record = def[sub];
+    const headerTable = forceHeaderTable ?? existingHeaderTable ?? def.headerTable ?? headerTableFor(fileHint);
+    for (const [sub, record] of [
+      ["env", def.env],
+      [headerTable, def.headers],
+    ] as const) {
       if (record && Object.keys(record).length > 0) {
         lines.push(`[mcp_servers.${name}.${sub}]`);
         for (const [key, value] of Object.entries(record)) lines.push(`${key} = ${tomlString(value)}`);
@@ -406,7 +507,7 @@ function tomlApply(text: string, name: string, def: McpDef | null): string {
 
 // Only a MISSING file may be created from scratch. An unreadable existing file
 // is an error, never a reason to replace it.
-function tomlReadForWrite(path: string): string {
+export function tomlReadForWrite(path: string): string {
   if (!existsSync(path)) return "";
   try {
     return readFileSync(path, "utf8");
@@ -417,9 +518,9 @@ function tomlReadForWrite(path: string): string {
 
 function tomlMcpWrite(path: string, name: string, def: McpDef | null): void {
   const text = tomlReadForWrite(path);
-  const next = tomlApply(text, name, def); // throws before any write on a bad name
+  const next = tomlApply(text, name, def, path); // throws before any write on a bad name
   backupFile(path);
-  writeFileSync(path, next);
+  writeTextAtomic(path, next);
 }
 
 // The one-line summary shown in the always-visible list must never carry a
@@ -461,14 +562,14 @@ function destNames(dest: Destination): string[] {
   return dest.format === "json-mcp" ? Object.keys(jsonMcpRead(dest.configPath)) : tomlMcpNames(dest.configPath);
 }
 
-function destWrite(dest: Destination, name: string, def: McpDef | null): void {
+export function destWrite(dest: Destination, name: string, def: McpDef | null): void {
   if (dest.format === "json-mcp") jsonMcpWrite(dest.configPath, name, def);
   else tomlMcpWrite(dest.configPath, name, def);
 }
 
 // ---------------------------------------------------------------- destinations
 
-async function buildDestinations(paseo: PluginHandlerContext["paseo"]): Promise<Destination[]> {
+export async function buildDestinations(paseo: PluginHandlerContext["paseo"]): Promise<Destination[]> {
   const overrides = await providerOverrides(paseo);
   const destinations: Destination[] = [];
   const seen = new Set<string>();
@@ -1134,11 +1235,11 @@ function findDef(destinations: Destination[], name: string): McpDef | null {
   return def;
 }
 
-function maskValue(value: string): string {
+export function maskValue(value: string): string {
   return value.length > 4 ? `•••${value.slice(-4)}` : "•••";
 }
 
-function destReadOne(dest: Destination, name: string): McpDef | null {
+export function destReadOne(dest: Destination, name: string): McpDef | null {
   return dest.format === "json-mcp" ? (jsonMcpRead(dest.configPath)[name] ?? null) : tomlMcpReadOne(dest.configPath, name);
 }
 
@@ -1192,18 +1293,34 @@ export async function handleMcpEditOne(
     }
     if (value !== "") record[key] = value;
   }
-  const def: McpDef = {};
+  // Start from what is stored and change only the four things this form owns.
+  // Rebuilding the entry from the form dropped every key the form cannot show —
+  // `type` (18 of 19 real Claude entries carry it, and an HTTP entry without it
+  // stops loading) and Codex's `enabled` (a disabled server came back to life on
+  // an unrelated header edit).
+  const def: McpDef = { ...(stored ?? {}) };
   if (input.kind === "stdio") {
     const parts = (input.command ?? "").trim().split(/\s+/).filter(Boolean);
     if (parts.length === 0) return { ok: false, message: "stdio server needs a command" };
     def.command = parts[0];
     if (parts.length > 1) def.args = parts.slice(1);
+    else delete def.args;
+    delete def.url;
+    delete def.headers;
     if (Object.keys(record).length > 0) def.env = record;
+    else delete def.env;
   } else {
     if (!input.url?.trim()) return { ok: false, message: "http server needs a URL" };
     def.url = input.url.trim();
+    delete def.command;
+    delete def.args;
+    delete def.env;
     if (Object.keys(record).length > 0) def.headers = record;
+    else delete def.headers;
   }
+  // Only correct `type` when the transport itself changed: an entry that says
+  // "sse" must keep saying "sse" through a header edit.
+  if (def.type && (def.type === "stdio") !== (input.kind === "stdio")) def.type = input.kind === "stdio" ? "stdio" : "http";
   try {
     destWrite(dest, input.name, def);
     return { ok: true, message: `updated '${input.name}' in ${dest.label} (backup saved)` };
