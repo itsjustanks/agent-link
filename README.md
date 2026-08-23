@@ -61,11 +61,20 @@ agent-link auto        # write the launchers
 agent-link status      # who is in rotation, and why anyone is not
 ```
 
-Rotation includes your **primary** login as well as every added account, so you never duplicate an account you already use. An account is skipped when it is:
+Rotation includes your **primary** login as well as every added account, so you never duplicate an account you already use. An account is skipped when it is **parked** (`agent-link cooldown claude you@work.com 180`, `… clear` to unpark) or **not signed in**.
 
-- **parked** — `agent-link cooldown claude you@work.com 180` (and `… clear` to unpark)
-- **out of credit** — detected from the CLI's own config, no action needed
-- **not signed in**
+### Not every account can serve every model
+
+An account can be signed in and healthy yet still refuse a specific model — a spend limit applies per account, and premium models are the first thing to go. The CLI's own config flags do **not** predict this reliably (an account marked "out of credits" may serve fine while another that looks healthy refuses), so measure it:
+
+```sh
+agent-link probe claude claude-fable-5 --park
+#   you@work.com     ok
+#   you@side.com     CANNOT SERVE claude-fable-5
+#       parked for 180m — routing will skip it
+```
+
+Each account answers one token on that model; `--park` sidelines the ones that refuse, so rotation stops sending them work. Re-run it when limits reset.
 
 Two guarantees that make this safe:
 

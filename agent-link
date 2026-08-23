@@ -224,7 +224,6 @@ PY2
 # The primary has no slot dir, so its cooldown is tracked under "primary".
 slot_available_primary() { # $1 provider
   local until now
-  prov_blocked "$1" "$HOME" && return 1
   until="$(cat "$(pools_dir)/cooldown-$1-primary" 2>/dev/null || echo 0)"
   now="$(date +%s)"
   [ "$until" -gt "$now" ] && return 1
@@ -234,7 +233,6 @@ slot_available_primary() { # $1 provider
 slot_available() { # $1 provider, $2 email
   local until now
   prov_logged_in "$1" "$(slot_dir "$1" "$2")" || return 1
-  prov_blocked "$1" "$(slot_dir "$1" "$2")" && return 1
   until="$(cat "$(pools_dir)/cooldown-$1-$2" 2>/dev/null || echo 0)"
   now="$(date +%s)"
   [ "$until" -gt "$now" ] && return 1
@@ -347,10 +345,6 @@ slot_state() { # $1 provider, $2 email -> "dot|state|note"
     return
   fi
   local runs
-  if prov_blocked "$1" "$(slot_dir "$1" "$2")"; then
-    printf '%s|%s|%s' "${C_RED}●${C_OFF}" "logged in" "spend limit reached — routing skips it"
-    return
-  fi
   runs="$(cat "$(pools_dir)/count-$1-$2" 2>/dev/null || echo 0)"
   if [ "$last" -gt 0 ]; then
     mins=$(( (now - last) / 60 ))
@@ -379,8 +373,6 @@ cmd_status() {
       pruns="$(cat "$(pools_dir)/count-$p-primary" 2>/dev/null || echo 0)"
       if [ -n "$pcov" ]; then
         pnote="duplicated by a slot below"
-      elif prov_blocked "$p" "$HOME"; then
-        pnote="${C_RED}spend limit reached — routing skips it${C_OFF}${C_DIM}"
       else
         pnote="in rotation · ${pruns} launches"
       fi
@@ -702,6 +694,42 @@ cmd_cooldown() { # provider email minutes — park an exhausted account
 }
 
 # One line, for an agent to run mid-conversation without dumping context.
+# Ask each account to answer one token on a given model. Config flags proved
+# unreliable — an account marked "out of credits" can still serve, and one that
+# looks fine can refuse — so this measures instead of guessing.
+cmd_probe() { # $1 provider (default claude), $2 model, [--park]
+  local p="${1:-claude}" model="${2:-}" park="" e dir out ok
+  case "${3:-}" in --park) park=1 ;; esac
+  prov_valid "$p" || { echo "usage: agent-link probe <claude|codex> [model] [--park]" >&2; return 1; }
+  [ "$p" = claude ] || { echo "probe currently supports claude only" >&2; return 1; }
+  for e in primary $(slot_list "$p"); do
+    if [ "$e" = primary ]; then
+      [ -n "$(primary_email "$p")" ] || continue
+      dir=""
+    else
+      prov_logged_in "$p" "$(slot_dir "$p" "$e")" || continue
+      dir="$(slot_dir "$p" "$e")"
+    fi
+    printf '  %-28s ' "$e"
+    if [ -n "$dir" ]; then
+      out="$(CLAUDE_CONFIG_DIR="$dir" claude -p "ok" ${model:+--model "$model"} 2>&1 | tr '\n' ' ')"
+    else
+      out="$(claude -p "ok" ${model:+--model "$model"} 2>&1 | tr '\n' ' ')"
+    fi
+    case "$out" in
+      *"spend limit"*|*"usage limit"*|*"rate limit"*|*"Credit balance"*)
+        ok=""
+        printf '%sCANNOT SERVE%s %s\n' "$C_RED" "$C_OFF" "${model:-default}"
+        ;;
+      *) ok=1; printf '%sok%s\n' "$C_GREEN" "$C_OFF" ;;
+    esac
+    if [ -z "$ok" ] && [ -n "$park" ]; then
+      cmd_cooldown "$p" "$e" 180 >/dev/null
+      echo "      parked for 180m — routing will skip it"
+    fi
+  done
+}
+
 cmd_whoami() { # [provider]
   local p pdir email kind runs nxt
   for p in ${1:-$PROVIDERS}; do
@@ -765,8 +793,6 @@ cmd_shims() { # numbered per-slot shims: claude-1, codex-2, ...
       pruns="$(cat "$(pools_dir)/count-$p-primary" 2>/dev/null || echo 0)"
       if [ -n "$pcov" ]; then
         pnote="duplicated by a slot below"
-      elif prov_blocked "$p" "$HOME"; then
-        pnote="${C_RED}spend limit reached — routing skips it${C_OFF}${C_DIM}"
       else
         pnote="in rotation · ${pruns} launches"
       fi
@@ -1049,6 +1075,7 @@ main() {
     handoff) shift; cmd_handoff "$@" ;;
     pools)   cmd_pools ;;
     whoami)  shift; cmd_whoami "$@" ;;
+    probe)   shift; cmd_probe "$@" ;;
     next)    shift; prov_valid "${1:-claude}" && pick_slot "${1:-claude}" dry ;;
     cooldown) shift; cmd_cooldown "$@" ;;
     env)     shift; cmd_env "$@" ;;
