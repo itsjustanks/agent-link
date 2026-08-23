@@ -98,6 +98,12 @@ The HTML, Markdown, SVG and images your agents write, found automatically across
 
 On iOS and Android the page is rasterised on the daemon and shown as an image instead — which is also what happens when your Paseo daemon is a remote server rather than your laptop.
 
+### Don't want the CLI?
+
+You do not need it. Installed from the Paseo UI, the plugin reads your account directories itself, syncs MCP definitions itself, and renders canvases itself — accounts, MCP and Canvas are all fully usable with no terminal.
+
+The one exception is **routing**, because a Paseo provider runs a *command*, and that command is a small launcher script the CLI writes. So the Agent Link tab offers to install the CLI for you: one press downloads a single file to `~/.local/bin`, writes the launchers, and routing becomes available — and the exact `curl` command is shown next to the button for anyone who would rather run it themselves.
+
 ### Installing the plugin
 
 **From the CLI** — one command, which copies the plugin into Paseo's own plugins directory, installs and typechecks it, registers the ID and confirms the daemon is running it:

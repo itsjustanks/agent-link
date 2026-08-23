@@ -1,6 +1,8 @@
 import type { PluginContext } from "@getpaseo/plugin";
 import { AgentSyncSurface } from "./agents.client";
 import { CanvasPanel, CanvasSurface } from "./canvas.client";
+import { cliInstall, cliStatus } from "./cli.shared";
+import { handleCliInstall, handleCliStatus } from "./cli.server";
 import { canvasCopy, canvasOpen, canvasRender, canvasServe, canvasSource, canvasState, canvasStop } from "./canvas.shared";
 import {
   canvasShutdown,
@@ -105,6 +107,8 @@ export default function contribute(plugin: PluginContext) {
   plugin.handle(canvasCopy, handleCanvasCopy);
   plugin.handle(canvasRender, handleCanvasRender);
   plugin.handle(canvasSource, handleCanvasSource);
+  plugin.handle(cliStatus, handleCliStatus);
+  plugin.handle(cliInstall, handleCliInstall);
   plugin.handle(mcpRawGet, handleMcpRawGet);
   plugin.handle(mcpRawPut, handleMcpRawPut);
   plugin.handle(mcpImportParse, handleMcpImportParse);

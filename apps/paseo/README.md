@@ -111,6 +111,12 @@ Requires Paseo ≥ 0.5 with plugins enabled. Tested against 0.5.0-beta.5. Sharin
 
 **Nothing else is required.** Every provider and account it finds is one you already have — the plugin installs no software and creates no accounts. Providers you don't use simply don't appear.
 
+### Do you need the CLI?
+
+No, for most of it. This panel reads the account directories, writes MCP configuration and renders canvases on its own — accounts, MCP and Canvas work with the plugin alone.
+
+**Routing is the exception.** A Paseo provider runs a command, so the auto-router needs the launcher script that `agent-link auto` writes. The Agent Link tab therefore shows an **Install the agent-link CLI** card when it is missing: one press fetches a single file into `~/.local/bin`, writes the launchers, and routing becomes installable from the panel. The `curl` command sits beside the button if you would rather do it yourself, and the card disappears once the CLI is found.
+
 ### Optional: the agent-link CLI
 
 [**agent-link**](https://github.com/itsjustanks/agent-link) is the companion CLI that creates and logs in account slots (`agent-link add claude you@work.com`) and can hot-switch which account the plain `claude` / `codex` command uses. The plugin is fully standalone without it — it reads whatever slots exist and does its own MCP sync — but with agent-link installed, logins become one command and the panel points you at it. The panel also reads hand-rolled slot layouts in `~/.claude-accounts` / `~/.codex-accounts`.

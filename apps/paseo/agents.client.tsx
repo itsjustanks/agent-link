@@ -3,6 +3,7 @@ import { useRpc } from "@getpaseo/plugin";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import React, { useState } from "react";
 import { Text, View } from "react-native";
+import { cliInstall, cliStatus } from "./cli.shared";
 import {
   accountUsage,
   addAccount,
@@ -90,6 +91,8 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const t = useUi(theme, layout.compact);
   const queryClient = useQueryClient();
   const callScan = useRpc(scan);
+  const callCliStatus = useRpc(cliStatus);
+  const callCliInstall = useRpc(cliInstall);
   const callWire = useRpc(wireProvider);
   const callDiagnose = useRpc(diagnoseProvider);
   const callHealth = useRpc(providerHealth);
@@ -252,6 +255,41 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
       />
     );
   };
+
+  // Everything else on this surface works without the CLI, but a Paseo provider
+  // runs a command, so routing needs the launcher the CLI writes. Rather than
+  // sending someone to a terminal, offer to put it there.
+  const cli = useQuery({ queryKey: ["agent-link", "cli"], queryFn: () => callCliStatus({}) });
+  const installCli = useMutation({
+    mutationFn: () => callCliInstall({ withRouters: true }),
+    onSuccess: (result) => {
+      setNotice(result.message);
+      void queryClient.invalidateQueries({ queryKey: ["agent-link"] });
+    },
+    onError: (error: Error) => setNotice(error.message),
+  });
+
+  const cliCard =
+    cli.data && !cli.data.installed ? (
+      <Card tone="attention">
+        <Text style={t.text.heading}>Install the agent-link CLI</Text>
+        <Text style={[t.text.body, { color: t.color.muted }]}>
+          Accounts, MCP and Canvas all work without it. Routing does not: a Paseo provider runs a command, and that
+          command is a small launcher the CLI writes. Installing it downloads one file to {cli.data.binDir} and writes
+          the launchers, after which routing can be installed from here.
+        </Text>
+        <View style={{ flexDirection: "row", gap: t.space.sm, alignItems: "center", flexWrap: "wrap" }}>
+          <Button
+            label="Install it"
+            variant="primary"
+            loading={installCli.isPending}
+            onPress={() => installCli.mutate()}
+          />
+          <Text style={t.text.caption}>or run it yourself:</Text>
+        </View>
+        <CodeBlock>{cli.data.command}</CodeBlock>
+      </Card>
+    ) : null;
 
   const routingCard = (
     <Card padded={false} tone={routingStatus}>
@@ -730,6 +768,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
 
       {scanQuery.data ? (
         <>
+          {cliCard}
           {routingCard}
           {providerCard("claude")}
           {providerCard("codex")}
