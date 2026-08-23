@@ -211,6 +211,10 @@ pick_slot() { # $1 provider
   done
   [ -n "$best" ] || return 1
   date +%s > "$(pools_dir)/last-$1-$best"
+  # Launch counter: how many agents this account has actually been handed.
+  local n
+  n="$(cat "$(pools_dir)/count-$1-$best" 2>/dev/null || echo 0)"
+  echo $(( n + 1 )) > "$(pools_dir)/count-$1-$best"
   echo "$best"
 }
 
@@ -270,7 +274,7 @@ fi
 
 # One place that knows how an account should look: dot colour + words.
 slot_state() { # $1 provider, $2 email -> "dot|state|note"
-  local dir got until now last mins
+  local dir got until now last mins runs
   dir="$(slot_dir "$1" "$2")"
   if ! prov_logged_in "$1" "$dir"; then
     printf '%s|%s|%s' "${C_YELLOW}○${C_OFF}" "not logged in" "run 'l' to log in"
@@ -288,11 +292,13 @@ slot_state() { # $1 provider, $2 email -> "dot|state|note"
     printf '%s|%s|%s' "${C_RED}●${C_OFF}" "logged in" "parked $(( (until - now + 59) / 60 ))m — routing skips it"
     return
   fi
+  local runs
+  runs="$(cat "$(pools_dir)/count-$1-$2" 2>/dev/null || echo 0)"
   if [ "$last" -gt 0 ]; then
     mins=$(( (now - last) / 60 ))
-    printf '%s|%s|%s' "${C_GREEN}●${C_OFF}" "logged in" "in rotation · used ${mins}m ago"
+    printf '%s|%s|%s' "${C_GREEN}●${C_OFF}" "logged in" "in rotation · ${runs} launches · last ${mins}m ago"
   else
-    printf '%s|%s|%s' "${C_GREEN}●${C_OFF}" "logged in" "in rotation"
+    printf '%s|%s|%s' "${C_GREEN}●${C_OFF}" "logged in" "in rotation · never used"
   fi
 }
 
