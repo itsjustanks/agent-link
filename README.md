@@ -79,6 +79,17 @@ agent-link handoff claude <session-id> you@other.com
 agent-link run claude you@other.com claude --resume <session-id>
 ```
 
+### Which account am I on right now?
+
+Run this inside any agent or shell — one line, nothing else:
+
+```sh
+agent-link whoami
+# claude: you@home.com (account, 12 launches) · next: you@work.com
+```
+
+It reads the config dir the current process was launched with, so an agent asking mid-conversation gets its *own* account, not the default. `agent-link next claude` prints just the account rotation would choose next, and neither command disturbs the rotation order.
+
 ## Use with an editor or orchestrator
 
 Anything that lets you set **a command** or **environment variables** can use agent-link:
@@ -109,6 +120,8 @@ Anything that lets you set **a command** or **environment variables** can use ag
 ```
 agent-link                       interactive dashboard
 agent-link status                every account and its state
+agent-link whoami [prov]         one line: the account this process is using, and what is next
+agent-link next [prov]           just the account rotation would pick next
 agent-link add <prov> <email>    create an account and sign in
 agent-link login [prov] [email|all]      sign in whatever needs it
 agent-link claude|codex [args]   run that CLI on the next account in rotation

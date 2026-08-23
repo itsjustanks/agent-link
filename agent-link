@@ -263,6 +263,7 @@ pick_slot() { # $1 provider
     if [ -z "$best" ] || [ "$ts" -lt "$best_ts" ]; then best="$e"; best_ts="$ts"; fi
   done
   [ -n "$best" ] || return 1
+  [ "${2:-}" = dry ] && { echo "$best"; return 0; }
   date +%s > "$(pools_dir)/last-$1-$best"
   # Launch counter: how many agents this account has actually been handed.
   local n
@@ -700,6 +701,27 @@ cmd_cooldown() { # provider email minutes — park an exhausted account
   echo "$p · $e: parked for ${arg}m — auto-routing will skip it until then"
 }
 
+# One line, for an agent to run mid-conversation without dumping context.
+cmd_whoami() { # [provider]
+  local p pdir email kind runs nxt
+  for p in ${1:-$PROVIDERS}; do
+    prov_valid "$p" || continue
+    pdir="$(eval "printf '%s' \"\${$(prov_env_var "$p"):-}\"")"
+    if [ -n "$pdir" ]; then
+      email="$(prov_email "$p" "$pdir")"
+      kind="account"
+      runs="$(cat "$(pools_dir)/count-$p-$(basename "$pdir")" 2>/dev/null || echo 0)"
+    else
+      email="$(primary_email "$p")"
+      kind="primary"
+      runs="$(cat "$(pools_dir)/count-$p-primary" 2>/dev/null || echo 0)"
+    fi
+    [ -n "$email" ] || continue
+    nxt="$(pick_slot "$p" dry 2>/dev/null || echo "-")"
+    printf '%s: %s (%s, %s launches) · next: %s\n' "$p" "$email" "$kind" "$runs" "$nxt"
+  done
+}
+
 cmd_pools() { # show what auto-routing sees
   local p e now until last state
   now="$(date +%s)"
@@ -1026,6 +1048,8 @@ main() {
     pick)    shift; cmd_pick "$@" ;;
     handoff) shift; cmd_handoff "$@" ;;
     pools)   cmd_pools ;;
+    whoami)  shift; cmd_whoami "$@" ;;
+    next)    shift; prov_valid "${1:-claude}" && pick_slot "${1:-claude}" dry ;;
     cooldown) shift; cmd_cooldown "$@" ;;
     env)     shift; cmd_env "$@" ;;
     run)     shift; cmd_run "$@" ;;
