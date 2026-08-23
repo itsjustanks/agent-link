@@ -1,8 +1,8 @@
 import type { PluginAgentPanelProps, PluginSurfaceProps } from "@getpaseo/plugin";
 import { usePaseo, useRpc, useWorkspace } from "@getpaseo/plugin";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import React, { useMemo, useState } from "react";
-import { Text, View } from "react-native";
+import React, { useEffect, useMemo, useState } from "react";
+import { Clipboard, Text, View } from "react-native";
 import {
   canvasCopy,
   canvasOpen,
@@ -90,11 +90,13 @@ function brief(request: string, name: string): string {
 function CanvasView({
   theme,
   layout,
+  hostLabel,
   agentId,
   scopeDir,
 }: {
   theme: PluginSurfaceProps["theme"];
   layout: PluginSurfaceProps["layout"];
+  hostLabel?: string;
   agentId?: string;
   scopeDir?: string;
 }) {
@@ -117,11 +119,37 @@ function CanvasView({
   const [request, setRequest] = useState("");
   const [name, setName] = useState("dashboard");
   const [target, setTarget] = useState<{ id: string; name: string } | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  /**
+   * The clipboard that matters is the one on the device reading this, not the
+   * daemon's — so try the client first and only fall back to the host.
+   */
+  const copyLink = (url: string) => {
+    let done = false;
+    try {
+      Clipboard.setString(url);
+      done = true;
+    } catch {
+      done = false;
+    }
+    if (done) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1_500);
+      return;
+    }
+    copyMutation.mutate(url);
+  };
 
   const state = useQuery({
     queryKey: ["agent-link", "canvas"],
     queryFn: () => callState({}),
-    refetchInterval: (result) => (result.state.data?.tunnel.state === "starting" ? 2_000 : false),
+    // While a canvas is open its file is usually being rewritten by the agent
+    // that made it. Re-scanning keeps mtime fresh, and the render query is
+    // keyed on mtime, so the preview follows the file without being asked.
+    refetchInterval: (result) =>
+      result.state.data?.tunnel.state === "starting" ? 2_000 : selected ? 5_000 : false,
+    refetchOnWindowFocus: true,
   });
   const apply = (next: CanvasState) => queryClient.setQueryData(["agent-link", "canvas"], next);
   const data = state.data;
@@ -292,6 +320,15 @@ function CanvasView({
     onError: (error: Error) => setNotice({ tone: "error", text: error.message }),
   });
 
+  // Land on something. An empty right-hand pane on a screen that has just
+  // listed forty artifacts is a click asked for no reason — on a phone the
+  // list is the whole screen, so there it stays.
+  useEffect(() => {
+    if (selected || mode === "create" || t.compact) return;
+    const first = artifacts[0];
+    if (first) setSelected(first.path);
+  }, [artifacts, selected, mode, t.compact]);
+
   const tunnelState = data?.tunnel.state ?? "off";
   const tunnelStatus: Status =
     tunnelState === "on" ? "ok" : tunnelState === "starting" ? "busy" : tunnelState === "failed" ? "error" : "neutral";
@@ -453,7 +490,11 @@ function CanvasView({
           </Notice>
         )}
 
-        <View style={{ flexDirection: "row", gap: t.space.sm, flexWrap: "wrap" }}>
+        {/* What you came for, in order: put it in the conversation, or get a
+            link someone else can open. Running a browser is a fallback for an
+            interactive page, and it happens on the Paseo host rather than on
+            whatever device is reading this — so it is last and it says so. */}
+        <View style={{ flexDirection: "row", gap: t.space.sm, flexWrap: "wrap", alignItems: "center" }}>
           {agentId ? (
             <Button
               label="Send to chat"
@@ -466,28 +507,20 @@ function CanvasView({
           ) : null}
           {current.publicUrl ? (
             <>
-              <Button label="Copy link" variant="primary" onPress={() => copyMutation.mutate(current.publicUrl)} />
-              <Button label="Open" variant="secondary" onPress={() => openMutation.mutate(current.publicUrl)} />
-              <Button label="Stop sharing this" variant="danger" onPress={() => stopMutation.mutate(current.path)} />
+              <Button
+                label={copied ? "Copied" : "Copy link"}
+                variant={agentId ? "secondary" : "primary"}
+                onPress={() => copyLink(current.publicUrl)}
+              />
+              <Button label="Stop sharing" variant="ghost" onPress={() => stopMutation.mutate(current.path)} />
             </>
           ) : (
-            <>
-              <Button
-                label={tunnelState === "starting" ? "Opening…" : "Share a link"}
-                variant="primary"
-                loading={serveMutation.isPending || tunnelState === "starting"}
-                onPress={() => serveMutation.mutate({ path: current.path, share: true })}
-              />
-              {current.localUrl ? (
-                <Button label="Open on the daemon" variant="secondary" onPress={() => openMutation.mutate(current.localUrl)} />
-              ) : (
-                <Button
-                  label="Serve locally"
-                  variant="secondary"
-                  onPress={() => serveMutation.mutate({ path: current.path, share: false })}
-                />
-              )}
-            </>
+            <Button
+              label={tunnelState === "starting" ? "Making a link…" : "Get a link"}
+              variant={agentId ? "secondary" : "primary"}
+              loading={serveMutation.isPending || tunnelState === "starting"}
+              onPress={() => serveMutation.mutate({ path: current.path, share: true })}
+            />
           )}
         </View>
 
@@ -496,6 +529,40 @@ function CanvasView({
             {current.publicUrl}
           </Text>
         ) : null}
+      </Card>
+
+      <Card>
+        <Disclosure title="Open it in a real browser">
+          <Text style={t.text.caption}>
+            The preview above is a picture, so anything interactive — a filter, a chart tooltip — needs the real page.
+            This launches a browser on the machine running Paseo{" "}
+            {hostLabel ? `(${hostLabel})` : ""}, which is only useful if that is the machine you are sitting at.
+            Otherwise get a link and open it here.
+          </Text>
+          <View style={{ flexDirection: "row", gap: t.space.sm, flexWrap: "wrap" }}>
+            <Button
+              label="Open on the Paseo host"
+              variant="secondary"
+              loading={openMutation.isPending || serveMutation.isPending}
+              onPress={() => {
+                if (current.localUrl) openMutation.mutate(current.localUrl);
+                else
+                  serveMutation
+                    .mutateAsync({ path: current.path, share: false })
+                    .then((next) => {
+                      const url = next.artifacts.find((a) => a.path === current.path)?.localUrl;
+                      if (url) openMutation.mutate(url);
+                    })
+                    .catch(() => undefined);
+              }}
+            />
+            {current.localUrl ? (
+              <Text selectable style={t.text.mono}>
+                {current.localUrl}
+              </Text>
+            ) : null}
+          </View>
+        </Disclosure>
       </Card>
 
       {!agentId ? (
@@ -618,8 +685,8 @@ function CanvasView({
   );
 }
 
-export function CanvasSurface({ theme, layout }: PluginSurfaceProps) {
-  return <CanvasView theme={theme} layout={layout} />;
+export function CanvasSurface({ theme, layout, host }: PluginSurfaceProps) {
+  return <CanvasView theme={theme} layout={layout} hostLabel={host?.label} />;
 }
 
 /**
@@ -627,7 +694,15 @@ export function CanvasSurface({ theme, layout }: PluginSurfaceProps) {
  * render into its conversation, which is what makes a canvas part of the
  * discussion rather than a file you have to go and look at.
  */
-export function CanvasPanel({ theme, layout, workspaceId, agentId }: PluginAgentPanelProps) {
+export function CanvasPanel({ theme, layout, host, workspaceId, agentId }: PluginAgentPanelProps) {
   const directory = useWorkspace(workspaceId, (workspace) => workspace.directory || workspace.projectRootPath);
-  return <CanvasView theme={theme} layout={layout} agentId={agentId} scopeDir={directory ?? undefined} />;
+  return (
+    <CanvasView
+      theme={theme}
+      layout={layout}
+      hostLabel={host?.label}
+      agentId={agentId}
+      scopeDir={directory ?? undefined}
+    />
+  );
 }
