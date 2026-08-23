@@ -2,7 +2,8 @@ import type { PluginAgentPanelProps, PluginSurfaceProps } from "@getpaseo/plugin
 import { usePaseo, useRpc, useWorkspace } from "@getpaseo/plugin";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import React, { useEffect, useMemo, useState } from "react";
-import { Clipboard, Text, View } from "react-native";
+import * as ReactNative from "react-native";
+import { Clipboard, Platform, Text, View } from "react-native";
 import {
   canvasCopy,
   canvasOpen,
@@ -36,6 +37,39 @@ import {
   useUi,
   type Status,
 } from "./ui.client";
+
+/**
+ * The live escape hatch.
+ *
+ * A plugin surface is React Native, so there is no WebView component to reach
+ * for — but on desktop and in the browser Paseo's "react-native" IS
+ * react-native-web, whose `unstable_createElement` makes an arbitrary DOM node
+ * and passes unknown props straight to it. Paseo renders its own HTML file
+ * previews and its mermaid runtime through exactly this, so an iframe here is
+ * the same mechanism the app already trusts, not a hack around it.
+ *
+ * On a phone the export does not exist and this returns null, which is why the
+ * rasterised preview stays the default everywhere.
+ */
+const createDom = (ReactNative as unknown as {
+  unstable_createElement?: (tag: string, props: Record<string, unknown>) => React.ReactElement;
+}).unstable_createElement;
+
+export const canGoLive = Platform.OS === "web" && typeof createDom === "function";
+
+function LiveFrame({ url, height, title }: { url: string; height: number; title: string }) {
+  if (!createDom) return null;
+  return createDom("iframe", {
+    src: url,
+    title,
+    // Scripts yes — a dashboard without them is a screenshot with extra steps.
+    // No allow-same-origin: the page runs in an opaque origin, so it cannot
+    // reach back into Paseo or read anything else this machine serves.
+    sandbox: "allow-scripts allow-forms allow-popups",
+    referrerPolicy: "no-referrer",
+    style: { width: "100%", height, border: "none", borderRadius: 10, background: "white" },
+  });
+}
 
 function ago(epoch: number): string {
   const seconds = Math.max(0, Math.floor(Date.now() / 1000) - epoch);
@@ -120,6 +154,7 @@ function CanvasView({
   const [name, setName] = useState("dashboard");
   const [target, setTarget] = useState<{ id: string; name: string } | null>(null);
   const [copied, setCopied] = useState(false);
+  const [live, setLive] = useState(canGoLive);
 
   /**
    * The clipboard that matters is the one on the device reading this, not the
@@ -176,11 +211,38 @@ function CanvasView({
     accent: theme.colors.accent,
   };
 
+  // Live view needs the page actually served; do it the moment it is asked for
+  // rather than making the user press a second button for plumbing.
+  useEffect(() => {
+    if (!live || !current || current.localUrl || current.publicUrl) return;
+    if (serveMutation.isPending) return;
+    serveMutation.mutate({ path: current.path, share: false });
+  }, [live, current?.path, current?.localUrl, current?.publicUrl]);
+
+  // A frame pointed at the daemon's loopback shows nothing when the daemon is
+  // another machine, so ask before rendering one. no-cors resolves opaque on
+  // success and rejects on a network error, which is all this needs to know.
+  const reachable = useQuery({
+    queryKey: ["agent-link", "canvas-reachable", current?.localUrl],
+    queryFn: async () => {
+      if (!current?.localUrl) return false;
+      try {
+        await fetch(current.localUrl, { mode: "no-cors", signal: AbortSignal.timeout(2_500) });
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    enabled: live && Boolean(current?.localUrl),
+    staleTime: 60_000,
+    retry: false,
+  });
+
   const render = useQuery({
     queryKey: ["agent-link", "canvas-render", current?.path, current?.modified, scale, theme.colors.surface0],
     queryFn: () =>
       callRender({ path: current!.path, width: 1200, scale: Number(scale), theme: pageTheme }),
-    enabled: Boolean(current) && Boolean(data?.renderer.installed),
+    enabled: Boolean(current) && Boolean(data?.renderer.installed) && !live,
     staleTime: Infinity,
     retry: false,
   });
@@ -447,19 +509,60 @@ function CanvasView({
             </Text>
           </View>
           <View style={{ flexDirection: "row", gap: t.space.sm, alignItems: "flex-start", flexShrink: 0 }}>
-            <Segmented
-              value={scale}
-              onChange={setScale}
-              options={[
-                { value: "1", label: "1×" },
-                { value: "2", label: "2×" },
-              ]}
-            />
+            {canGoLive ? (
+              <Segmented
+                value={live ? "live" : "image"}
+                onChange={(value) => setLive(value === "live")}
+                options={[
+                  { value: "live", label: "Live" },
+                  { value: "image", label: "Image" },
+                ]}
+              />
+            ) : null}
+            {!live ? (
+              <Segmented
+                value={scale}
+                onChange={setScale}
+                options={[
+                  { value: "1", label: "1×" },
+                  { value: "2", label: "2×" },
+                ]}
+              />
+            ) : null}
             <Button label="Refresh" variant="ghost" loading={render.isFetching} onPress={() => void render.refetch()} />
           </View>
         </View>
 
-        {data?.renderer.installed ? (
+        {live ? (
+          (() => {
+            const frameUrl = reachable.data === false ? current.publicUrl : current.localUrl || current.publicUrl;
+            if (!frameUrl) return <Loading label="Starting the page…" />;
+            if (reachable.data === false && !current.publicUrl) {
+              return (
+                <Notice tone="attention">
+                  This page is served by the machine running Paseo, which this device cannot reach. Get a link and the
+                  live view works from anywhere — or switch to Image, which always works.
+                </Notice>
+              );
+            }
+            return (
+              <View style={{ gap: t.space.sm }}>
+                {/* Remounting on mtime is what makes it follow the agent: the
+                    file changes, the frame reloads, no button involved. */}
+                <LiveFrame
+                  key={`${frameUrl}:${current.modified}`}
+                  url={frameUrl}
+                  height={t.compact ? 420 : 720}
+                  title={current.title || current.name}
+                />
+                <Text style={t.text.caption}>
+                  Live and interactive{reachable.data === false ? " over the shared link" : ""} — it reloads when the
+                  agent rewrites the file.
+                </Text>
+              </View>
+            );
+          })()
+        ) : data?.renderer.installed ? (
           <Figure
             uri={render.data?.dataUri}
             width={render.data?.width}
