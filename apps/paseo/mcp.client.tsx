@@ -35,6 +35,8 @@ import {
 } from "./contracts.shared";
 import {
   ParsedServerSchema,
+  mcpExport,
+  mcpExportFile,
   mcpImportApply,
   mcpImportParse,
   mcpLogin,
@@ -606,6 +608,8 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
   const callApply = useRpc(mcpApply);
   const callRemove = useRpc(mcpRemove);
   const callRename = useRpc(mcpRename);
+  const callExport = useRpc(mcpExport);
+  const callExportFile = useRpc(mcpExportFile);
   const callSync = useRpc(mcpSync);
   const callHealth = useRpc(mcpHealth);
   const callDefAll = useRpc(mcpDefAll);
@@ -754,6 +758,24 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
     onError: fail,
     onSuccess: report,
   });
+  // Export is two steps on purpose: the first produces the text (masked unless
+  // secrets are revealed), the second writes it where the user can find it.
+  const exportMutation = useMutation({
+    mutationFn: async (input: { scope: "one" | "all"; name?: string }) => {
+      const made = await callExport({ scope: input.scope, name: input.name, reveal: revealed });
+      const saved = await callExportFile({ text: made.text, filename: made.filename });
+      return { ...saved, containsSecrets: made.containsSecrets };
+    },
+    onSuccess: (result) =>
+      setFlash({
+        tone: result.ok ? "ok" : "error",
+        text: result.ok
+          ? `${result.message}${result.containsSecrets ? " It holds live credentials." : " Credentials are redacted, so it cannot be re-imported as-is."}`
+          : result.message,
+      }),
+    onError: fail,
+  });
+
   const renameMutation = useMutation({
     mutationFn: (input: { name: string; newName: string }) => callRename(input),
     onError: fail,
@@ -1212,6 +1234,13 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
           <Button
             label={revealed ? "Hide secrets" : "Reveal secrets"}
             onPress={() => setRevealed((value) => !value)}
+          />
+          {/* A panel cannot download, so an export is written next to the
+              user's other files and the path is reported back. */}
+          <Button
+            label="Export"
+            loading={exportMutation.isPending}
+            onPress={() => exportMutation.mutate({ scope: "one", name: server.name })}
           />
         </View>
         <Disclosure title="Rename this server everywhere">
