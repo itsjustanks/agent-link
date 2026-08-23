@@ -203,9 +203,28 @@ primary_email() { # $1 provider
   esac
 }
 
+# An account that has hit its spend limit cannot serve requests, so routing
+# must skip it without waiting for you to park it by hand. Claude records this
+# in its own config: extra usage exhausted AND no subscription allowance left.
+prov_blocked() { # $1 provider, $2 config dir ($HOME for the primary)
+  [ "$1" = claude ] || return 1
+  python3 - "$2" <<'PY2'
+import json, os, sys
+d = sys.argv[1]
+p = os.path.join(d, ".claude.json")
+try:
+    c = json.load(open(p))
+except Exception:
+    sys.exit(1)
+blocked = c.get("cachedExtraUsageDisabledReason") == "out_of_credits" and c.get("hasAvailableSubscription") is False
+sys.exit(0 if blocked else 1)
+PY2
+}
+
 # The primary has no slot dir, so its cooldown is tracked under "primary".
 slot_available_primary() { # $1 provider
   local until now
+  prov_blocked "$1" "$HOME" && return 1
   until="$(cat "$(pools_dir)/cooldown-$1-primary" 2>/dev/null || echo 0)"
   now="$(date +%s)"
   [ "$until" -gt "$now" ] && return 1
@@ -215,6 +234,7 @@ slot_available_primary() { # $1 provider
 slot_available() { # $1 provider, $2 email
   local until now
   prov_logged_in "$1" "$(slot_dir "$1" "$2")" || return 1
+  prov_blocked "$1" "$(slot_dir "$1" "$2")" && return 1
   until="$(cat "$(pools_dir)/cooldown-$1-$2" 2>/dev/null || echo 0)"
   now="$(date +%s)"
   [ "$until" -gt "$now" ] && return 1
@@ -326,6 +346,10 @@ slot_state() { # $1 provider, $2 email -> "dot|state|note"
     return
   fi
   local runs
+  if prov_blocked "$1" "$(slot_dir "$1" "$2")"; then
+    printf '%s|%s|%s' "${C_RED}●${C_OFF}" "logged in" "spend limit reached — routing skips it"
+    return
+  fi
   runs="$(cat "$(pools_dir)/count-$1-$2" 2>/dev/null || echo 0)"
   if [ "$last" -gt 0 ]; then
     mins=$(( (now - last) / 60 ))
@@ -354,6 +378,8 @@ cmd_status() {
       pruns="$(cat "$(pools_dir)/count-$p-primary" 2>/dev/null || echo 0)"
       if [ -n "$pcov" ]; then
         pnote="duplicated by a slot below"
+      elif prov_blocked "$p" "$HOME"; then
+        pnote="${C_RED}spend limit reached — routing skips it${C_OFF}${C_DIM}"
       else
         pnote="in rotation · ${pruns} launches"
       fi
@@ -717,6 +743,8 @@ cmd_shims() { # numbered per-slot shims: claude-1, codex-2, ...
       pruns="$(cat "$(pools_dir)/count-$p-primary" 2>/dev/null || echo 0)"
       if [ -n "$pcov" ]; then
         pnote="duplicated by a slot below"
+      elif prov_blocked "$p" "$HOME"; then
+        pnote="${C_RED}spend limit reached — routing skips it${C_OFF}${C_DIM}"
       else
         pnote="in rotation · ${pruns} launches"
       fi
