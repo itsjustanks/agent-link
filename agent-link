@@ -730,6 +730,115 @@ cmd_probe() { # $1 provider (default claude), $2 model, [--park]
   done
 }
 
+# What the numbers actually say: where work went, what it cost in tokens, how
+# much came from cache, and which accounts got refused.
+cmd_insights() { # [days]
+  local days="${1:-7}"
+  python3 - "$ACCOUNTS" "$HOME" "$days" "$(pools_dir)" <<'PY2'
+import json, os, sys, time, glob
+accounts_root, home, days, pools = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+since = time.time() - days * 86400
+
+def email_of(d):
+    try:
+        return (json.load(open(os.path.join(d, ".claude.json"))).get("oauthAccount") or {}).get("emailAddress") or ""
+    except Exception:
+        return ""
+
+def scan(d):
+    t = dict(sessions=0, inp=0, out=0, cread=0, ccreate=0, limits=0, last=0, models=set(), daily=[0]*days, proj={})
+    for f in glob.glob(os.path.join(d, "projects", "*", "*.jsonl")):
+        try:
+            st = os.stat(f)
+        except OSError:
+            continue
+        if st.st_mtime < since or st.st_size > 25_000_000:
+            continue
+        t["sessions"] += 1
+        t["last"] = max(t["last"], st.st_mtime)
+        label = os.path.basename(os.path.dirname(f)).split("--")[-1]
+        t["proj"][label] = t["proj"].get(label, 0) + 1
+        try:
+            text = open(f, errors="ignore").read()
+        except OSError:
+            continue
+        for line in text.split("\n"):
+            if '"usage"' not in line and "spend limit" not in line and "usage limit" not in line:
+                continue
+            try:
+                o = json.loads(line)
+            except Exception:
+                continue
+            if "spend limit" in line or "usage limit" in line:
+                t["limits"] += 1
+            m = o.get("message") or {}
+            u = m.get("usage") or {}
+            if not u:
+                continue
+            out = u.get("output_tokens") or 0
+            t["inp"] += u.get("input_tokens") or 0
+            t["out"] += out
+            t["cread"] += u.get("cache_read_input_tokens") or 0
+            t["ccreate"] += u.get("cache_creation_input_tokens") or 0
+            if m.get("model") and m["model"] != "<synthetic>":
+                t["models"].add(m["model"])
+            ts = o.get("timestamp")
+            when = None
+            if ts:
+                try:
+                    when = time.mktime(time.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S"))
+                except Exception:
+                    when = None
+            when = when or st.st_mtime
+            idx = days - 1 - int((time.time() - when) // 86400)
+            if 0 <= idx < days:
+                t["daily"][idx] += out
+    return t
+
+def human(n):
+    return f"{n/1_000_000:.1f}M" if n >= 1_000_000 else (f"{round(n/1000)}k" if n >= 1000 else str(n))
+
+def spark(vals):
+    blocks = "▁▂▃▄▅▆▇█"
+    top = max(vals) or 1
+    return "".join(blocks[min(7, int(v / top * 7))] if v else "·" for v in vals)
+
+dirs = [(email_of(home) or "primary", os.path.join(home, ".claude"), "primary")]
+for d in sorted(glob.glob(os.path.join(accounts_root, "claude", "*"))):
+    dirs.append((os.path.basename(d), d, "account"))
+
+rows = [(name, kind, scan(d), d) for name, d, kind in dirs]
+total_out = sum(r[2]["out"] for r in rows) or 1
+print(f"\n  Last {days} days\n")
+for name, kind, t, d in rows:
+    if t["sessions"] == 0:
+        print(f"  {name:28} {kind:8} no activity")
+        continue
+    tin = t["inp"] + t["cread"] + t["ccreate"]
+    cache = round(t["cread"] / tin * 100) if tin else 0
+    launches = 0
+    key = "primary" if kind == "primary" else name
+    try:
+        launches = int(open(os.path.join(pools, f"count-claude-{key}")).read().strip())
+    except Exception:
+        pass
+    print(f"  {name:28} {kind:8} {spark(t['daily'])}  {t['sessions']:>3} sessions · {human(t['out']):>5} out · {cache:>2}% cached · {round(t['out']/total_out*100):>2}% of work")
+    extra = []
+    if launches:
+        extra.append(f"{launches} launches")
+    if t["models"]:
+        extra.append(", ".join(sorted(m.replace("claude-", "") for m in t["models"]))[:48])
+    if t["proj"]:
+        extra.append("mostly " + max(t["proj"], key=t["proj"].get))
+    if extra:
+        print(f"  {'':28} {'':8} {' · '.join(extra)}")
+    if t["limits"]:
+        ago = int((time.time() - t["last"]) / 60)
+        print(f"  {'':28} {'':8} ⚠ {t['limits']} limit refusals · probe this account before relying on it")
+print()
+PY2
+}
+
 cmd_whoami() { # [provider]
   local p pdir email kind runs nxt
   for p in ${1:-$PROVIDERS}; do
@@ -1075,6 +1184,7 @@ main() {
     handoff) shift; cmd_handoff "$@" ;;
     pools)   cmd_pools ;;
     whoami)  shift; cmd_whoami "$@" ;;
+    insights) shift; cmd_insights "$@" ;;
     probe)   shift; cmd_probe "$@" ;;
     next)    shift; prov_valid "${1:-claude}" && pick_slot "${1:-claude}" dry ;;
     cooldown) shift; cmd_cooldown "$@" ;;

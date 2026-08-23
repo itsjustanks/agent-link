@@ -88,6 +88,21 @@ agent-link handoff claude <session-id> you@other.com
 agent-link run claude you@other.com claude --resume <session-id>
 ```
 
+### Where is the work actually going?
+
+```sh
+agent-link insights            # last 7 days, per account
+```
+
+```
+  you@work.com      primary  █▄▄▄▅▁▁  187 sessions · 47.2M out · 96% cached · 99% of work
+                             37 launches · fable-5, opus-5 · mostly my-main-repo
+                             ⚠ 112 limit refusals · probe this account before relying on it
+  you@home.com      account  ·····▇█   10 sessions ·  692k out · 97% cached ·  1% of work
+```
+
+Read from your own transcripts, so it costs nothing: daily activity, sessions, output tokens, how much input came from cache, which models each account ran, its busiest project, and how often it was refused for a limit. A lopsided share means rotation is not reaching your other accounts — usually because they are parked, signed out, or were added recently.
+
 ### Which account am I on right now?
 
 Run this inside any agent or shell — one line, nothing else:
