@@ -1,6 +1,15 @@
+<div align="center">
+
 # agent-link
 
-**Use all your Claude Code and Codex accounts from one machine — automatically, without ever copying a credential.**
+**Run several Claude Code and Codex accounts from one machine — and see what your agents actually build.**
+
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+![Platform](https://img.shields.io/badge/macOS%20%C2%B7%20Linux-informational)
+![Dependencies](https://img.shields.io/badge/deps-bash%20%2B%20python3-lightgrey)
+![Paseo](https://img.shields.io/badge/Paseo-plugin%20included-8A63D2)
+
+</div>
 
 ```
   CLAUDE                              plain `claude` → primary
@@ -10,13 +19,13 @@
     dynamic routing: ready (~/.agent-link/bin/claude-auto)
 ```
 
-Three things it does:
+## Two problems this solves
 
-1. **Runs several accounts side by side.** Each account gets its own credential store, so they are live simultaneously — N accounts, N rate limits.
-2. **Routes automatically.** One command (or one editor provider) sends each new agent to the least-recently-used healthy account, and skips any that is parked or out of credit.
-3. **Never moves credentials.** No backup/restore, so nothing decays and no running session is ever logged out — the failure mode of account-switcher apps.
+**You can only use one account at a time.** If you have more than one Claude or Codex account, you hit a usage limit on one while the others sit idle. Account-switcher tools swap credentials in and out, which logs running sessions out mid-task. agent-link instead gives each account its own config directory — `CLAUDE_CONFIG_DIR` for Claude Code, `CODEX_HOME` for Codex — so every account is live at the same time. **N accounts, N rate limits.** It never reads, copies or backs up a token, so nothing decays and no running agent is ever signed out.
 
-Works on **macOS and Linux**. One bash file, no dependencies beyond `python3`. MIT.
+**Your agents write things you never see.** Dashboards, reports and diagrams land in a worktree you would have to go and find in a terminal. agent-link finds them and renders them — live, inside your editor.
+
+It is one bash file with no dependencies beyond `python3`, plus an optional [Paseo](https://paseo.sh) plugin that puts all of it in a UI.
 
 ---
 
@@ -30,27 +39,86 @@ chmod +x ~/.local/bin/agent-link
 
 Make sure `~/.local/bin` is on your `PATH`. Delete the file to uninstall.
 
-**Updating** is one command:
-
-```sh
-agent-link update
-```
-
-It replaces the CLI with the current published version, refreshes the app sources it installs from, and reinstalls whatever apps you already have — the Paseo panel included, so the CLI and its UI never drift apart. (Re-running the curl updates the CLI alone and leaves the panel on its old version.)
-
 You need whichever CLIs you want to manage — [Claude Code](https://claude.com/claude-code) (`npm i -g @anthropic-ai/claude-code`) and/or [Codex](https://github.com/openai/codex) (`npm i -g @openai/codex`). You do not need to be logged into them first.
-
-## Quickstart
 
 ```sh
 agent-link                              # interactive dashboard
-agent-link add claude you@work.com      # create an account slot + sign in
+agent-link add claude you@work.com      # create an account and sign in
 agent-link add claude you@home.com
 agent-link auto                         # enable automatic routing
 agent-link claude                       # Claude Code on the next account in rotation
 ```
 
 `agent-link status` shows every account: signed in, in rotation, parked, out of credit, or the wrong account signed into a slot.
+
+**Updating** is one command — it replaces the CLI, refreshes the app sources, and reinstalls the apps you have, so the CLI and its UI never drift apart:
+
+```sh
+agent-link update
+```
+
+---
+
+## In Paseo
+
+`agent-link app install paseo` adds three tabs to [Paseo](https://paseo.sh).
+
+### 🔗 Agent Link
+
+![The Agent Link tab: a Routing card showing the auto-router installed for Claude and Codex, then each account with its state, park timer, credit note and launch count](docs/screenshots/agent-link.png)
+
+Every Claude and Codex account on the machine, with live health, **7-day usage** read from your own transcripts (sessions, tokens, cache rate, which models each account actually ran), credit state, and **park/resume** for an account that has hit a limit.
+
+One click installs a **Dynamic Agent Link** provider. Pick that single provider and every new agent is routed to the least-recently-used healthy account automatically — no command, no choosing. A running agent is never re-routed: its account is fixed when the process starts, and nothing swaps underneath a live session.
+
+### 🔌 MCP
+
+![The MCP tab: 29 servers listed with a coverage bar each, filters for All, Gaps and Issues, and buttons to add a server, paste JSON, sync accounts and run a health check](docs/screenshots/mcp.png)
+
+One table for every MCP server across every account and every CLI on the machine — Claude Code, Codex, Kimi, Grok, and each per-account slot.
+
+- Add, remove or **rename a server everywhere at once**
+- **Edit the raw JSON** for one destination, with a dry-run preview before anything is written (TOML destinations are translated both ways, so you never type TOML and never need to know that Codex spells headers `http_headers`)
+- **Paste a definition straight out of a README** to import it — fenced code, comments and trailing commas are cleaned up and reported, and unfilled placeholders block the write
+- **Run the OAuth sign-in per account** from the panel, instead of hunting for the right terminal command
+- Health checks, gap detection, and per-account authorisation status
+
+Every write is atomic, keeps the file's permissions, backs it up first, and refuses to overwrite a config it cannot parse.
+
+### 🖼 Canvas
+
+![The Canvas tab: a list of artifacts beside a live rendered Markdown report, with a Live and Image toggle](docs/screenshots/canvas.png)
+
+The HTML, Markdown, SVG and images your agents write, found automatically across your workspaces — and **rendered live inside Paseo**. Live means live: the real interactive page, which reloads itself when the agent rewrites the file.
+
+- **Get a link** — one press publishes a public URL anyone can open, served from disk so it always shows the current file
+- **Send to chat** — post the render into the agent's conversation as an image, so the agent can see what it built
+- **New canvas** — describe a dashboard and an agent builds it
+- Finds artifacts in workspace roots, `artifacts/`, `reports/`, `dashboards/`, your own `~/Artifacts` and `~/Diagrams`, and Claude Code's session scratchpads
+
+On iOS and Android the page is rasterised on the daemon and shown as an image instead — which is also what happens when your Paseo daemon is a remote server rather than your laptop.
+
+### Installing the plugin
+
+**From the CLI** — one command, which copies the plugin into Paseo's own plugins directory, installs and typechecks it, registers the ID and confirms the daemon is running it:
+
+```sh
+agent-link app install paseo
+```
+
+**From the Paseo UI** — clone this repo, then:
+
+1. **Settings → Plugins**
+2. Turn on **Enable plugins**
+3. Paste `<clone>/apps/paseo` into **Plugin directory**
+4. Leave **Plugin installation ID** blank (the manifest supplies `agent-link`)
+5. Press **Install directory**
+
+No `npm install` is needed — the plugin imports only modules Paseo already provides. Requires Paseo ≥ 0.5 (tested on 0.5.0-beta.5).
+
+Two optional extras, each of which the panel will name for you if it is missing: **Chrome or Chromium** to rasterise a page for the image view, and **cloudflared** for public links. Everything else works without them.
+
+---
 
 ## The three ways to use it
 
@@ -147,7 +215,9 @@ Anything that lets you set **a command** or **environment variables** can use ag
 | env vars | `CLAUDE_CONFIG_DIR=~/.agent-link/accounts/claude/<email>` |
 | neither | wrap the call: `agent-link claude …` |
 
-### Paseo
+### Paseo, by hand
+
+The plugin does this for you, but if you would rather wire it yourself:
 
 ```jsonc
 // ~/.paseo/config.json → agents.providers
@@ -158,32 +228,28 @@ Anything that lets you set **a command** or **environment variables** can use ag
 }
 ```
 
-`agent-link auto` prints this snippet filled in for your machine. Provider changes apply with `paseo reload`.
-
-> **Prefer a UI?** Optional integrations live in [`apps/`](apps) — see [Integrations](#integrations) below.
+`agent-link auto` prints this snippet filled in for your machine. Provider changes apply with `paseo reload` — no daemon restart, so nothing mid-task is disturbed.
 
 ## Integrations
 
-Optional add-ons live in [`apps/`](apps), one folder per tool. They are never required — the CLI works alone — and only show as installable when that tool is on your machine.
+Optional add-ons live in [`apps/`](apps), one folder per tool. They are never required — the CLI works alone — and each only shows as installable when that tool is actually on your machine.
 
 ```sh
 agent-link app list
-#  ● paseo      Accounts, MCP and shareable canvases in Paseo       installed
-#  ○ vscode     Point the editor at a rotating account              available
+#  ● paseo      Accounts, MCP and shareable canvases in Paseo  installed
+#  ○ vscode     Rotating accounts in VS Code or Cursor         available
 
-agent-link app install paseo
+agent-link app install paseo            # install (re-run to upgrade)
+agent-link app install paseo --link     # register a checkout in place, for development
+agent-link app remove paseo             # uninstall; the source is left alone
 ```
 
 | App | What it gives you |
 | --- | --- |
-| [`paseo`](apps/paseo) | Three tabs in Paseo — **Agent Link** (accounts, health, usage, one-click auto-router), **MCP** (servers across every account, JSON editing, paste-to-import, OAuth per account), **Canvas** (what your agents built, rendered inside the app and shareable as a live link) |
+| [`paseo`](apps/paseo) | The three tabs described [above](#in-paseo) — full detail in [`apps/paseo/README.md`](apps/paseo/README.md) |
 | [`vscode`](apps/vscode) | How to point VS Code or Cursor at a rotating or pinned account |
 
-Installing the Paseo app is one command: it copies the plugin into Paseo's own `plugins/<id>` directory, installs and typechecks it, registers the id and confirms the daemon is running it. Re-run to upgrade, `agent-link app remove paseo` to uninstall, and add `--link` to register a checkout in place while working on it. Anything missing — Paseo itself, Node, the plugins switch in Settings — is named rather than guessed at.
-
-**Canvas**, in the Paseo app, renders what your agents write — HTML dashboards, Markdown reports, diagrams — *inside* Paseo rather than in a browser, which is what makes it work when the daemon is a server somewhere else. It has two optional dependencies and says so plainly when either is missing: Chrome or Chromium to render, `cloudflared` to hand out a live public link.
-
-Adding another editor or tool means dropping a folder in `apps/` with an `app.json`.
+Anything missing — Paseo itself, Node, the plugins switch in Settings — is named rather than guessed at. Adding another editor or tool means dropping a folder in `apps/` with an `app.json`.
 
 ## Commands
 

@@ -1,8 +1,20 @@
-# agent-link
+<div align="center">
 
-**A [Paseo](https://paseo.sh) plugin for people running more than one AI coding account: see every account and provider connector with live health, wire each account in as its own parallel provider, manage MCP servers across all of them from one table, and hand out a link to whatever your agents built.**
+# agent-link for Paseo
+
+**Every AI coding account you own, every MCP server across them, and everything your agents build — in three tabs.**
+
+![Paseo](https://img.shields.io/badge/Paseo-%E2%89%A5%200.5-8A63D2)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+![Plugin ID](https://img.shields.io/badge/plugin%20id-agent--link-lightgrey)
+
+</div>
+
+This is the Paseo app that ships with [agent-link](https://github.com/itsjustanks/agent-link). The CLI works perfectly well on its own; this is the same thing with a UI, plus a canvas viewer the CLI cannot give you.
 
 Three sidebar tabs:
+
+![The Agent Link tab: a Routing card showing the auto-router installed for Claude and Codex, then each account with its state, park timer, credit note and launch count](../../docs/screenshots/agent-link.png)
 
 ## 👥 Agent Link
 
@@ -18,6 +30,8 @@ One card per provider connector — **Claude Code, Codex, Kimi Code, Grok** — 
 - **Auto-router** — one click wires a single `Claude (Dynamic Agent Link)` / `Codex (Dynamic Agent Link)` provider that sends each new agent to the least-recently-used live account. Pick that one provider and your accounts get used automatically; a running agent is never re-routed.
 - **Park 3h / Resume** — take an account that hit its limit out of rotation and put it back
 - **Wire into Paseo** — one click adds that account as a Paseo custom provider (`extends` the native integration, pointing `CLAUDE_CONFIG_DIR` / `CODEX_HOME` at the slot). Each wired account is an independent quota pool: five agents across three Claude accounts genuinely run on three separate rate limits. A banner reminds you Paseo loads new providers at the next daemon restart.
+
+![The MCP tab: 29 servers with a coverage bar each, filters for All, Gaps and Issues, and buttons to add a server, paste JSON, sync accounts and run a health check](../../docs/screenshots/mcp.png)
 
 ## 🔌 MCP
 
@@ -36,6 +50,8 @@ A universal manager for **user-level** MCP servers across every provider on the 
 - **Sync accounts** — pushes user-level definitions and project trust from each primary into its account slots
 
 Every write backs up the target config first (last 20 kept — one "apply to all" is seven files in one press), replaces it atomically, and keeps the permissions it had, because these files hold bearer tokens. A config that exists but cannot be parsed is never overwritten. An edit is **lossless**: the stored entry is loaded and only the fields you changed are modified, so keys the plugin does not model — Claude's `type`, Codex's `enabled` and `startup_timeout_sec` — survive it.
+
+![The Canvas tab: a list of artifacts beside a live rendered Markdown report, with a Live and Image toggle](../../docs/screenshots/canvas.png)
 
 ## 🖼 Canvas
 
@@ -67,26 +83,31 @@ Paseo plugins run on phones as well as desktop, so the panel uses one spacing sc
 
 ## Install
 
-One command, from the [agent-link](https://github.com/itsjustanks/agent-link) CLI:
+**With the CLI** — one command:
 
 ```sh
 agent-link app install paseo
 ```
 
-It copies the plugin into `<paseo home>/plugins/agent-link`, installs its dependencies, typechecks it, registers it under the id `agent-link` and confirms the daemon has it running. Re-run it to upgrade. `agent-link app remove paseo` uninstalls. If Paseo, Node or the plugins switch is missing it says which, and stops.
+It copies the plugin into `<paseo home>/plugins/agent-link`, installs its dependencies, typechecks it, registers it under the id `agent-link`, and confirms the daemon has it running. Re-run it to upgrade; `agent-link app remove paseo` uninstalls; `agent-link update` updates the CLI and this panel together. If Paseo, Node or the plugins switch is missing, it says which and stops rather than half-installing.
 
-Working on the plugin itself? `agent-link app install paseo --link` registers your checkout in place instead of copying, so `paseo plugin reload agent-link` picks up an edit.
-
-By hand, if you would rather:
+**From the Paseo UI** — no CLI needed:
 
 ```sh
 git clone https://github.com/itsjustanks/agent-link
-cd agent-link/apps/paseo
-npm install && npm run typecheck
-paseo plugin install "$(pwd)" --id agent-link
 ```
 
-Requires Paseo ≥ 0.5 with plugins enabled (Settings → Plugins). Tested against 0.5.0-beta.2. Sharing a canvas additionally needs `cloudflared`; nothing else in the plugin does.
+1. **Settings → Plugins**
+2. Turn on **Enable plugins** — the global switch for every configured plugin
+3. Paste the absolute path to `agent-link/apps/paseo` into **Plugin directory**
+4. Leave **Plugin installation ID** blank; `paseo-plugin.json` supplies `agent-link`
+5. Press **Install directory**
+
+No `npm install` step: the plugin imports only modules Paseo provides at runtime, and Paseo compiles it on install. The same screen has **Reload**, **Disable**, **Remove** and **Logs** per plugin — Logs is the first place to look if a tab misbehaves. Removing a plugin deletes its configuration, never your source directory.
+
+**Working on it?** `agent-link app install paseo --link` registers your checkout in place instead of copying, so `paseo plugin reload agent-link` picks up an edit.
+
+Requires Paseo ≥ 0.5 with plugins enabled. Tested against 0.5.0-beta.5. Sharing a canvas additionally needs `cloudflared`; nothing else in the plugin does.
 
 **Nothing else is required.** Every provider and account it finds is one you already have — the plugin installs no software and creates no accounts. Providers you don't use simply don't appear.
 
