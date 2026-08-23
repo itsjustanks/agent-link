@@ -79,7 +79,7 @@ Each account answers one token on that model; `--park` sidelines the ones that r
 Two guarantees that make this safe:
 
 - **A running process is never re-routed.** Routing happens at launch; nothing switches under a live session.
-- **Resumes stay on their own account.** A conversation only exists inside the account that created it, so `--resume <id>` is pinned to that account instead of rotating. (Without this you get *"No conversation found with session ID"*.)
+- **Resumes stay on their own account.** A conversation only exists inside the account that created it, so `--resume <id>` is pinned to whichever account holds that session — including your **primary**, which owns every conversation started before you added accounts. (Without this you get *"No conversation found with session ID"*.)
 
 ### When an account hits its limit mid-conversation
 

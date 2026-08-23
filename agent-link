@@ -574,7 +574,8 @@ cmd_route() { # enable|disable|status
 }
 
 write_auto_launcher() { # $1 provider — one command that routes to a live account
-  local p="$1" env_var self
+  local p="$1" env_var self primary_search
+  primary_search="$(primary_dir "$1")"
   env_var="$(prov_env_var "$p")"
   self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
   mkdir -p "$SHIM_BIN"
@@ -613,17 +614,24 @@ for aa_a in "\$@"; do
   aa_prev="\$aa_a"
 done
 aa_pinned=""
+aa_pin_primary=""
 if [ -n "\$aa_sid" ]; then
-  for aa_d in "\$aa_root/accounts/$p"/*/; do
-    [ -d "\$aa_d" ] || continue
-    if [ -n "\$(find "\$aa_d" -maxdepth 4 -name "*\$aa_sid*" -print -quit 2>/dev/null)" ]; then
-      aa_pinned="\${aa_d%/}"
-      break
-    fi
-  done
+  # The primary owns sessions too, so it must be searched as well — otherwise a
+  # conversation started there gets routed to a slot that has never seen it.
+  if [ -n "\$(find "$primary_search" -maxdepth 4 -name "*\$aa_sid*" -print -quit 2>/dev/null)" ]; then
+    aa_pin_primary=1
+  else
+    for aa_d in "\$aa_root/accounts/$p"/*/; do
+      [ -d "\$aa_d" ] || continue
+      if [ -n "\$(find "\$aa_d" -maxdepth 4 -name "*\$aa_sid*" -print -quit 2>/dev/null)" ]; then
+        aa_pinned="\${aa_d%/}"
+        break
+      fi
+    done
+  fi
 fi
 # An explicitly inherited value always wins, then a pinned resume, then rotation.
-if [ -z "\${$env_var:-}" ]; then
+if [ -z "\${$env_var:-}" ] && [ -z "\$aa_pin_primary" ]; then
   if [ -n "\$aa_pinned" ]; then
     export $env_var="\$aa_pinned"
   elif [ -x "$self" ]; then
