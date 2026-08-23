@@ -66,11 +66,11 @@ const BACKUP_KEEP = 5;
 function backupFile(path: string): void {
   if (!existsSync(path)) return;
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  copyFileSync(path, `${path}.bak-superpowers-${stamp}`);
+  copyFileSync(path, `${path}.bak-agent-link-${stamp}`);
   // Keep only the most recent few so config dirs do not fill with backups.
   try {
     const dir = dirname(path);
-    const prefix = `${basename(path)}.bak-superpowers-`;
+    const prefix = `${basename(path)}.bak-agent-link-`;
     const old = readdirSync(dir)
       .filter((entry) => entry.startsWith(prefix))
       .sort() // ISO timestamps sort chronologically
@@ -82,7 +82,7 @@ function backupFile(path: string): void {
 }
 
 function writeJsonAtomic(path: string, value: unknown): void {
-  const tmp = `${path}.tmp-superpowers`;
+  const tmp = `${path}.tmp-agent-link`;
   writeFileSync(tmp, JSON.stringify(value, null, 2), { mode: 0o600 });
   renameSync(tmp, path);
 }
@@ -781,7 +781,7 @@ export async function handleWireProvider(
         [providerId]: {
           extends: provider,
           label: `${provider === "claude" ? "Claude" : "Codex"} · ${email}`,
-          description: `${provider} pinned to ${email} (wired by agent-superpowers)`,
+          description: `${provider} pinned to ${email} (wired by agent-agent-link)`,
           env: { [envVarFor(provider)]: dir },
         },
       },

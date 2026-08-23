@@ -25,21 +25,21 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   // Every button inherits the compact (touch) sizing without repeating it.
   const Button = (props: React.ComponentProps<typeof Btn>) => <Btn compact={layout.compact} {...props} />;
 
-  const scanQuery = useQuery({ queryKey: ["superpowers", "scan"], queryFn: () => callScan({}) });
+  const scanQuery = useQuery({ queryKey: ["agent-link", "scan"], queryFn: () => callScan({}) });
   // Diagnostics spawn a real process per provider — for ACP providers (kimi,
   // grok) that starts an agent session. Only on request, never on mount.
   // Aggregating transcripts costs real IO, so it is on request like health.
   const usageQuery = useQuery({
-    queryKey: ["superpowers", "account-usage"],
+    queryKey: ["agent-link", "account-usage"],
     queryFn: () => callUsage({ days: 7 }),
     enabled: false,
   });
   const healthQuery = useQuery({
-    queryKey: ["superpowers", "provider-health"],
+    queryKey: ["agent-link", "provider-health"],
     queryFn: () => callHealth({}),
     enabled: false,
   });
-  const refresh = () => void queryClient.invalidateQueries({ queryKey: ["superpowers"] });
+  const refresh = () => void queryClient.invalidateQueries({ queryKey: ["agent-link"] });
 
   const wireMutation = useMutation({
     mutationFn: (slot: Slot) => callWire({ provider: slot.provider, email: slot.email, dir: slot.dir }),

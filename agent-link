@@ -983,7 +983,7 @@ apps_dir() { # find the apps/ directory, fetching the repo if needed
     [ -d "$d" ] && { echo "$d"; return 0; }
   done
   command -v git >/dev/null 2>&1 || return 1
-  echo "fetching integrations from $REPO_URL…" >&2
+  echo "fetching integrations from ${REPO_URL}…" >&2
   rm -rf "$ROOT/src.tmp"
   if git clone --depth 1 -q "$REPO_URL" "$ROOT/src.tmp" >&2; then
     rm -rf "$ROOT/src"; mv "$ROOT/src.tmp" "$ROOT/src"
@@ -1016,8 +1016,75 @@ app_state() { # $1 app dir -> installed|available|unavailable
   esac
 }
 
-cmd_app() { # list|install|status|remove [id]
-  local action="${1:-list}" id="${2:-}" base d state kind pid
+# Paseo keeps its plugins in <paseo home>/plugins/<id> and identifies each one
+# by that id. Installing means putting the source there and registering the id,
+# which is exactly what these two helpers make automatic.
+paseo_home() {
+  local home
+  home="$(paseo daemon status --json 2>/dev/null | python3 -c 'import json,sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    d = {}
+print(d.get("home") or d.get("daemon", {}).get("home") or "")' 2>/dev/null)"
+  [ -n "$home" ] && [ -d "$home" ] && { echo "$home"; return; }
+  echo "$HOME/.paseo"
+}
+
+paseo_plugins_on() { # plugins are off by default and only the user may turn them on
+  python3 - "$(paseo_home)/config.json" <<'PY3'
+import json, sys
+try:
+    print("yes" if json.load(open(sys.argv[1])).get("pluginsEnabled") else "no")
+except Exception:
+    print("no")
+PY3
+}
+
+install_paseo_plugin() { # $1 source dir, $2 plugin id, $3 "link" to run from source
+  local src="$1" pid="$2" mode="${3:-copy}" dest home status
+  command -v paseo >/dev/null 2>&1 || {
+    echo "Paseo is not installed on this machine — this app is optional." >&2
+    echo "Get it at https://paseo.sh, then run: agent-link app install paseo" >&2
+    return 1; }
+  command -v npm >/dev/null 2>&1 || {
+    echo "This app needs Node.js (for npm) to build. Install Node 20+, then run this again." >&2
+    return 1; }
+  if [ "$(paseo_plugins_on)" != yes ]; then
+    echo "Paseo has plugins switched off." >&2
+    echo "Turn them on in Paseo → Settings → Plugins, then run: agent-link app install paseo" >&2
+    return 1
+  fi
+
+  home="$(paseo_home)"
+  if [ "$mode" = link ]; then
+    dest="$src"
+  else
+    dest="$home/plugins/$pid"
+    echo "installing into ${dest}…"
+    mkdir -p "$dest" || return 1
+    # Copy the source only: node_modules is rebuilt in place and .git is noise.
+    ( cd "$src" && tar --exclude=node_modules --exclude=.git -cf - . ) | ( cd "$dest" && tar -xf - ) || return 1
+  fi
+
+  [ -d "$dest/node_modules" ] || { echo "installing dependencies…"; (cd "$dest" && npm install --silent --no-audit --no-fund) || return 1; }
+  (cd "$dest" && npm run --silent typecheck) || { echo "app failed to typecheck — not installing" >&2; return 1; }
+
+  # Paseo refuses to install over an existing id, so an upgrade means dropping
+  # the registration first. That removes configuration only — never source.
+  paseo plugin ls 2>/dev/null | grep -q "^$pid " && paseo plugin remove "$pid" >/dev/null 2>&1
+  paseo plugin install "$dest" --id "$pid" >/dev/null || return 1
+  status="$(paseo plugin ls 2>/dev/null | awk -v id="$pid" '$1 == id { print $2 }')"
+  case "$status" in
+    running) echo "installed and running. Open Paseo → Agent Link, MCP or Canvas." ;;
+    "")      echo "installed, but Paseo does not list it yet — check: paseo plugin ls" >&2 ;;
+    *)       echo "installed but $status — check: paseo plugin logs $pid" >&2; return 1 ;;
+  esac
+}
+
+cmd_app() { # list|install|status|remove [id] [--link]
+  local action="${1:-list}" id="${2:-}" mode=copy base d state kind pid dest
+  case "${3:-}" in --link|--dev) mode=link ;; esac
   base="$(apps_dir)" || { echo "no apps/ directory found and could not fetch it" >&2; return 1; }
   case "$action" in
     list|status)
@@ -1025,30 +1092,31 @@ cmd_app() { # list|install|status|remove [id]
         [ -f "$d/app.json" ] || continue
         state="$(app_state "$d")"
         case "$state" in
-          installed)   printf '  %s●%s %-10s %-34s %sinstalled%s\n' "$C_GREEN" "$C_OFF" "$(app_field "$d" id)" "$(app_field "$d" summary)" "$C_GREEN" "$C_OFF" ;;
-          available)   printf '  %s○%s %-10s %-34s %savailable — agent-link app install %s%s\n' "$C_DIM" "$C_OFF" "$(app_field "$d" id)" "$(app_field "$d" summary)" "$C_DIM" "$(app_field "$d" id)" "$C_OFF" ;;
-          *)           printf '  %s·%s %-10s %-34s %s%s not installed on this machine%s\n' "$C_DIM" "$C_OFF" "$(app_field "$d" id)" "$(app_field "$d" summary)" "$C_DIM" "$(app_field "$d" requires)" "$C_OFF" ;;
+          installed)   printf '  %s●%s %-10s %-46s %sinstalled%s\n' "$C_GREEN" "$C_OFF" "$(app_field "$d" id)" "$(app_field "$d" summary)" "$C_GREEN" "$C_OFF" ;;
+          available)   printf '  %s○%s %-10s %-46s %savailable — agent-link app install %s%s\n' "$C_DIM" "$C_OFF" "$(app_field "$d" id)" "$(app_field "$d" summary)" "$C_DIM" "$(app_field "$d" id)" "$C_OFF" ;;
+          *)           printf '  %s·%s %-10s %-46s %s%s not installed on this machine%s\n' "$C_DIM" "$C_OFF" "$(app_field "$d" id)" "$(app_field "$d" summary)" "$C_DIM" "$(app_field "$d" requires)" "$C_OFF" ;;
         esac
       done
       return 0
       ;;
     install|remove) [ -n "$id" ] || { echo "usage: agent-link app $action <id>   (see: agent-link app list)" >&2; return 1; } ;;
-    *) echo "usage: agent-link app [list|install|remove] [id]" >&2; return 1 ;;
+    *) echo "usage: agent-link app [list|install|remove] [id] [--link]" >&2; return 1 ;;
   esac
   d="$base/$id"
   [ -f "$d/app.json" ] || { echo "no app called '$id' — try: agent-link app list" >&2; return 1; }
   kind="$(app_field "$d" kind)"; pid="$(app_field "$d" pluginId)"
   case "$kind" in
     paseo-plugin)
-      command -v paseo >/dev/null 2>&1 || { echo "Paseo is not installed — this app is optional." >&2; return 1; }
       if [ "$action" = remove ]; then
-        paseo plugin remove "$pid" && echo "removed (source left in place)"
-        return $?
+        command -v paseo >/dev/null 2>&1 || { echo "Paseo is not installed here." >&2; return 1; }
+        paseo plugin remove "$pid" >/dev/null 2>&1
+        dest="$(paseo_home)/plugins/$pid"
+        # Only ever delete our own copy — a --link install points at your repo.
+        [ -d "$dest" ] && [ "$dest" != "$d" ] && rm -rf "$dest"
+        echo "removed. The source in apps/$id is untouched."
+        return 0
       fi
-      [ -d "$d/node_modules" ] || { echo "installing dependencies…"; (cd "$d" && npm install --silent) || return 1; }
-      (cd "$d" && npm run --silent typecheck) || { echo "app failed to typecheck — not installing" >&2; return 1; }
-      paseo plugin ls 2>/dev/null | grep -q "^$pid" && paseo plugin remove "$pid" >/dev/null 2>&1
-      paseo plugin install "$d" >/dev/null && echo "installed. Open Paseo → Agent Link."
+      install_paseo_plugin "$d" "$pid" "$mode"
       ;;
     docs-only)
       [ "$action" = remove ] && { echo "nothing to remove — this app is instructions only"; return 0; }
@@ -1474,7 +1542,7 @@ usage:
   agent-link codex  [args...]      same for Codex
   agent-link remove <prov> <email> delete a slot and its login
   agent-link sync                  copy MCP servers + project trust from primaries into slots
-  agent-link app [list|install|remove] [id]  optional integrations (Paseo panel, editors)
+  agent-link app [list|install|remove] [id] [--link]  optional integrations (Paseo panel, editors)
   agent-link fix [model]           test accounts, rescue stuck chats, resync — the one-shot cleanup
   agent-link doctor                sanity checks
 

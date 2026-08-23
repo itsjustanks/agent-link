@@ -95,13 +95,13 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
   const [formKv, setFormKv] = useState("");
   const [formTargets, setFormTargets] = useState<Set<string>>(new Set());
 
-  const matrixQuery = useQuery({ queryKey: ["superpowers", "mcp-matrix"], queryFn: () => callMatrix({}) });
-  const authQuery = useQuery({ queryKey: ["superpowers", "mcp-auth"], queryFn: () => callAuth({}) });
+  const matrixQuery = useQuery({ queryKey: ["agent-link", "mcp-matrix"], queryFn: () => callMatrix({}) });
+  const authQuery = useQuery({ queryKey: ["agent-link", "mcp-auth"], queryFn: () => callAuth({}) });
   const destinations = matrixQuery.data?.destinations ?? [];
   const servers = matrixQuery.data?.servers ?? [];
   const destById = (id: string) => destinations.find((dest) => dest.id === id);
 
-  const refresh = () => void queryClient.invalidateQueries({ queryKey: ["superpowers"] });
+  const refresh = () => void queryClient.invalidateQueries({ queryKey: ["agent-link"] });
   const onResult = (result: { message?: string; log?: string }) => {
     setMessage(result.message ?? result.log ?? null);
     setPendingRemove(null);

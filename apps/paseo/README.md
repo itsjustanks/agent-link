@@ -1,8 +1,8 @@
-# paseo-agent-superpowers
+# agent-link
 
-**A [Paseo](https://paseo.sh) plugin for people running more than one AI coding account: see every account and provider connector with live health, wire each account in as its own parallel provider, and manage MCP servers across all of them from one table.**
+**A [Paseo](https://paseo.sh) plugin for people running more than one AI coding account: see every account and provider connector with live health, wire each account in as its own parallel provider, manage MCP servers across all of them from one table, and hand out a link to whatever your agents built.**
 
-Two sidebar tabs:
+Three sidebar tabs:
 
 ## 👥 Agent Link
 
@@ -34,21 +34,46 @@ A universal manager for **user-level** MCP servers across every provider on the 
 
 Every write backs up the target config first (last 5 kept). A config file that exists but cannot be parsed is never overwritten.
 
+## 🖼 Canvas
+
+Agents write HTML — dashboards, reports, diagrams — and it lands in a worktree you would otherwise have to go find in a terminal. This tab lists it and makes it openable, the way Cursor's canvases are:
+
+- **Finds it automatically** — every Paseo workspace's top level plus the folders agents actually write to (`artifacts/`, `reports/`, `dashboards/`, `canvas/`), and your own `~/Artifacts`, `~/Diagrams`, `~/Canvas`. Newest first, with the page's own `<title>`.
+- **Preview** — serves the file from the daemon machine on `127.0.0.1` and opens it. Sibling assets (CSS, images) load, because the file's own folder is what gets served.
+- **Share** — starts a [Cloudflare quick tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/) and gives you an `https://…trycloudflare.com` link that works on a phone or in someone else's browser. No Cloudflare account, no upload: the file is read from disk on each request.
+- **Missing dependency, not a dead button** — sharing needs `cloudflared`. Without it, preview still works and the tab tells you the one command to install (`brew install cloudflared` and the equivalent elsewhere) instead of failing.
+- **Stop / Unshare** — per file or all at once. Everything dies with the plugin: the tunnel is a child process and the links stop working when Paseo stops.
+
+A shared link is **public while it is up** — the URL carries an unguessable token, but anyone holding it can open the file. Only the artifact's own folder is reachable, path traversal out of it is refused, and nothing is writable.
+
+The link is held back until it actually resolves. cloudflared prints the hostname before DNS carries it, and a lookup made in that window gets cached as a failure by the machine that made it — so the tab shows "opening" for a few seconds rather than handing you a link that appears broken.
+
 ### Built for narrow screens
 
 Paseo plugins run on phones as well as desktop, so the panel uses one spacing scale that tightens on narrow layouts, buttons with real touch targets, account rows that put the identity on its own line above the detail, and an MCP destination table that stacks instead of squeezing labels to nothing.
 
 ## Install
 
+One command, from the [agent-link](https://github.com/itsjustanks/agent-link) CLI:
+
 ```sh
-git clone https://github.com/itsjustanks/paseo-agent-superpowers
-cd paseo-agent-superpowers
-npm install
-npm run typecheck
-paseo plugin install "$(pwd)"
+agent-link app install paseo
 ```
 
-Requires Paseo ≥ 0.5 with plugins enabled (Settings → Plugins). Tested against 0.5.0-beta.2.
+It copies the plugin into `<paseo home>/plugins/agent-link`, installs its dependencies, typechecks it, registers it under the id `agent-link` and confirms the daemon has it running. Re-run it to upgrade. `agent-link app remove paseo` uninstalls. If Paseo, Node or the plugins switch is missing it says which, and stops.
+
+Working on the plugin itself? `agent-link app install paseo --link` registers your checkout in place instead of copying, so `paseo plugin reload agent-link` picks up an edit.
+
+By hand, if you would rather:
+
+```sh
+git clone https://github.com/itsjustanks/agent-link
+cd agent-link/apps/paseo
+npm install && npm run typecheck
+paseo plugin install "$(pwd)" --id agent-link
+```
+
+Requires Paseo ≥ 0.5 with plugins enabled (Settings → Plugins). Tested against 0.5.0-beta.2. Sharing a canvas additionally needs `cloudflared`; nothing else in the plugin does.
 
 **Nothing else is required.** Every provider and account it finds is one you already have — the plugin installs no software and creates no accounts. Providers you don't use simply don't appear.
 
@@ -107,6 +132,7 @@ Plugin backend code runs trusted and unsandboxed on your daemon machine (that is
 - backs up every config file before writing it, and refuses to overwrite a file it cannot parse
 - changes Paseo providers through Paseo's own `config.patch` API, never by editing the daemon config file
 - copies MCP *definitions* between accounts, never credentials — OAuth grants stay in each account's own store
+- serves a canvas read-only, from that file's own folder, behind a random token, and only while you have it shared — a public tunnel exists only after you press Share, and dies with the plugin
 
 ## License
 

@@ -30,7 +30,7 @@ export const AutoRouterSchema = z.object({
 export type AutoRouter = z.infer<typeof AutoRouterSchema>;
 
 export const scan = defineRpc({
-  name: "superpowers.scan",
+  name: "agent-link.scan",
   input: z.object({}),
   output: z.object({
     slots: z.array(SlotSchema),
@@ -54,25 +54,25 @@ export const scan = defineRpc({
 });
 
 export const wireAuto = defineRpc({
-  name: "superpowers.wire-auto",
+  name: "agent-link.wire-auto",
   input: z.object({ provider: z.enum(["claude", "codex"]) }),
   output: z.object({ ok: z.boolean(), message: z.string() }),
 });
 
 export const addAccount = defineRpc({
-  name: "superpowers.add-account",
+  name: "agent-link.add-account",
   input: z.object({ provider: z.enum(["claude", "codex"]), email: z.string().min(3) }),
   output: z.object({ ok: z.boolean(), message: z.string(), started: z.boolean() }),
 });
 
 export const setCooldown = defineRpc({
-  name: "superpowers.set-cooldown",
+  name: "agent-link.set-cooldown",
   input: z.object({ provider: z.enum(["claude", "codex"]), email: z.string(), minutes: z.number() }),
   output: z.object({ ok: z.boolean(), message: z.string() }),
 });
 
 export const wireProvider = defineRpc({
-  name: "superpowers.wire-provider",
+  name: "agent-link.wire-provider",
   input: z.object({
     provider: z.enum(["claude", "codex"]),
     email: z.string(),
@@ -82,7 +82,7 @@ export const wireProvider = defineRpc({
 });
 
 export const diagnoseProvider = defineRpc({
-  name: "superpowers.diagnose-provider",
+  name: "agent-link.diagnose-provider",
   input: z.object({ providerId: z.string() }),
   output: z.object({ summary: z.string() }),
 });
@@ -105,13 +105,13 @@ export const AccountUsageSchema = z.object({
 export type AccountUsage = z.infer<typeof AccountUsageSchema>;
 
 export const accountUsage = defineRpc({
-  name: "superpowers.account-usage",
+  name: "agent-link.account-usage",
   input: z.object({ days: z.number() }),
   output: z.object({ accounts: z.array(AccountUsageSchema) }),
 });
 
 export const providerHealth = defineRpc({
-  name: "superpowers.provider-health",
+  name: "agent-link.provider-health",
   input: z.object({}),
   output: z.object({
     providers: z.array(
@@ -147,7 +147,7 @@ export const McpServerRowSchema = z.object({
 export type McpServerRow = z.infer<typeof McpServerRowSchema>;
 
 export const mcpMatrix = defineRpc({
-  name: "superpowers.mcp-matrix",
+  name: "agent-link.mcp-matrix",
   input: z.object({}),
   output: z.object({
     destinations: z.array(DestinationSchema),
@@ -156,7 +156,7 @@ export const mcpMatrix = defineRpc({
 });
 
 export const mcpAdd = defineRpc({
-  name: "superpowers.mcp-add",
+  name: "agent-link.mcp-add",
   input: z.object({
     name: z.string().min(1),
     kind: z.enum(["stdio", "http"]),
@@ -169,7 +169,7 @@ export const mcpAdd = defineRpc({
 });
 
 export const mcpApply = defineRpc({
-  name: "superpowers.mcp-apply",
+  name: "agent-link.mcp-apply",
   input: z.object({
     name: z.string(),
     targets: z.array(z.string()).min(1),
@@ -179,7 +179,7 @@ export const mcpApply = defineRpc({
 });
 
 export const mcpRemove = defineRpc({
-  name: "superpowers.mcp-remove",
+  name: "agent-link.mcp-remove",
   input: z.object({ name: z.string(), targets: z.array(z.string()).min(1) }),
   output: z.object({ ok: z.boolean(), message: z.string() }),
 });
@@ -194,7 +194,7 @@ export const McpAuthAccountSchema = z.object({
 export type McpAuthAccount = z.infer<typeof McpAuthAccountSchema>;
 
 export const mcpAuth = defineRpc({
-  name: "superpowers.mcp-auth",
+  name: "agent-link.mcp-auth",
   input: z.object({}),
   output: z.object({
     accounts: z.array(McpAuthAccountSchema),
@@ -203,7 +203,7 @@ export const mcpAuth = defineRpc({
 });
 
 export const mcpSync = defineRpc({
-  name: "superpowers.mcp-sync",
+  name: "agent-link.mcp-sync",
   input: z.object({}),
   output: z.object({ ok: z.boolean(), log: z.string() }),
 });
@@ -222,13 +222,13 @@ export const McpDefRowSchema = z.object({
 export type McpDefRow = z.infer<typeof McpDefRowSchema>;
 
 export const mcpDefAll = defineRpc({
-  name: "superpowers.mcp-def-all",
+  name: "agent-link.mcp-def-all",
   input: z.object({ name: z.string(), reveal: z.boolean() }),
   output: z.object({ rows: z.array(McpDefRowSchema) }),
 });
 
 export const mcpEditOne = defineRpc({
-  name: "superpowers.mcp-edit-one",
+  name: "agent-link.mcp-edit-one",
   input: z.object({
     name: z.string(),
     destId: z.string(),
@@ -241,7 +241,7 @@ export const mcpEditOne = defineRpc({
 });
 
 export const mcpRename = defineRpc({
-  name: "superpowers.mcp-rename",
+  name: "agent-link.mcp-rename",
   input: z.object({ name: z.string(), newName: z.string().min(1) }),
   output: z.object({ ok: z.boolean(), message: z.string() }),
 });
@@ -254,7 +254,7 @@ export const McpHealthSchema = z.object({
 export type McpHealth = z.infer<typeof McpHealthSchema>;
 
 export const mcpHealth = defineRpc({
-  name: "superpowers.mcp-health",
+  name: "agent-link.mcp-health",
   input: z.object({}),
   output: z.object({ results: z.array(McpHealthSchema) }),
 });

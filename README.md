@@ -160,7 +160,7 @@ Optional add-ons live in [`apps/`](apps), one folder per tool. They are never re
 
 ```sh
 agent-link app list
-#  ● paseo      Accounts, health, usage and MCP inside Paseo        installed
+#  ● paseo      Accounts, MCP and shareable canvases in Paseo       installed
 #  ○ vscode     Point the editor at a rotating account              available
 
 agent-link app install paseo
@@ -168,8 +168,12 @@ agent-link app install paseo
 
 | App | What it gives you |
 | --- | --- |
-| [`paseo`](apps/paseo) | A panel in Paseo: every account with health, usage and MCP state, one-click install of the Dynamic Agent Link provider, and MCP management across all accounts |
+| [`paseo`](apps/paseo) | Three tabs in Paseo — **Agent Link** (accounts, health, usage, one-click auto-router), **MCP** (servers across every account), **Canvas** (open or share the HTML your agents write) |
 | [`vscode`](apps/vscode) | How to point VS Code or Cursor at a rotating or pinned account |
+
+Installing the Paseo app is one command: it copies the plugin into Paseo's own `plugins/<id>` directory, installs and typechecks it, registers the id and confirms the daemon is running it. Re-run to upgrade, `agent-link app remove paseo` to uninstall, and add `--link` to register a checkout in place while working on it. Anything missing — Paseo itself, Node, the plugins switch in Settings — is named rather than guessed at.
+
+**Canvas**, in the Paseo app, is the one part with an optional extra dependency: previewing an artifact needs nothing, but a public link uses a [Cloudflare quick tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/), so it asks you to `brew install cloudflared` if you have not.
 
 Adding another editor or tool means dropping a folder in `apps/` with an `app.json`.
 
@@ -193,7 +197,7 @@ agent-link shims                 numbered per-account shims (claude-1, …)
 agent-link env <prov> <email>    eval-able export for one account
 agent-link sync                  copy MCP servers + project trust into accounts
 agent-link remove <prov> <email> delete an account slot and its login
-agent-link app [list|install|remove] [id]  optional integrations under apps/
+agent-link app [list|install|remove] [id] [--link]   optional integrations under apps/
 agent-link fix [model]           test accounts, rescue stuck chats, resync — one-shot cleanup
 agent-link insights [days]       where work went: sessions, tokens, cache rate, models, refusals
 agent-link probe [prov] [model] [--park]   ask each account to answer on a model

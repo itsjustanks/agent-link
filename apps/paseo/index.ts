@@ -1,5 +1,15 @@
 import type { PluginContext } from "@getpaseo/plugin";
 import { AgentSyncSurface } from "./agents.client";
+import { CanvasSurface } from "./canvas.client";
+import { canvasCopy, canvasOpen, canvasServe, canvasState, canvasStop } from "./canvas.shared";
+import {
+  canvasShutdown,
+  handleCanvasCopy,
+  handleCanvasOpen,
+  handleCanvasServe,
+  handleCanvasState,
+  handleCanvasStop,
+} from "./canvas.server";
 import {
   diagnoseProvider,
   mcpAdd,
@@ -58,11 +68,18 @@ export default function contribute(plugin: PluginContext) {
   plugin.handle(mcpHealth, handleMcpHealth);
   plugin.handle(mcpRemove, handleMcpRemove);
   plugin.handle(mcpSync, handleMcpSync);
+  plugin.handle(canvasState, handleCanvasState);
+  plugin.handle(canvasServe, handleCanvasServe);
+  plugin.handle(canvasStop, handleCanvasStop);
+  plugin.handle(canvasOpen, handleCanvasOpen);
+  plugin.handle(canvasCopy, handleCanvasCopy);
 
   plugin.addSurface("agent-sync", AgentSyncSurface);
   plugin.addSurface("mcp", McpSurface);
+  plugin.addSurface("canvas", CanvasSurface);
   plugin.addSidebarItem({ id: "agent-sync", title: "Agent Link", icon: "Users", surface: "agent-sync" });
   plugin.addSidebarItem({ id: "mcp", title: "MCP", icon: "Plug", surface: "mcp" });
+  plugin.addSidebarItem({ id: "canvas", title: "Canvas", icon: "LayoutDashboard", surface: "canvas" });
   plugin.addCommandCenterItem({
     id: "open-agent-sync",
     title: "Open Agent Link (accounts & provider health)",
@@ -83,5 +100,17 @@ export default function contribute(plugin: PluginContext) {
       openSurface("mcp");
     },
   });
-  return () => {};
+  plugin.addCommandCenterItem({
+    id: "open-canvas",
+    title: "Open Canvas (share an agent's dashboard)",
+    icon: "LayoutDashboard",
+    keywords: ["canvas", "artifact", "dashboard", "report", "share", "tunnel"],
+    context: "global",
+    onSelect({ openSurface }) {
+      openSurface("canvas");
+    },
+  });
+  // The local server and any quick tunnel belong to this process, and nothing
+  // they serve should outlive it.
+  return () => canvasShutdown();
 }
