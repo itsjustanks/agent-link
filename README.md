@@ -81,12 +81,27 @@ Two guarantees that make this safe:
 - **A running process is never re-routed.** Routing happens at launch; nothing switches under a live session.
 - **Resumes stay on their own account.** A conversation only exists inside the account that created it, so `--resume <id>` is pinned to that account instead of rotating. (Without this you get *"No conversation found with session ID"*.)
 
-To deliberately continue a chat on a different account — say the first ran out of credit:
+### When an account hits its limit mid-conversation
+
+Be clear about what is and is not possible:
+
+- **New agents** are unaffected — the next launch goes to a healthy account automatically.
+- **A running agent cannot be switched.** Its account is fixed when the process starts, and the conversation lives inside that account's store. Anything claiming to hot-swap an account mid-turn is either restarting the process or lying.
+- **Recovery is a move, not a switch:** park the exhausted account, copy the conversation to a healthy one, resume there.
+
+```sh
+agent-link rescue              # which conversations died on a limit, and where
+agent-link rescue 6 --go       # park those accounts and move the chats to a healthy one
+```
+
+`--go` prints the exact resume command for each. Or do one by hand:
 
 ```sh
 agent-link handoff claude <session-id> you@other.com
 agent-link run claude you@other.com claude --resume <session-id>
 ```
+
+Resuming re-sends the conversation, so the new account pays for that context. On a long session, `/compact` before handing it over keeps the bill down.
 
 ### Where is the work actually going?
 

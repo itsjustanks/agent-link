@@ -732,6 +732,73 @@ cmd_probe() { # $1 provider (default claude), $2 model, [--park]
 
 # What the numbers actually say: where work went, what it cost in tokens, how
 # much came from cache, and which accounts got refused.
+# Find conversations that died on a limit and move them to a healthy account.
+# A running agent cannot be re-routed mid-flight — its account is fixed when the
+# process starts — so the honest recovery is: park the exhausted account, copy
+# the transcript to one that works, resume there.
+cmd_rescue() { # [hours] [--go]
+  local hours="${1:-6}" go=""
+  case "${2:-}" in --go) go=1 ;; esac
+  case "${1:-}" in --go) hours=6; go=1 ;; esac
+  local found=0 sid acct proj target
+  while IFS='|' read -r sid acct proj; do
+    [ -n "$sid" ] || continue
+    found=1
+    printf '  %s%s%s in %s\n' "$C_BOLD" "$sid" "$C_OFF" "$acct"
+    printf '    project: %s\n' "$proj"
+    if [ -z "$go" ]; then continue; fi
+    if [ "$acct" != primary ]; then
+      cmd_cooldown claude "$acct" 180 >/dev/null && printf '    parked %s for 180m\n' "$acct"
+    else
+      echo "$(( $(date +%s) + 10800 ))" > "$(pools_dir)/cooldown-claude-primary"
+      printf '    parked the primary for 180m\n'
+    fi
+    target="$(pick_slot claude dry 2>/dev/null || true)"
+    if [ -z "$target" ] || [ "$target" = "$acct" ]; then
+      printf '    %sno healthy account to move it to%s\n' "$C_RED" "$C_OFF"
+      continue
+    fi
+    if [ "$target" = primary ]; then
+      printf '    %sthe only healthy account is your primary — resume with: claude --resume %s%s\n' "$C_DIM" "$sid" "$C_OFF"
+      continue
+    fi
+    cmd_handoff claude "$sid" "$target" >/dev/null 2>&1 &&
+      printf '    moved to %s%s%s — resume with: agent-link run claude %s claude --resume %s\n' "$C_GREEN" "$target" "$C_OFF" "$target" "$sid"
+  done <<EOF
+$(python3 - "$ACCOUNTS" "$HOME" "$hours" <<'PY2'
+import glob, os, sys, time
+accounts_root, home, hours = sys.argv[1], sys.argv[2], float(sys.argv[3])
+since = time.time() - hours * 3600
+seen = set()
+def scan(root, label):
+    for f in glob.glob(os.path.join(root, "projects", "*", "*.jsonl")):
+        try:
+            st = os.stat(f)
+        except OSError:
+            continue
+        if st.st_mtime < since or st.st_size > 25_000_000:
+            continue
+        try:
+            text = open(f, errors="ignore").read()
+        except OSError:
+            continue
+        if "spend limit" not in text and "usage limit" not in text:
+            continue
+        sid = os.path.basename(f)[:-6]
+        if sid in seen:
+            continue
+        seen.add(sid)
+        print(f"{sid}|{label}|{os.path.basename(os.path.dirname(f)).split('--')[-1]}")
+scan(os.path.join(home, ".claude"), "primary")
+for d in sorted(glob.glob(os.path.join(accounts_root, "claude", "*"))):
+    scan(d, os.path.basename(d))
+PY2
+)
+EOF
+  [ "$found" = 1 ] || echo "  no conversations hit a limit in the last ${hours}h"
+  [ -n "$go" ] || echo "  (add --go to park the account and move these to a healthy one)"
+}
+
 cmd_insights() { # [days]
   local days="${1:-7}"
   python3 - "$ACCOUNTS" "$HOME" "$days" "$(pools_dir)" <<'PY2'
@@ -1185,6 +1252,7 @@ main() {
     pools)   cmd_pools ;;
     whoami)  shift; cmd_whoami "$@" ;;
     insights) shift; cmd_insights "$@" ;;
+    rescue)  shift; cmd_rescue "$@" ;;
     probe)   shift; cmd_probe "$@" ;;
     next)    shift; prov_valid "${1:-claude}" && pick_slot "${1:-claude}" dry ;;
     cooldown) shift; cmd_cooldown "$@" ;;
