@@ -402,7 +402,7 @@ slot_state() { # $1 provider, $2 email -> "dot|state|note"
 }
 
 cmd_status() {
-  local p e i pointer state dot words note auto right pad pemail pcov pruns pnote
+  local p e i pointer state dot words note auto right pad pemail pcov pruns pnote puntil pnow
   for p in $PROVIDERS; do
     pointer="primary"
     [ -f "$(route_file "$p")" ] && pointer="$(cat "$(route_file "$p")")"
@@ -418,8 +418,12 @@ cmd_status() {
     done
     if [ -n "$pemail" ]; then
       pruns="$(cat "$(pools_dir)/count-$p-primary" 2>/dev/null || echo 0)"
+      puntil="$(cat "$(pools_dir)/cooldown-$p-primary" 2>/dev/null || echo 0)"
+      pnow="$(date +%s)"
       if [ -n "$pcov" ]; then
         pnote="duplicated by a slot below"
+      elif [ "$puntil" -gt "$pnow" ]; then
+        pnote="parked $(( (puntil - pnow + 59) / 60 ))m — $(cat "$(pools_dir)/reason-$p-primary" 2>/dev/null || echo 'routing skips it')"
       else
         pnote="in rotation · ${pruns} launches"
       fi
@@ -1023,8 +1027,12 @@ cmd_shims() { # numbered per-slot shims: claude-1, codex-2, ...
     done
     if [ -n "$pemail" ]; then
       pruns="$(cat "$(pools_dir)/count-$p-primary" 2>/dev/null || echo 0)"
+      puntil="$(cat "$(pools_dir)/cooldown-$p-primary" 2>/dev/null || echo 0)"
+      pnow="$(date +%s)"
       if [ -n "$pcov" ]; then
         pnote="duplicated by a slot below"
+      elif [ "$puntil" -gt "$pnow" ]; then
+        pnote="parked $(( (puntil - pnow + 59) / 60 ))m — $(cat "$(pools_dir)/reason-$p-primary" 2>/dev/null || echo 'routing skips it')"
       else
         pnote="in rotation · ${pruns} launches"
       fi
