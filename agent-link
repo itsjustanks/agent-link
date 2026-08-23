@@ -191,6 +191,27 @@ slot_list() { # $1 provider
 
 pools_dir() { echo "$STATE/pools"; }
 
+# The primary login (~/.claude, ~/.codex) is a perfectly good pool member, so
+# rotation includes it. That avoids duplicating the primary's account as a slot
+# — which wastes a credential entry and double-weights that account.
+primary_dir() { case "$1" in claude) echo "$HOME/.claude";; codex) echo "$HOME/.codex";; esac; }
+
+primary_email() { # $1 provider
+  case "$1" in
+    claude) prov_email claude "$HOME" ;;
+    codex)  prov_email codex "$HOME/.codex" ;;
+  esac
+}
+
+# The primary has no slot dir, so its cooldown is tracked under "primary".
+slot_available_primary() { # $1 provider
+  local until now
+  until="$(cat "$(pools_dir)/cooldown-$1-primary" 2>/dev/null || echo 0)"
+  now="$(date +%s)"
+  [ "$until" -gt "$now" ] && return 1
+  return 0
+}
+
 slot_available() { # $1 provider, $2 email
   local until now
   prov_logged_in "$1" "$(slot_dir "$1" "$2")" || return 1
@@ -200,10 +221,22 @@ slot_available() { # $1 provider, $2 email
   return 0
 }
 
-# Print the email of the slot to use next, and stamp it as used.
+# Print the slot to use next ("primary" or an email), and stamp it as used.
 pick_slot() { # $1 provider
-  local best="" best_ts="" e ts
+  local best="" best_ts="" e ts pemail covered
   mkdir -p "$(pools_dir)"
+  # The primary counts as a candidate unless a slot already holds that account.
+  pemail="$(primary_email "$1")"
+  if [ -n "$pemail" ]; then
+    covered=""
+    for e in $(slot_list "$1"); do
+      [ "$(prov_email "$1" "$(slot_dir "$1" "$e")")" = "$pemail" ] && covered=1
+    done
+    if [ -z "$covered" ] && slot_available_primary "$1"; then
+      ts="$(cat "$(pools_dir)/last-$1-primary" 2>/dev/null || echo 0)"
+      best="primary"; best_ts="$ts"
+    fi
+  fi
   for e in $(slot_list "$1"); do
     slot_available "$1" "$e" || continue
     ts="$(cat "$(pools_dir)/last-$1-$e" 2>/dev/null || echo 0)"
@@ -303,7 +336,7 @@ slot_state() { # $1 provider, $2 email -> "dot|state|note"
 }
 
 cmd_status() {
-  local p e i pointer state dot words note auto right pad
+  local p e i pointer state dot words note auto right pad pemail pcov pruns pnote
   for p in $PROVIDERS; do
     pointer="primary"
     [ -f "$(route_file "$p")" ] && pointer="$(cat "$(route_file "$p")")"
@@ -312,6 +345,20 @@ cmd_status() {
     pad=$(( 60 - ${#p} - ${#right} )); [ "$pad" -lt 2 ] && pad=2
     printf '  %s%s%s%*s%s%s%s\n' "$C_BOLD" "$(echo "$p" | tr '[:lower:]' '[:upper:]')" "$C_OFF" \
       "$pad" "" "$C_DIM" "$right" "$C_OFF"
+    pemail="$(primary_email "$p")"
+    pcov=""
+    for e in $(slot_list "$p"); do
+      [ "$(prov_email "$p" "$(slot_dir "$p" "$e")")" = "$pemail" ] && pcov=1
+    done
+    if [ -n "$pemail" ]; then
+      pruns="$(cat "$(pools_dir)/count-$p-primary" 2>/dev/null || echo 0)"
+      if [ -n "$pcov" ]; then
+        pnote="duplicated by a slot below"
+      else
+        pnote="in rotation · ${pruns} launches"
+      fi
+      printf '    %s %-30s %-14s %s%s%s\n' "${C_GREEN}●${C_OFF}" "$pemail" "primary" "$C_DIM" "$pnote" "$C_OFF"
+    fi
     i=0
     for e in $(slot_list "$p"); do
       i=$((i+1))
@@ -515,7 +562,9 @@ if [ -z "\${$env_var:-}" ]; then
     export $env_var="\$aa_pinned"
   elif [ -x "$self" ]; then
     slot="\$("$self" pick $p 2>/dev/null || true)"
-    [ -n "\$slot" ] && export $env_var="\$aa_root/accounts/$p/\$slot"
+    if [ -n "\$slot" ] && [ "\$slot" != primary ]; then
+      export $env_var="\$aa_root/accounts/$p/\$slot"
+    fi
   fi
 fi
 exec "\$real" "\$@"
@@ -571,7 +620,9 @@ cmd_exec_auto() { # $1 provider, rest = args for the real CLI
   [ -n "$real" ] || { prov_binary_check "$p"; return 127; }
   if [ -z "$(eval "printf '%s' \"\${$env_var:-}\"")" ]; then
     slot="$(pick_slot "$p" 2>/dev/null || true)"
-    [ -n "$slot" ] && export "$env_var=$(slot_dir "$p" "$slot")"
+    if [ -n "$slot" ] && [ "$slot" != primary ]; then
+      export "$env_var=$(slot_dir "$p" "$slot")"
+    fi
   fi
   exec "$real" "$@"
 }
@@ -657,6 +708,20 @@ cmd_shims() { # numbered per-slot shims: claude-1, codex-2, ...
       [ -e "$f" ] && rm -f "$f"
     done
     env_var="$(prov_env_var "$p")"
+    pemail="$(primary_email "$p")"
+    pcov=""
+    for e in $(slot_list "$p"); do
+      [ "$(prov_email "$p" "$(slot_dir "$p" "$e")")" = "$pemail" ] && pcov=1
+    done
+    if [ -n "$pemail" ]; then
+      pruns="$(cat "$(pools_dir)/count-$p-primary" 2>/dev/null || echo 0)"
+      if [ -n "$pcov" ]; then
+        pnote="duplicated by a slot below"
+      else
+        pnote="in rotation · ${pruns} launches"
+      fi
+      printf '    %s %-30s %-14s %s%s%s\n' "${C_GREEN}●${C_OFF}" "$pemail" "primary" "$C_DIM" "$pnote" "$C_OFF"
+    fi
     i=0
     for e in $(slot_list "$p"); do
       i=$((i+1))

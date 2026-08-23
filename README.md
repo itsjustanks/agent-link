@@ -40,6 +40,8 @@ ln -sf agent-link ~/.local/bin/agent-auth
 
 Existing setups keep working untouched: agent-link uses whichever home directory already holds your accounts (`~/.agent-auth` from before the rename, or `~/.agent-link`), and both `AGENT_AUTH_HOME` and `AGENT_LINK_HOME` are honoured.
 
+> **Adding an account can log another one out.** Claude keeps every config-dir login in a single shared keychain item, and signing in a new account can evict an existing entry. After adding an account, run `agent-link status` and re-login anything that dropped. Keeping the primary in rotation (rather than duplicating it as a slot) means one fewer entry to hold.
+
 > **Do not move or rename your accounts directory.** Claude Code binds each login to the literal config-dir path, so moving it silently logs out every Claude account (Codex survives, since its credentials are files inside the folder). If you must move it, plan on `agent-link login all` afterwards. This is also why routing uses a launcher rather than a symlink.
 
 Make sure `~/.local/bin` is on your `PATH`. To update, run the same curl again. To uninstall, delete that file (and `~/.agent-link` if you want the slots gone too).
@@ -179,7 +181,7 @@ agent-link auto        # writes ~/.agent-link/bin/claude-auto and codex-auto
 agent-link pools       # see what it will choose from
 ```
 
-Each launch picks the **least-recently-used** account that is logged in and not cooling down, then execs the real CLI with that account's config dir. A running process is never re-routed — it keeps the account it started with for its whole life.
+Rotation includes your **primary** login as well as every slot, so you never need to duplicate the primary's account as a slot. Each launch picks the **least-recently-used** account that is logged in and not cooling down, then execs the real CLI with that account's config dir. A running process is never re-routed — it keeps the account it started with for its whole life.
 
 When an account hits its usage limit, park it and auto-routing skips it:
 
