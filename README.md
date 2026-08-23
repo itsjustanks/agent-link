@@ -190,7 +190,7 @@ An account is just the CLI's own config directory, relocated: Claude Code reads 
 
 Routing is a small launcher script that picks an account and `exec`s the real CLI, so the child process is the genuine article with nothing wrapped around it. Selection state (last used, launch count, cooldowns) lives in `~/.agent-link/state`.
 
-`agent-link sync` copies MCP server definitions and project-trust flags from your primary into each account — definitions only, never credentials. OAuth-based MCP servers authorize once per account, since those grants belong to the account.
+`agent-link sync` copies MCP server definitions, project-trust flags, `settings.json` preferences (output style, permissions, env) and any custom output styles from your primary into each account — preferences and definitions only, never credentials. Run it after changing a setting you want everywhere, and after adding an account. OAuth-based MCP servers authorize once per account, since those grants belong to the account.
 
 ## Troubleshooting
 

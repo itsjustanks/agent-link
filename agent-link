@@ -1138,6 +1138,7 @@ primary = json.load(open(primary_path))
 mcp = primary.get("mcpServers", {})
 projects = primary.get("projects", {})
 GLOBAL_FLAGS = ["hasCompletedOnboarding", "bypassPermissionsModeAccepted", "theme", "autoUpdates", "effortLevel"]
+SETTINGS_KEYS = ["outputStyle", "includeCoAuthoredBy", "env", "permissions", "model"]
 PROJECT_FIELDS = ["hasTrustDialogAccepted", "hasCompletedProjectOnboarding", "allowedTools",
                   "mcpServers", "enabledMcpjsonServers", "disabledMcpjsonServers", "dontCrawlDirectory"]
 slots = sorted(glob.glob(os.path.join(root, "*/")))
@@ -1175,6 +1176,36 @@ for slot_dir in slots:
     os.chmod(tmp, 0o600)
     os.replace(tmp, slot_path)
     print(f"{os.path.basename(slot_dir.rstrip('/'))}: {len(mcp)} MCP servers, {trusted} trusted projects")
+# settings.json + custom output styles: preferences, never credentials
+import shutil
+src_settings = os.path.expanduser("~/.claude/settings.json")
+src_styles = os.path.expanduser("~/.claude/output-styles")
+if os.path.exists(src_settings):
+    try:
+        base = json.load(open(src_settings))
+    except Exception:
+        base = {}
+    for slot_dir in slots:
+        target = os.path.join(slot_dir, "settings.json")
+        cur = {}
+        if os.path.exists(target):
+            try:
+                cur = json.load(open(target))
+            except Exception:
+                cur = {}
+        for k in SETTINGS_KEYS:
+            if k in base:
+                cur[k] = base[k]
+        json.dump(cur, open(target, "w"), indent=2)
+    print(f"settings synced ({', '.join(k for k in SETTINGS_KEYS if k in base)})")
+if os.path.isdir(src_styles):
+    for slot_dir in slots:
+        dest = os.path.join(slot_dir, "output-styles")
+        os.makedirs(dest, exist_ok=True)
+        for f in os.listdir(src_styles):
+            if f.endswith(".md"):
+                shutil.copy(os.path.join(src_styles, f), os.path.join(dest, f))
+    print("output styles synced")
 print("==> synced definitions only; OAuth tokens are per-slot and never copied.")
 PY
 }
