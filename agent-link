@@ -1124,6 +1124,7 @@ cmd_sync() { # propagate MCP definitions + project trust from primaries into slo
       cp "$HOME/.codex/config.toml" "${d}config.toml"
       codex_pin_file_store "${d}config.toml"
       echo "$(basename "$d"): codex config.toml synced from primary (file-store pinned)"
+      [ -f "$HOME/.codex/AGENTS.md" ] && cp "$HOME/.codex/AGENTS.md" "${d}AGENTS.md" && echo "$(basename "$d"): AGENTS.md synced"
     done
   fi
   # claude: slot .claude.json <- definitions and trust from primary ~/.claude.json
