@@ -276,7 +276,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
       <Card tone="attention">
         <Text style={t.text.heading}>Install the agent-link CLI</Text>
         <Text style={[t.text.body, { color: t.color.muted }]}>
-          Accounts, MCP and Canvas all work without it. Routing does not: a Paseo provider runs a command, and that
+          Accounts and MCP both work without it. Routing does not: a Paseo provider runs a command, and that
           command is a small launcher the CLI writes. Installing it downloads one file to {cli.data.binDir} and writes
           the launchers, after which routing can be installed from here.
         </Text>

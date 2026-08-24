@@ -5,8 +5,8 @@ import { z } from "zod";
  * The CLI, from the panel.
  *
  * Most of this plugin works without the agent-link CLI: it reads the account
- * directories itself, syncs MCP definitions itself, and renders canvases
- * itself. The one thing it cannot do alone is routing — that needs the little
+ * directories itself and syncs MCP definitions itself. The one thing it
+ * cannot do alone is routing — that needs the little
  * launcher script the CLI writes, because a Paseo provider runs a command, and
  * the command has to exist on disk.
  *

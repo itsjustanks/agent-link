@@ -1,19 +1,7 @@
 import type { PluginContext } from "@getpaseo/plugin";
 import { AgentSyncSurface } from "./agents.client";
-import { CanvasPanel, CanvasSurface } from "./canvas.client";
 import { cliInstall, cliStatus } from "./cli.shared";
 import { handleCliInstall, handleCliStatus } from "./cli.server";
-import { canvasCopy, canvasOpen, canvasRender, canvasServe, canvasSource, canvasState, canvasStop } from "./canvas.shared";
-import {
-  canvasShutdown,
-  handleCanvasCopy,
-  handleCanvasOpen,
-  handleCanvasRender,
-  handleCanvasServe,
-  handleCanvasSource,
-  handleCanvasState,
-  handleCanvasStop,
-} from "./canvas.server";
 import {
   diagnoseProvider,
   mcpAdd,
@@ -101,13 +89,6 @@ export default function contribute(plugin: PluginContext) {
   plugin.handle(mcpHealth, handleMcpHealth);
   plugin.handle(mcpRemove, handleMcpRemove);
   plugin.handle(mcpSync, handleMcpSync);
-  plugin.handle(canvasState, handleCanvasState);
-  plugin.handle(canvasServe, handleCanvasServe);
-  plugin.handle(canvasStop, handleCanvasStop);
-  plugin.handle(canvasOpen, handleCanvasOpen);
-  plugin.handle(canvasCopy, handleCanvasCopy);
-  plugin.handle(canvasRender, handleCanvasRender);
-  plugin.handle(canvasSource, handleCanvasSource);
   plugin.handle(cliStatus, handleCliStatus);
   plugin.handle(cliInstall, handleCliInstall);
   plugin.handle(mcpRawGet, handleMcpRawGet);
@@ -123,19 +104,8 @@ export default function contribute(plugin: PluginContext) {
 
   plugin.addSurface("agent-sync", AgentSyncSurface);
   plugin.addSurface("mcp", McpSurface);
-  plugin.addSurface("canvas", CanvasSurface);
   plugin.addSidebarItem({ id: "agent-sync", title: "Agent Link", icon: "Users", surface: "agent-sync" });
   plugin.addSidebarItem({ id: "mcp", title: "MCP", icon: "Plug", surface: "mcp" });
-  plugin.addSidebarItem({ id: "canvas", title: "Canvas", icon: "LayoutDashboard", surface: "canvas" });
-  // The same view beside an agent: its workspace's artifacts, and a way to put
-  // one into the conversation being had about it.
-  plugin.addWorkspacePanel({
-    id: "canvas-panel",
-    title: "Canvas",
-    icon: "LayoutDashboard",
-    context: "agent",
-    Component: CanvasPanel,
-  });
   plugin.addCommandCenterItem({
     id: "open-agent-sync",
     title: "Open Agent Link (accounts & provider health)",
@@ -156,33 +126,10 @@ export default function contribute(plugin: PluginContext) {
       openSurface("mcp");
     },
   });
-  plugin.addCommandCenterItem({
-    id: "open-canvas-here",
-    title: "Canvas for this agent",
-    icon: "LayoutDashboard",
-    keywords: ["canvas", "artifact", "dashboard", "send to chat", "preview"],
-    context: "agent",
-    onSelect({ openPanel }) {
-      openPanel("canvas-panel");
-    },
-  });
-  plugin.addCommandCenterItem({
-    id: "open-canvas",
-    title: "Open Canvas (share an agent's dashboard)",
-    icon: "LayoutDashboard",
-    keywords: ["canvas", "artifact", "dashboard", "report", "share", "tunnel"],
-    context: "global",
-    onSelect({ openSurface }) {
-      openSurface("canvas");
-    },
-  });
   // Warm the login-shell PATH cache now (a slow shell rc can take seconds), off
   // the startup path, so the first RPC that needs it does not stall on it.
   setTimeout(searchPath, 0);
-  // The local server and any quick tunnel belong to this process, and nothing
-  // they serve should outlive it.
   return () => {
-    canvasShutdown();
     // A login child is deliberately kept alive across its RPC, so nothing else
     // would ever reap it.
     mcpLoginShutdown();

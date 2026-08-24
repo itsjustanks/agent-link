@@ -1,7 +1,7 @@
 {
   "id": "paseo",
   "title": "Paseo panel",
-  "summary": "Accounts, MCP and shareable canvases in Paseo",
+  "summary": "Accounts and MCP across your coding CLIs, in Paseo",
   "requires": "paseo",
   "kind": "paseo-plugin",
   "pluginId": "agent-link"

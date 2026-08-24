@@ -61,7 +61,7 @@ agent-link update
 
 ## In Paseo
 
-`agent-link app install paseo` adds three tabs to [Paseo](https://paseo.sh).
+`agent-link app install paseo` adds two tabs to [Paseo](https://paseo.sh).
 
 ### 🔗 Agent Link
 
@@ -85,22 +85,11 @@ One table for every MCP server across every account and every CLI on the machine
 
 Every write is atomic, keeps the file's permissions, backs it up first, and refuses to overwrite a config it cannot parse.
 
-### 🖼 Canvas
-
-![The Canvas tab: a list of artifacts beside a live rendered Markdown report, with a Live and Image toggle](docs/screenshots/canvas.png)
-
-The HTML, Markdown, SVG and images your agents write, found automatically across your workspaces — and **rendered live inside Paseo**. Live means live: the real interactive page, which reloads itself when the agent rewrites the file.
-
-- **Get a link** — one press publishes a public URL anyone can open, served from disk so it always shows the current file
-- **Send to chat** — post the render into the agent's conversation as an image, so the agent can see what it built
-- **New canvas** — describe a dashboard and an agent builds it
-- Finds artifacts in workspace roots, `artifacts/`, `reports/`, `dashboards/`, your own `~/Artifacts` and `~/Diagrams`, and Claude Code's session scratchpads
-
-On iOS and Android the page is rasterised on the daemon and shown as an image instead — which is also what happens when your Paseo daemon is a remote server rather than your laptop.
+Looking for the Canvas tab — the one that renders and shares what your agents build? It grew into its own plugin: [**paseo-canvas**](https://github.com/itsjustanks/paseo-canvas). Install either, or both; they are independent.
 
 ### Don't want the CLI?
 
-You do not need it. Installed from the Paseo UI, the plugin reads your account directories itself, syncs MCP definitions itself, and renders canvases itself — accounts, MCP and Canvas are all fully usable with no terminal.
+You do not need it. Installed from the Paseo UI, the plugin reads your account directories itself and syncs MCP definitions itself — accounts and MCP are fully usable with no terminal.
 
 The one exception is **routing**, because a Paseo provider runs a *command*, and that command is a small launcher script the CLI writes. So the Agent Link tab offers to install the CLI for you: one press downloads a single file to `~/.local/bin`, writes the launchers, and routing becomes available — and the exact `curl` command is shown next to the button for anyone who would rather run it themselves.
 
@@ -121,8 +110,6 @@ agent-link app install paseo
 5. Press **Install directory**
 
 No `npm install` is needed — the plugin imports only modules Paseo already provides. Requires Paseo ≥ 0.5 (tested on 0.5.0-beta.5).
-
-Two optional extras, each of which the panel will name for you if it is missing: **Chrome or Chromium** to rasterise a page for the image view, and **cloudflared** for public links. Everything else works without them.
 
 ---
 
@@ -242,7 +229,7 @@ Optional add-ons live in [`apps/`](apps), one folder per tool. They are never re
 
 ```sh
 agent-link app list
-#  ● paseo      Accounts, MCP and shareable canvases in Paseo  installed
+#  ● paseo      Accounts and MCP across your coding CLIs, in Paseo  installed
 #  ○ vscode     Rotating accounts in VS Code or Cursor         available
 
 agent-link app install paseo            # install (re-run to upgrade)
@@ -252,7 +239,7 @@ agent-link app remove paseo             # uninstall; the source is left alone
 
 | App | What it gives you |
 | --- | --- |
-| [`paseo`](apps/paseo) | The three tabs described [above](#in-paseo) — full detail in [`apps/paseo/README.md`](apps/paseo/README.md) |
+| [`paseo`](apps/paseo) | The two tabs described [above](#in-paseo) — full detail in [`apps/paseo/README.md`](apps/paseo/README.md) |
 | [`vscode`](apps/vscode) | How to point VS Code or Cursor at a rotating or pinned account |
 
 Anything missing — Paseo itself, Node, the plugins switch in Settings — is named rather than guessed at. Adding another editor or tool means dropping a folder in `apps/` with an `app.json`.

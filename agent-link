@@ -1130,7 +1130,7 @@ install_paseo_plugin() { # $1 source dir, $2 plugin id, $3 "link" to run from so
   paseo plugin install "$dest" --id "$pid" >/dev/null || return 1
   status="$(paseo plugin ls 2>/dev/null | awk -v id="$pid" '$1 == id { print $2 }')"
   case "$status" in
-    running) echo "installed and running. Open Paseo → Agent Link, MCP or Canvas." ;;
+    running) echo "installed and running. Open Paseo → Agent Link or MCP." ;;
     "")      echo "installed, but Paseo does not list it yet — check: paseo plugin ls" >&2 ;;
     *)       echo "installed but $status — check: paseo plugin logs $pid" >&2; return 1 ;;
   esac

@@ -2,7 +2,7 @@
 
 # agent-link for Paseo
 
-**Every AI coding account you own, every MCP server across them, and everything your agents build — in three tabs.**
+**Every AI coding account you own and every MCP server across them — in two tabs.**
 
 ![Paseo](https://img.shields.io/badge/Paseo-%E2%89%A5%200.5-8A63D2)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
@@ -10,9 +10,9 @@
 
 </div>
 
-This is the Paseo app that ships with [agent-link](https://github.com/itsjustanks/agent-link). The CLI works perfectly well on its own; this is the same thing with a UI, plus a canvas viewer the CLI cannot give you.
+This is the Paseo app that ships with [agent-link](https://github.com/itsjustanks/agent-link). The CLI works perfectly well on its own; this is the same thing with a UI.
 
-Three sidebar tabs:
+Two sidebar tabs:
 
 ![The Agent Link tab: a Routing card showing the auto-router installed for Claude and Codex, then each account with its state, park timer, credit note and launch count](../../docs/screenshots/agent-link.png)
 
@@ -51,31 +51,7 @@ A universal manager for **user-level** MCP servers across every provider on the 
 
 Every write backs up the target config first (last 20 kept — one "apply to all" is seven files in one press), replaces it atomically, and keeps the permissions it had, because these files hold bearer tokens. A config that exists but cannot be parsed is never overwritten. An edit is **lossless**: the stored entry is loaded and only the fields you changed are modified, so keys the plugin does not model — Claude's `type`, Codex's `enabled` and `startup_timeout_sec` — survive it.
 
-![The Canvas tab: a list of artifacts beside a live rendered Markdown report, with a Live and Image toggle](../../docs/screenshots/canvas.png)
-
-## 🖼 Canvas
-
-Agents write HTML, Markdown, SVG and images — dashboards, reports, diagrams — into worktrees you would otherwise have to go and find in a terminal. This tab finds them and **renders them inside Paseo**.
-
-- **Live or picture, and live is the default on desktop.** Paseo's `react-native` on desktop and in the browser *is* react-native-web, whose `unstable_createElement` builds a real DOM node — the same mechanism Paseo uses for its own HTML file previews and its mermaid runtime. So a canvas renders as an actual interactive page inside the panel: filters work, charts respond, and the frame reloads itself when the agent rewrites the file. It runs sandboxed (`allow-scripts`, no `allow-same-origin`), so the page cannot reach back into Paseo. On iOS and Android that export does not exist, so the picture below is what you get there — and it is one tap away everywhere.
-- **The picture path renders in the app too, not in a browser.** A Paseo surface is React Native, so there is no WebView to put a page in. The artifact is rasterised on the daemon with headless Chrome over the DevTools protocol — full page height, not a viewport crop — and the picture is what you see in the panel. That is also the only thing that works when **the daemon is a server somewhere else**: opening a browser on that machine would show the page to nobody. Renders are ~0.5s warm, WebP, and cached against the file's own mtime, so reopening one is instant.
-- **Four kinds, one path.** HTML renders as authored. Markdown becomes a typeset report — headings, tables, task lists, code blocks — drawn in *your* Paseo theme, so a report matches the app around it. SVG and images are framed the same way. Markdown matters because an agent asked for a report writes `.md` far more often than a styled page.
-- **Where it looks** — every workspace's top level, the folders agents actually write to (`artifacts/`, `reports/`, `dashboards/`, `canvas/`), your own `~/Artifacts`, `~/Diagrams`, `~/Canvas`, and **Claude Code's own session scratchpads**, which is where the Artifact tool leaves a page before it is published anywhere.
-- **New canvas** — describe a dashboard and an agent builds it. It is dispatched into the workspace you pick, through your rotating provider, with the brief that decides whether the result renders at all: one self-contained file, no CDN, a real `<title>`. When the agent has written it, it appears in the list.
-- **It opens on what you were last looking at**, refreshes itself while an agent rewrites the file, and never sends you to a browser to see a canvas. The two actions that matter are in front: put it in the conversation, or get a link. Launching a real browser is a fallback for interactive pages, tucked at the bottom, and it says plainly that it runs on the Paseo host — which is only your machine when the daemon is local.
-- **Send it into the chat** — open Canvas *beside an agent* (⌘K → "Canvas for this agent", or the workspace tab) and the panel scopes itself to that workspace and gains **Send to chat**: the render is posted into the conversation as an image, so the agent can see what it drew and you can talk about it in place. From the sidebar the same button appears for any live agent working in that artifact's folder.
-- **Share** — a [Cloudflare quick tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/) for when someone needs the live, interactive page instead of a picture of it. The page is read from disk on every request, so a shared link keeps showing the current file — unlike an uploaded snapshot, which is frozen the moment it is published. A Markdown artifact is turned into a page at request time too.
-- **Missing dependency, not a dead button.** Rendering needs Chrome or Chromium (a `chrome-headless-shell` from a Playwright or Puppeteer cache is preferred when present, and is faster); sharing needs `cloudflared`. Without either, the tab names the one command that fixes it and everything else keeps working.
-
-A shared link is **live, not a snapshot**: Cursor's published canvas is an upload frozen at publish time, while this is read from disk per request, so the page keeps changing as the agent rewrites the file. The trade is durability — the link lasts as long as Paseo is running, and a new one is issued next time.
-
-A shared link is **public while it is up** — the URL carries an unguessable token, only the artifact's own folder is reachable, path traversal out of it is refused, nothing is writable, and the tunnel dies with the plugin.
-
-The link is held back until it actually resolves. cloudflared prints the hostname before DNS carries it, and a lookup made in that window is cached as a failure by the machine that made it — so the tab shows "opening" for a few seconds rather than handing you a link that appears broken.
-
-### About Claude artifacts
-
-Claude Code's Artifact tool writes a real file to disk and then publishes it to `claude.ai`. The **local file** is what this tab shows — including the ones sitting in session scratchpads that nothing else surfaces. The published copy lives behind a login and has no local registry, so no panel can list or update it; anything claiming otherwise would be guessing.
+Looking for the **Canvas** tab — live rendering and public links for everything your agents build? It grew into its own plugin: [paseo-canvas](https://github.com/itsjustanks/paseo-canvas). Install either, or both; they are independent.
 
 ### Built for narrow screens
 
@@ -107,13 +83,13 @@ No `npm install` step: the plugin imports only modules Paseo provides at runtime
 
 **Working on it?** `agent-link app install paseo --link` registers your checkout in place instead of copying, so `paseo plugin reload agent-link` picks up an edit.
 
-Requires Paseo ≥ 0.5 with plugins enabled. Tested against 0.5.0-beta.5. Sharing a canvas additionally needs `cloudflared`; nothing else in the plugin does.
+Requires Paseo ≥ 0.5 with plugins enabled. Tested against 0.5.0-beta.5.
 
 **Nothing else is required.** Every provider and account it finds is one you already have — the plugin installs no software and creates no accounts. Providers you don't use simply don't appear.
 
 ### Do you need the CLI?
 
-No, for most of it. This panel reads the account directories, writes MCP configuration and renders canvases on its own — accounts, MCP and Canvas work with the plugin alone.
+No, for most of it. This panel reads the account directories and writes MCP configuration on its own — accounts and MCP work with the plugin alone.
 
 **Routing is the exception.** A Paseo provider runs a command, so the auto-router needs the launcher script that `agent-link auto` writes. The Agent Link tab therefore shows an **Install the agent-link CLI** card when it is missing: one press fetches a single file into `~/.local/bin`, writes the launchers, and routing becomes installable from the panel. The `curl` command sits beside the button if you would rather do it yourself, and the card disappears once the CLI is found.
 
@@ -172,7 +148,6 @@ Plugin backend code runs trusted and unsandboxed on your daemon machine (that is
 - backs up every config file before writing it, and refuses to overwrite a file it cannot parse
 - changes Paseo providers through Paseo's own `config.patch` API, never by editing the daemon config file
 - copies MCP *definitions* between accounts, never credentials — OAuth grants stay in each account's own store
-- serves a canvas read-only, from that file's own folder, behind a random token, and only while you have it shared — a public tunnel exists only after you press Share, and dies with the plugin
 
 ## License
 
