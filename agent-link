@@ -1041,7 +1041,7 @@ cmd_update() {
     [ -f "$d/app.json" ] || continue
     [ "$(app_state "$d")" = installed ] || continue
     id="$(app_field "$d" id)"
-    echo "  reinstalling ${id}…"
+    echo "  reinstalling the '${id}' app (this repo's panel — Paseo itself is untouched)…"
     cmd_app install "$id"
   done
 }
