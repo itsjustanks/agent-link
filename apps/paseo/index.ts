@@ -51,6 +51,7 @@ import {
   handleSetCooldown,
   handleWireAuto,
   handleWireProvider,
+  searchPath,
 } from "./handlers.server";
 import { McpSurface } from "./mcp.client";
 import {
@@ -175,6 +176,9 @@ export default function contribute(plugin: PluginContext) {
       openSurface("canvas");
     },
   });
+  // Warm the login-shell PATH cache now (a slow shell rc can take seconds), off
+  // the startup path, so the first RPC that needs it does not stall on it.
+  setTimeout(searchPath, 0);
   // The local server and any quick tunnel belong to this process, and nothing
   // they serve should outlive it.
   return () => {

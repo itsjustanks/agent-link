@@ -44,8 +44,8 @@ const IDLE_SHUTDOWN_MS = 120_000;
 /** Layout viewport height; a page taller than this is captured beyond it. */
 const VIEWPORT = 900;
 /** Beyond this the PNG stops being worth sending over an RPC. */
-export const MAX_HEIGHT = 12_000;
-export const MAX_PNG_BYTES = 12 * 1024 * 1024;
+const MAX_HEIGHT = 12_000;
+const MAX_PNG_BYTES = 12 * 1024 * 1024;
 
 /**
  * Playwright and Puppeteer both cache a `chrome-headless-shell` — the same
@@ -85,7 +85,17 @@ function headlessShells(): string[] {
   return found.sort((a, b) => b.build - a.build).map((entry) => entry.path);
 }
 
+// The panel polls state every few seconds and detection walks cache folders on
+// disk, so the answer is found once and kept. It cannot change while the daemon
+// runs; installing Chrome afterwards needs a plugin reload to be noticed.
+let chromeFound: string | null = null;
+
 export function findChrome(): string {
+  if (chromeFound === null) chromeFound = detectChrome();
+  return chromeFound;
+}
+
+function detectChrome(): string {
   // An explicit override always wins over anything discovered.
   for (const candidate of [process.env.CHROME_BIN, process.env.CHROME_PATH]) {
     if (!candidate) continue;
@@ -328,8 +338,6 @@ export type RenderOptions = {
   width: number;
   /** 1 for a light payload, 2 for a retina-sharp one. */
   scale: number;
-  /** Cap the captured height; the rest is cut off rather than refused. */
-  maxHeight?: number;
   /** WebP is ~3x smaller than PNG, which matters over a remote connection. */
   format?: "webp" | "png";
 };
@@ -374,7 +382,6 @@ export async function renderUrl(url: string, options: RenderOptions): Promise<Sh
       contentSize?: { width?: number; height?: number };
     };
     const content = metrics.cssContentSize ?? metrics.contentSize ?? {};
-    const cap = options.maxHeight ?? MAX_HEIGHT;
     const scrolled = Math.ceil(Number(content.height ?? VIEWPORT));
     // A page shorter than the viewport still reports the viewport height, which
     // captures a slab of empty background under the content. Ask the document
@@ -394,7 +401,7 @@ export async function renderUrl(url: string, options: RenderOptions): Promise<Sh
       1,
       scrolled > VIEWPORT ? scrolled : measured > 0 ? Math.min(measured, VIEWPORT) : scrolled,
     );
-    const height = Math.min(fullHeight, cap);
+    const height = Math.min(fullHeight, MAX_HEIGHT);
     const width = Math.max(options.width, Math.ceil(Number(content.width ?? options.width)));
 
     const title = String(

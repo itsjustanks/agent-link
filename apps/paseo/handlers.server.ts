@@ -1,8 +1,9 @@
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, join } from "node:path";
+import { createInterface } from "node:readline";
 import type { Destination, Slot } from "./contracts.shared";
 import type { Dialect } from "./mcpjson.shared";
 
@@ -146,16 +147,7 @@ function creditNote(provider: "claude" | "codex", dir: string): string {
   return `extra usage unavailable (${reason})`;
 }
 
-// Same rule the router uses: extra usage exhausted and no subscription
-// allowance left means the account cannot serve, so rotation skips it.
-// Measured, not assumed. An account flagged "out of credits" can still serve a
-// model while an unflagged one refuses, so this never gates routing — parking
-// (set by `agent-link probe --park`, or by hand) is the real signal.
-function isBlocked(_provider: "claude" | "codex", _dir: string): boolean {
-  return false;
-}
-
-function envVarFor(provider: "claude" | "codex"): string {
+export function envVarFor(provider: "claude" | "codex"): string {
   return provider === "claude" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME";
 }
 
@@ -276,13 +268,12 @@ export const DIALECTS: Record<
     label: string;
     headerKey: "headers" | "http_headers";
     writesType: boolean;
-    supportsEnabled: boolean;
   }
 > = {
-  "claude-json": { format: "json-mcp", label: "Claude", headerKey: "headers", writesType: true, supportsEnabled: false },
-  "kimi-json": { format: "json-mcp", label: "Kimi", headerKey: "headers", writesType: false, supportsEnabled: false },
-  "codex-toml": { format: "toml-mcp", label: "Codex", headerKey: "http_headers", writesType: false, supportsEnabled: true },
-  "grok-toml": { format: "toml-mcp", label: "Grok", headerKey: "headers", writesType: false, supportsEnabled: true },
+  "claude-json": { format: "json-mcp", label: "Claude", headerKey: "headers", writesType: true },
+  "kimi-json": { format: "json-mcp", label: "Kimi", headerKey: "headers", writesType: false },
+  "codex-toml": { format: "toml-mcp", label: "Codex", headerKey: "http_headers", writesType: false },
+  "grok-toml": { format: "toml-mcp", label: "Grok", headerKey: "headers", writesType: false },
 };
 
 export function dialectOf(dest: Destination): Dialect {
@@ -336,10 +327,13 @@ function tomlString(value: string): string {
 
 // Table headers may be indented — valid TOML, and missing it once caused a
 // duplicate table to be appended (which makes the whole file unparseable).
+export function tomlMcpNamesFromText(text: string): string[] {
+  return [...new Set([...text.matchAll(/^[ \t]*\[mcp_servers\.([^\].]+)/gm)].map((match) => match[1] ?? ""))];
+}
+
 export function tomlMcpNames(path: string): string[] {
   try {
-    const text = readFileSync(path, "utf8");
-    return [...new Set([...text.matchAll(/^[ \t]*\[mcp_servers\.([^\].]+)/gm)].map((match) => match[1] ?? ""))];
+    return tomlMcpNamesFromText(readFileSync(path, "utf8"));
   } catch {
     return [];
   }
@@ -528,7 +522,7 @@ function tomlMcpWrite(path: string, name: string, def: McpDef | null): void {
 // --api-key …) and in URL query strings.
 const SECRETISH = /(token|secret|key|password|auth|bearer|credential)/i;
 
-function redactDetail(def: McpDef | null): string {
+export function redactDetail(def: McpDef | null): string {
   if (!def) return "";
   if (def.url) return def.url.replace(/\?.*/, "?…");
   if (!def.command) return "";
@@ -547,12 +541,18 @@ function redactDetail(def: McpDef | null): string {
   return parts.join(" ");
 }
 
-function destRead(dest: Destination): Record<string, McpDef> {
+export function destRead(dest: Destination): Record<string, McpDef> {
   if (dest.format === "json-mcp") return jsonMcpRead(dest.configPath);
-  const names = tomlMcpNames(dest.configPath);
+  // One read of the file, then every block is parsed from that text.
+  let text = "";
+  try {
+    text = readFileSync(dest.configPath, "utf8");
+  } catch {
+    return {};
+  }
   const defs: Record<string, McpDef> = {};
-  for (const name of names) {
-    const def = tomlMcpReadOne(dest.configPath, name);
+  for (const name of tomlMcpNamesFromText(text)) {
+    const def = tomlMcpReadOneFromText(text, name);
     if (def) defs[name] = def;
   }
   return defs;
@@ -675,10 +675,10 @@ function poolNumber(kind: "count" | "last", provider: string, email: string): nu
 }
 
 // Which preferences differ from the primary — an account out of step behaves
-// differently for no visible reason.
-function settingsDrift(provider: "claude" | "codex", dir: string): { style: string; drift: string[] } {
+// differently for no visible reason. The caller reads the primary settings once
+// and passes them in, so a scan does not re-read the same file per slot.
+function settingsDrift(provider: "claude" | "codex", dir: string, base: Record<string, unknown>): { style: string; drift: string[] } {
   if (provider !== "claude") return { style: "", drift: [] };
-  const base = readJson(join(HOME, ".claude", "settings.json")) ?? {};
   const own = readJson(join(dir, "settings.json")) ?? {};
   const drift = SYNC_SETTINGS_KEYS.filter(
     (key) => key in base && JSON.stringify(own[key]) !== JSON.stringify(base[key]),
@@ -724,18 +724,30 @@ function autoWiredId(overrides: ProviderOverrides, provider: "claude" | "codex")
 
 export async function handleScan(_input: Record<string, never>, { paseo }: PluginHandlerContext) {
   const overrides = await providerOverrides(paseo);
-  const slots = collectSlots().map((slot) => ({
-    ...slot,
-    wiredProviderId: providerIdForDir(overrides, slot.provider, slot.dir),
-    cooldownUntil: cooldownUntil(slot.provider, slot.email),
-    launches: poolNumber("count", slot.provider, slot.email),
-    creditNote: creditNote(slot.provider, slot.dir),
-    blocked: isBlocked(slot.provider, slot.dir),
-    parkReason: parkReason(slot.provider, slot.email),
-    outputStyle: settingsDrift(slot.provider, slot.dir).style,
-    settingsDrift: settingsDrift(slot.provider, slot.dir).drift,
-    lastUsed: poolNumber("last", slot.provider, slot.email),
-  }));
+  // Everything the sections below share is read once here, not once per section.
+  const baseSettings = readJson(join(HOME, ".claude", "settings.json")) ?? {};
+  const primaryEmails = { claude: claudeAccountEmail(HOME), codex: codexAccountEmail(join(HOME, ".codex")) };
+  const primaryCooldowns = { claude: cooldownUntil("claude", "primary"), codex: cooldownUntil("codex", "primary") };
+  // "Out of credits" is not reliable — a flagged account can still serve some
+  // models — so parking (set by `agent-link probe --park`, or by hand) is what
+  // actually blocks routing.
+  const primaryParked = { claude: parkReason("claude", "primary") !== "", codex: parkReason("codex", "primary") !== "" };
+  const slots = collectSlots().map((slot) => {
+    const drift = settingsDrift(slot.provider, slot.dir, baseSettings);
+    const parked = parkReason(slot.provider, slot.email);
+    return {
+      ...slot,
+      wiredProviderId: providerIdForDir(overrides, slot.provider, slot.dir),
+      cooldownUntil: cooldownUntil(slot.provider, slot.email),
+      launches: poolNumber("count", slot.provider, slot.email),
+      creditNote: creditNote(slot.provider, slot.dir),
+      blocked: parked !== "",
+      parkReason: parked,
+      outputStyle: drift.style,
+      settingsDrift: drift.drift,
+      lastUsed: poolNumber("last", slot.provider, slot.email),
+    };
+  });
   const autoRouters = (["claude", "codex"] as const).map((provider) => ({
     provider,
     launcherPath: autoLauncherPath(provider),
@@ -744,26 +756,24 @@ export async function handleScan(_input: Record<string, never>, { paseo }: Plugi
   }));
   return {
     slots,
-    primaryAccounts: { claude: claudeAccountEmail(HOME), codex: codexAccountEmail(join(HOME, ".codex")) },
+    primaryAccounts: primaryEmails,
     primaryCreditNote: creditNote("claude", HOME),
     primaries: (["claude", "codex"] as const).map((provider) => {
-      const dir = provider === "claude" ? HOME : join(HOME, ".codex");
-      const email = provider === "claude" ? claudeAccountEmail(HOME) : codexAccountEmail(dir);
+      const email = primaryEmails[provider];
       return {
         provider,
         email,
         launches: poolNumber("count", provider, "primary"),
-        cooldownUntil: cooldownUntil(provider, "primary"),
-        blocked: isBlocked(provider, dir),
+        cooldownUntil: primaryCooldowns[provider],
+        blocked: primaryParked[provider],
         duplicated: slots.some((slot) => slot.provider === provider && (slot.actualEmail || slot.email) === email),
       };
     }),
     nextUp: (["claude", "codex"] as const).map((provider) => {
-      const dir = provider === "claude" ? HOME : join(HOME, ".codex");
-      const primaryEmail = provider === "claude" ? claudeAccountEmail(HOME) : codexAccountEmail(dir);
+      const primaryEmail = primaryEmails[provider];
       const candidates: Array<{ email: string; last: number }> = [];
       const duplicated = slots.some((slot) => slot.provider === provider && (slot.actualEmail || slot.email) === primaryEmail);
-      if (primaryEmail && !duplicated && !isBlocked(provider, dir) && cooldownUntil(provider, "primary") === 0) {
+      if (primaryEmail && !duplicated && !primaryParked[provider] && primaryCooldowns[provider] === 0) {
         candidates.push({ email: primaryEmail, last: poolNumber("last", provider, "primary") });
       }
       for (const slot of slots) {
@@ -826,7 +836,7 @@ export async function handleAddAccount({ provider, email }: { provider: "claude"
       text = /^\s*cli_auth_credentials_store\s*=/m.test(text)
         ? text.replace(/^\s*cli_auth_credentials_store\s*=.*$/m, pin)
         : `${pin}\n${text}`;
-      writeFileSync(target, text);
+      writeTextAtomic(target, text);
     }
   } catch (error) {
     return { ok: false, started: false, message: error instanceof Error ? error.message : String(error) };
@@ -913,7 +923,7 @@ export async function handleDiagnoseProvider({ providerId }: { providerId: strin
 // Real per-account usage, read from each account's own transcripts. Anthropic
 // does not expose remaining quota without the account token, so this reports
 // what the account actually did: sessions, tokens and models used in a window.
-function usageForClaudeDir(dir: string, sinceMs: number, days: number) {
+async function usageForClaudeDir(dir: string, sinceMs: number, days: number) {
   const totals = {
     sessions: 0,
     inputTokens: 0,
@@ -962,40 +972,41 @@ function usageForClaudeDir(dir: string, sinceMs: number, days: number) {
       totals.lastActive = Math.max(totals.lastActive, Math.floor(mtime / 1000));
       const label = basename(projectDir).split("--").pop() ?? basename(projectDir);
       perProject.set(label, (perProject.get(label) ?? 0) + 1);
-      let text = "";
+      // Stream rather than slurp: a transcript can run to tens of MB, and one
+      // readFileSync of that both spikes memory and blocks the event loop.
       try {
-        text = readFileSync(file, "utf8");
+        const lines = createInterface({ input: createReadStream(file, { encoding: "utf8" }), crlfDelay: Infinity });
+        for await (const line of lines) {
+          if (!line) continue;
+          // Cheap string test before paying for a JSON parse.
+          const hasUsage = line.indexOf('"usage"') !== -1;
+          const hasLimit = line.indexOf("spend limit") !== -1 || line.indexOf("usage limit") !== -1;
+          if (!hasUsage && !hasLimit) continue;
+          let entry: { message?: { usage?: Record<string, number>; model?: string }; timestamp?: string };
+          try {
+            entry = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          const stamp = entry.timestamp ? Date.parse(entry.timestamp) : mtime;
+          if (hasLimit) {
+            totals.limitHits += 1;
+            totals.limitLast = Math.max(totals.limitLast, Math.floor((Number.isFinite(stamp) ? stamp : mtime) / 1000));
+          }
+          const usage = entry.message?.usage;
+          if (!usage) continue;
+          const out = Number(usage.output_tokens ?? 0);
+          totals.inputTokens += Number(usage.input_tokens ?? 0);
+          totals.outputTokens += out;
+          totals.cacheReadTokens += Number(usage.cache_read_input_tokens ?? 0);
+          totals.cacheCreationTokens += Number(usage.cache_creation_input_tokens ?? 0);
+          const bucket = dayOf(Number.isFinite(stamp) ? stamp : mtime);
+          if (bucket >= 0) totals.daily[bucket] += out;
+          const model = entry.message?.model;
+          if (model && model !== "<synthetic>") totals.models.add(model);
+        }
       } catch {
         continue;
-      }
-      for (const line of text.split("\n")) {
-        if (!line) continue;
-        // Cheap string test before paying for a JSON parse.
-        const hasUsage = line.indexOf('"usage"') !== -1;
-        const hasLimit = line.indexOf("spend limit") !== -1 || line.indexOf("usage limit") !== -1;
-        if (!hasUsage && !hasLimit) continue;
-        let entry: { message?: { usage?: Record<string, number>; model?: string }; timestamp?: string };
-        try {
-          entry = JSON.parse(line);
-        } catch {
-          continue;
-        }
-        const stamp = entry.timestamp ? Date.parse(entry.timestamp) : mtime;
-        if (hasLimit) {
-          totals.limitHits += 1;
-          totals.limitLast = Math.max(totals.limitLast, Math.floor((Number.isFinite(stamp) ? stamp : mtime) / 1000));
-        }
-        const usage = entry.message?.usage;
-        if (!usage) continue;
-        const out = Number(usage.output_tokens ?? 0);
-        totals.inputTokens += Number(usage.input_tokens ?? 0);
-        totals.outputTokens += out;
-        totals.cacheReadTokens += Number(usage.cache_read_input_tokens ?? 0);
-        totals.cacheCreationTokens += Number(usage.cache_creation_input_tokens ?? 0);
-        const bucket = dayOf(Number.isFinite(stamp) ? stamp : mtime);
-        if (bucket >= 0) totals.daily[bucket] += out;
-        const model = entry.message?.model;
-        if (model && model !== "<synthetic>") totals.models.add(model);
       }
     }
   }
@@ -1006,8 +1017,8 @@ function usageForClaudeDir(dir: string, sinceMs: number, days: number) {
 export async function handleAccountUsage({ days }: { days: number }) {
   const window = Math.max(1, Math.min(30, days));
   const sinceMs = Date.now() - window * 86_400_000;
-  const shape = (provider: "claude" | "codex", email: string, dir: string) => {
-    const t = usageForClaudeDir(dir, sinceMs, window);
+  const shape = async (provider: "claude" | "codex", email: string, dir: string) => {
+    const t = await usageForClaudeDir(dir, sinceMs, window);
     return {
       provider,
       email,
@@ -1024,14 +1035,14 @@ export async function handleAccountUsage({ days }: { days: number }) {
       models: [...t.models].sort(),
     };
   };
-  const accounts = [];
+  const pending = [];
   const primaryEmail = claudeAccountEmail(HOME);
-  if (primaryEmail) accounts.push(shape("claude", primaryEmail, join(HOME, ".claude")));
+  if (primaryEmail) pending.push(shape("claude", primaryEmail, join(HOME, ".claude")));
   for (const slot of collectSlots()) {
     if (slot.provider !== "claude") continue;
-    accounts.push(shape("claude", slot.email, slot.dir));
+    pending.push(shape("claude", slot.email, slot.dir));
   }
-  return { accounts };
+  return { accounts: await Promise.all(pending) };
 }
 
 export async function handleProviderHealth(_input: Record<string, never>, { paseo }: PluginHandlerContext) {
@@ -1072,14 +1083,15 @@ export async function handleMcpMatrix(_input: Record<string, never>, { paseo }: 
   const nameSets = new Map<string, Set<string>>();
   for (const dest of destinations) nameSets.set(dest.id, new Set(destNames(dest)));
   const allNames = [...new Set([...nameSets.values()].flatMap((set) => [...set]))].sort();
+  // Every definition, read once per destination — not once per server × destination.
+  const defsByDest = new Map(destinations.map((dest) => [dest.id, destRead(dest)] as const));
 
   const servers = allNames.map((name) => {
     const presentIn = destinations.filter((dest) => nameSets.get(dest.id)?.has(name)).map((dest) => dest.id);
     // Best definition for display: prefer a json-mcp source.
     let def: McpDef | null = null;
     for (const dest of destinations) {
-      if (!nameSets.get(dest.id)?.has(name)) continue;
-      const candidate = dest.format === "json-mcp" ? jsonMcpRead(dest.configPath)[name] : tomlMcpReadOne(dest.configPath, name);
+      const candidate = defsByDest.get(dest.id)?.[name];
       if (candidate) {
         def = candidate;
         if (dest.format === "json-mcp") break;
@@ -1222,11 +1234,12 @@ export async function handleMcpRemove({ name, targets }: { name: string; targets
   };
 }
 
-function findDef(destinations: Destination[], name: string): McpDef | null {
+// `preRead` lets a caller that looks up many names read each destination once
+// up front instead of once per name.
+function findDef(destinations: Destination[], name: string, preRead?: Map<string, Record<string, McpDef>>): McpDef | null {
   let def: McpDef | null = null;
   for (const dest of destinations) {
-    const candidate =
-      dest.format === "json-mcp" ? jsonMcpRead(dest.configPath)[name] : tomlMcpReadOne(dest.configPath, name);
+    const candidate = preRead ? (preRead.get(dest.id)?.[name] ?? null) : destReadOne(dest, name);
     if (candidate) {
       def = candidate;
       if (dest.format === "json-mcp") break;
@@ -1388,9 +1401,10 @@ async function probeHttp(url: string, headers: Record<string, string> | undefine
 export async function handleMcpHealth(_input: Record<string, never>, { paseo }: PluginHandlerContext) {
   const destinations = await buildDestinations(paseo);
   const names = [...new Set(destinations.flatMap((dest) => destNames(dest)))].sort();
+  const defsByDest = new Map(destinations.map((dest) => [dest.id, destRead(dest)] as const));
   const results = await Promise.all(
     names.map(async (name) => {
-      const def = findDef(destinations, name);
+      const def = findDef(destinations, name, defsByDest);
       if (!def) return { name, status: "unknown" as const, note: "no readable definition" };
       if (def.command) {
         return binaryOnPath(def.command)
@@ -1555,18 +1569,23 @@ export async function handleMcpSync(): Promise<{ ok: boolean; log: string }> {
     // Copy only the MCP blocks the slot is missing, never the whole file — the
     // slot's own model/approval settings and per-account servers stay put.
     const pin = 'cli_auth_credentials_store = "file"';
+    // One read of the primary file; per-name re-reads made this ~28 reads of it.
+    let primaryText = "";
+    try {
+      primaryText = readFileSync(codexPrimary, "utf8");
+    } catch {
+      primaryText = "";
+    }
     const primaryDefs: Array<[string, McpDef]> = [];
-    for (const name of tomlMcpNames(codexPrimary)) {
-      const def = tomlMcpReadOne(codexPrimary, name);
+    for (const name of tomlMcpNamesFromText(primaryText)) {
+      const def = tomlMcpReadOneFromText(primaryText, name);
       if (def) primaryDefs.push([name, def]);
     }
     for (const slot of slots.filter((entry) => entry.provider === "codex")) {
       const path = join(slot.dir, "config.toml");
       try {
         let text = tomlReadForWrite(path);
-        const existing = new Set(
-          [...text.matchAll(/^[ \t]*\[mcp_servers\.([^\].]+)/gm)].map((match) => match[1] ?? ""),
-        );
+        const existing = new Set(tomlMcpNamesFromText(text));
         let added = 0;
         for (const [name, def] of primaryDefs) {
           if (existing.has(name)) continue; // never clobber a per-account definition
@@ -1577,7 +1596,7 @@ export async function handleMcpSync(): Promise<{ ok: boolean; log: string }> {
           ? text.replace(/^\s*cli_auth_credentials_store\s*=.*$/m, pin)
           : `${text.replace(/\n*$/, "\n")}${pin}\n`;
         backupFile(path);
-        writeFileSync(path, text);
+        writeTextAtomic(path, text);
         const agentsMd = join(HOME, ".codex", "AGENTS.md");
         if (existsSync(agentsMd)) copyFileSync(agentsMd, join(slot.dir, "AGENTS.md"));
         logs.push(`codex · ${slot.email}: ${added} MCP server(s) added, ${existing.size} kept as-is, instructions + pin synced`);

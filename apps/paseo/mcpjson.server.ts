@@ -8,15 +8,18 @@ import {
   DIALECTS,
   backupFile,
   buildDestinations,
+  destRead,
   destReadOne,
   dialectOf,
+  envVarFor,
   jsonMcpRead,
   jsonSafeDef,
   maskValue,
   readJson,
+  redactDetail,
   searchPath,
   tomlApply,
-  tomlMcpNames,
+  tomlMcpNamesFromText,
   tomlMcpReadOneFromText,
   tomlReadForWrite,
   writeTextAtomic,
@@ -513,7 +516,9 @@ function syntaxIssue(text: string, error: unknown): JsonIssue {
 
 // ------------------------------------------------------------------ two-phase write
 
-type Pair = { dest: Destination; name: string; entry: Entry; carry: string[] };
+// `stored` is what the caller already read from this destination — planWrites
+// uses it as-is rather than reading the same file again per pair.
+type Pair = { dest: Destination; name: string; entry: Entry; stored: Stored | null };
 
 type Plan = {
   issues: JsonIssue[];
@@ -553,8 +558,8 @@ function planWrites(pairs: Pair[]): Plan {
     const path = pair.dest.configPath;
     const key = `${path}::${pair.name}`;
 
-    const stored = readStored(pair.dest, pair.name);
-    const translated = toNative(pair.entry, pair.carry, dialect, new Set(Object.keys(stored?.entry ?? {})));
+    const stored = pair.stored;
+    const translated = toNative(pair.entry, stored?.carry ?? [], dialect, new Set(Object.keys(stored?.entry ?? {})));
     for (const note of translated.dropped) dropped.push(`${pair.dest.label}: ${note}`);
     previews.set(key, renderNative(translated.native, pair.name, path, spec.headerKey));
 
@@ -753,7 +758,7 @@ export async function handleMcpRawPut(
   }));
   issues.push(...validate(resolved.entry, name, dialect, text));
 
-  const plan = planWrites([{ dest, name, entry: resolved.entry, carry: stored?.carry ?? [] }]);
+  const plan = planWrites([{ dest, name, entry: resolved.entry, stored }]);
   const preview = plan.previews.get(`${dest.configPath}::${name}`) ?? "";
   issues.push(...plan.issues);
 
@@ -776,23 +781,14 @@ export async function handleMcpRawPut(
 
 // ------------------------------------------------------------------ import
 
-const SECRETISH = /(token|secret|key|password|auth|bearer|credential)/i;
-
+// The one redacting summariser lives in handlers.server.ts; this just reshapes
+// a canonical entry into the McpDef it expects.
 function summarise(entry: Entry): string {
-  if (typeof entry.url === "string") return entry.url.replace(/\?.*/, "?…");
-  if (typeof entry.command !== "string") return "";
-  const args = Array.isArray(entry.args) ? (entry.args as string[]) : [];
-  const parts = [entry.command];
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index];
-    if (SECRETISH.test(arg)) {
-      parts.push(arg.includes("=") ? `${arg.split("=")[0]}=•••` : `${arg.split(/\s/)[0]} •••`);
-      if (!arg.includes("=") && !/\s/.test(arg)) index += 1;
-      continue;
-    }
-    parts.push(arg);
-  }
-  return parts.join(" ");
+  return redactDetail({
+    url: typeof entry.url === "string" ? entry.url : undefined,
+    command: typeof entry.command === "string" ? entry.command : undefined,
+    args: Array.isArray(entry.args) ? (entry.args as string[]) : undefined,
+  });
 }
 
 /** A name for a paste that arrived without one. */
@@ -846,7 +842,7 @@ export async function handleMcpImportParse({ blob }: { blob: string }) {
 
   if (jsonError !== null) {
     // Last shape people paste: a Codex block, lifted straight out of config.toml.
-    const names = [...new Set([...text.matchAll(/^[ \t]*\[mcp_servers\.([^\].]+)/gm)].map((match) => match[1]))];
+    const names = tomlMcpNamesFromText(text);
     if (names.length === 0) {
       return { servers, normalisations, issues: [syntaxIssue(text, jsonError)] };
     }
@@ -957,7 +953,7 @@ export async function handleMcpImportApply(
       const entry: Entry = { ...resolved.entry };
       if (!("enabled" in entry) && stored && "enabled" in stored.entry) entry.enabled = stored.entry.enabled;
       issues.push(...validate(entry, server.name, dialectOf(dest), text));
-      pairs.push({ dest, name: server.name, entry, carry: stored?.carry ?? [] });
+      pairs.push({ dest, name: server.name, entry, stored });
     }
   }
 
@@ -987,10 +983,24 @@ export async function handleMcpImportApply(
 
 // ------------------------------------------------------------------ export
 
-function bestStored(destinations: Destination[], name: string): { stored: Stored; dest: Destination } | null {
+/** Everything stored at one destination, read in a single pass over its file. */
+function readStoredAll(dest: Destination): Record<string, Stored> {
+  if (DIALECTS[dialectOf(dest)].format === "json-mcp") {
+    return Object.fromEntries(
+      Object.entries(jsonMcpRead(dest.configPath)).map(([name, raw]) => [name, { entry: canonicaliseJson(raw as Entry), carry: [] }]),
+    );
+  }
+  return Object.fromEntries(Object.entries(destRead(dest)).map(([name, def]) => [name, tomlToCanonical(def)]));
+}
+
+function bestStored(
+  destinations: Destination[],
+  storedByDest: Map<string, Record<string, Stored>>,
+  name: string,
+): { stored: Stored; dest: Destination } | null {
   let fallback: { stored: Stored; dest: Destination } | null = null;
   for (const dest of destinations) {
-    const stored = readStored(dest, name);
+    const stored = storedByDest.get(dest.id)?.[name];
     if (!stored) continue;
     // A JSON source is already the shape this export speaks, so prefer it.
     if (DIALECTS[dialectOf(dest)].format === "json-mcp") return { stored, dest };
@@ -1006,22 +1016,18 @@ export async function handleMcpExport(
   const destinations = await buildDestinations(paseo);
   const chosen = destId ? destinations.find((candidate) => candidate.id === destId) : undefined;
   const pool = chosen ? [chosen] : destinations;
+  // One read per destination; every per-name lookup below hits this map.
+  const storedByDest = new Map(pool.map((dest) => [dest.id, readStoredAll(dest)] as const));
   const names =
     scope === "one"
       ? [name ?? ""].filter(Boolean)
-      : [
-          ...new Set(
-            pool.flatMap((dest) =>
-              DIALECTS[dialectOf(dest)].format === "json-mcp" ? Object.keys(jsonMcpRead(dest.configPath)) : tomlMcpNames(dest.configPath),
-            ),
-          ),
-        ].sort();
+      : [...new Set([...storedByDest.values()].flatMap((record) => Object.keys(record)))].sort();
 
   const mcpServers: Record<string, Entry> = {};
   const redacted: string[] = [];
   let anySecrets = false;
   for (const serverName of names) {
-    const found = bestStored(pool, serverName);
+    const found = bestStored(pool, storedByDest, serverName);
     if (!found) continue;
     const secrets = secretPaths(found.stored.entry);
     if (secrets.length > 0) anySecrets = true;
@@ -1087,10 +1093,6 @@ function cliPath(provider: "claude" | "codex"): string {
     if (existsSync(candidate)) return candidate;
   }
   return "";
-}
-
-function envVarFor(provider: "claude" | "codex"): string {
-  return provider === "claude" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME";
 }
 
 /**

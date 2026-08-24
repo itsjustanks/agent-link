@@ -243,6 +243,9 @@ async function discover(paseo: PluginHandlerContext["paseo"], refresh: boolean):
 type Share = { token: string; root: string; entry: string; kind: ArtifactKind; theme?: PageTheme };
 
 const shares = new Map<string, Share>(); // key: absolute artifact path
+// The same shares by token: serveRequest runs for every page and asset fetch,
+// so looking a token up must not scan. Kept in sync wherever shares changes.
+const sharesByToken = new Map<string, Share>();
 let server: Server | null = null;
 let serverPort = 0;
 
@@ -258,7 +261,7 @@ async function serveRequest(
   const url = new URL(request.url ?? "/", "http://127.0.0.1");
   const parts = url.pathname.split("/").filter(Boolean);
   if (parts[0] !== "s" || !parts[1]) return send(response, 404, "Not found.");
-  const share = [...shares.values()].find((candidate) => candidate.token === parts[1]);
+  const share = sharesByToken.get(parts[1]);
   if (!share) return send(response, 404, "This link is no longer shared.");
   const rest = parts.slice(2).map(decodeURIComponent).join("/");
   const target = rest ? resolve(share.root, rest) : share.entry;
@@ -330,7 +333,17 @@ type Tunnel = { state: "off" | "starting" | "on" | "failed"; url: string; error:
 let tunnel: Tunnel = { state: "off", url: "", error: "", since: 0 };
 let tunnelProcess: ChildProcess | null = null;
 
+// The panel polls state every few seconds and detection walks the PATH on
+// disk, so the answer is found once and kept. Installing cloudflared while the
+// daemon runs needs a plugin reload to be noticed.
+let cloudflaredFound: string | null = null;
+
 function whichCloudflared(): string {
+  if (cloudflaredFound === null) cloudflaredFound = detectCloudflared();
+  return cloudflaredFound;
+}
+
+function detectCloudflared(): string {
   const candidates = [
     "/opt/homebrew/bin/cloudflared",
     "/usr/local/bin/cloudflared",
@@ -497,6 +510,26 @@ export async function handleCanvasState(
   return state(paseo, Boolean(refresh));
 }
 
+/**
+ * A client-supplied path reaches the filesystem, so it must live inside a
+ * folder the discovery scan actually covers. Serving proves this matters most:
+ * a share exposes the file's whole parent folder, so a path like
+ * ~/.ssh/notes.md would put all of ~/.ssh behind a public link.
+ */
+async function assertScanned(paseo: PluginHandlerContext["paseo"], target: string): Promise<void> {
+  const { roots } = await discover(paseo, false);
+  for (const root of roots) {
+    let real: string;
+    try {
+      real = realpathSync(root);
+    } catch {
+      continue;
+    }
+    if (target === real || target.startsWith(real + sep)) return;
+  }
+  throw new Error("That file is outside the folders this panel scans.");
+}
+
 export async function handleCanvasServe(
   { path, share, theme }: { path: string; share: boolean; theme?: PageTheme },
   { paseo }: PluginHandlerContext,
@@ -504,18 +537,21 @@ export async function handleCanvasServe(
   // The path comes from our own scan, but it reaches the filesystem and then a
   // public URL, so re-prove it before serving anything from its folder.
   const target = realpathSync(path);
+  await assertScanned(paseo, target);
   if (!statSync(target).isFile()) throw new Error("That is not a file.");
   const kind = kindOf(target);
   if (!kind) throw new Error("That file type cannot be shared.");
 
   if (!shares.has(target)) {
-    shares.set(target, {
+    const created: Share = {
       token: randomBytes(12).toString("hex"),
       root: realpathSync(join(target, "..")),
       entry: target,
       kind,
       theme,
-    });
+    };
+    shares.set(target, created);
+    sharesByToken.set(created.token, created);
   }
   await ensureServer();
   if (share) startTunnel();
@@ -526,8 +562,15 @@ export async function handleCanvasStop(
   { path }: { path?: string },
   { paseo }: PluginHandlerContext,
 ): Promise<CanvasState> {
-  if (path) shares.delete(realpathSync(path));
-  else shares.clear();
+  if (path) {
+    const key = realpathSync(path);
+    const stopped = shares.get(key);
+    shares.delete(key);
+    if (stopped) sharesByToken.delete(stopped.token);
+  } else {
+    shares.clear();
+    sharesByToken.clear();
+  }
   if (shares.size === 0) stopTunnel();
   return state(paseo, false);
 }
@@ -550,7 +593,11 @@ export function handleCanvasOpen({ url }: { url: string }): { opened: boolean; m
   const allowed = assertOurs(url);
   const opener = platform() === "darwin" ? "open" : platform() === "win32" ? "start" : "xdg-open";
   try {
-    spawn(opener, [allowed.href], { stdio: "ignore", detached: true, shell: platform() === "win32" }).unref();
+    const child = spawn(opener, [allowed.href], { stdio: "ignore", detached: true, shell: platform() === "win32" });
+    // A missing opener arrives as an async 'error' event the try/catch cannot
+    // see, and an unhandled one takes the whole daemon down. Swallow it.
+    child.on("error", () => {});
+    child.unref();
     return { opened: true, message: "Opened in the browser on the daemon machine." };
   } catch (caught) {
     return { opened: false, message: caught instanceof Error ? caught.message : String(caught) };
@@ -571,6 +618,11 @@ export function handleCanvasCopy({ url }: { url: string }): { copied: boolean } 
         : ["xclip", ["-selection", "clipboard"]];
   try {
     const child = spawn(command, args, { stdio: ["pipe", "ignore", "ignore"] });
+    // A missing clipboard tool arrives as an async 'error' event the try/catch
+    // cannot see, and an unhandled one takes the whole daemon down — as does
+    // the EPIPE its stdin raises. Swallow both.
+    child.on("error", () => {});
+    child.stdin?.on("error", () => {});
     child.stdin?.end(allowed.href);
     return { copied: true };
   } catch {
@@ -650,8 +702,10 @@ export async function handleCanvasRender(
     theme,
     format,
   }: { path: string; width: number; scale: number; theme?: PageTheme; format?: "webp" | "png" },
+  { paseo }: PluginHandlerContext,
 ): Promise<Render> {
   const file = realpathSync(path);
+  await assertScanned(paseo, file);
   const stats = statSync(file);
   if (!stats.isFile()) throw new Error("That is not a file.");
   const kind = kindOf(file);
@@ -693,8 +747,12 @@ export async function handleCanvasRender(
 const MAX_SOURCE_BYTES = 400_000;
 
 /** The file as text, for reading a report rather than looking at a picture. */
-export async function handleCanvasSource({ path }: { path: string }): Promise<{ text: string; truncated: boolean; bytes: number }> {
+export async function handleCanvasSource(
+  { path }: { path: string },
+  { paseo }: PluginHandlerContext,
+): Promise<{ text: string; truncated: boolean; bytes: number }> {
   const file = realpathSync(path);
+  await assertScanned(paseo, file);
   const stats = statSync(file);
   const kind = kindOf(file);
   if (!kind || kind === "image") throw new Error("That artifact has no text to show.");
@@ -710,6 +768,7 @@ export async function handleCanvasSource({ path }: { path: string }): Promise<{ 
 export function canvasShutdown(): void {
   stopTunnel();
   shares.clear();
+  sharesByToken.clear();
   renders.clear();
   renderBytes = 0;
   server?.close();
