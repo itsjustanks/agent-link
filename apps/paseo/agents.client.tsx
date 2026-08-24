@@ -436,6 +436,10 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
               {slot.wrongAccount ? "Sign this folder back into its own account:" : "Finish the sign-in in a terminal:"}
             </Text>
             <CodeBlock tone="attention">{loginCommand(slot)}</CodeBlock>
+            <Text style={t.text.caption}>
+              Each run prints a fresh single-use link — use that run's URL and paste the whole code, including
+              everything after “#”. A 400 means the code was stale or partial: run the command again.
+            </Text>
           </View>
         ) : null}
         <Facts

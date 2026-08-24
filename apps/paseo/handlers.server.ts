@@ -1055,6 +1055,15 @@ export async function handleProviderHealth(_input: Record<string, never>, { pase
   for (const skip of ["cursor", "devin", "copilot", "opencode", "pi"]) {
     if (overrides[skip]?.enabled === false) ids.delete(skip);
   }
+  // Only providers the daemon actually has. Probing one that was never set up
+  // reports its absence ("ACP not enabled") on a red badge — noise, not health,
+  // for a CLI the user simply does not use.
+  try {
+    const known = new Set((await paseo.providers.listAvailable()).providers.map((entry: { provider: string }) => entry.provider));
+    for (const id of [...ids]) if (!known.has(id)) ids.delete(id);
+  } catch {
+    // A daemon without this RPC keeps the unfiltered list.
+  }
   const providers = await Promise.all(
     [...ids].map(async (id) => {
       try {

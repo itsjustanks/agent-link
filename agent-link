@@ -356,7 +356,20 @@ slot_login() { # $1 provider, $2 email
   prov_login "$1" "$dir" "$2"
   local i=0 e
   for e in $(slot_list "$1"); do i=$((i+1)); [ "$e" = "$2" ] && break; done
-  slot_check "$1" "$2" "$i"
+  if ! slot_check "$1" "$2" "$i"; then
+    # The CLI's own errors are terse ("status code 400") and the causes are
+    # always the same three, so name them and hand back the retry.
+    echo
+    echo "    The sign-in didn't complete. A 'status code 400' means the pasted code"
+    echo "    was refused — the usual reasons:"
+    echo "      - the URL came from an EARLIER run: every run mints a fresh single-use"
+    echo "        link, and a code from an old link is always rejected"
+    echo "      - only part of the code was pasted: include everything after '#'"
+    echo "      - the code expired: they only live a few minutes"
+    echo "    Try again (a fresh link is printed each time):"
+    echo "      agent-link login $1 $2"
+    return 1
+  fi
 }
 
 # ---------------------------------------------------------------- commands
