@@ -1,7 +1,8 @@
-import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { execFile, execFileSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
+import { promisify } from "node:util";
 import type { CliStatus } from "./cli.shared";
 
 const HOME = homedir();
@@ -59,6 +60,99 @@ export function cliState(): CliStatus {
 
 export async function handleCliStatus(): Promise<CliStatus> {
   return cliState();
+}
+
+// ------------------------------------------------------------ plugin updates
+
+const LATEST_SHA_URL = "https://api.github.com/repos/itsjustanks/agent-link/commits/main";
+
+// The plugin cannot ask Paseo where it is installed, so it looks in the places
+// the daemon actually uses. ponytail: fixed candidate list — extend it if a
+// platform ever stores plugins elsewhere.
+function buildStamp(): string {
+  const candidates = [
+    join(HOME, ".paseo", "plugins", "agent-link", "build.json"),
+    join(HOME, "Library", "Application Support", "paseo", "plugins", "agent-link", "build.json"),
+    join(HOME, ".config", "paseo", "plugins", "agent-link", "build.json"),
+  ];
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(readFileSync(candidate, "utf8")) as { sha?: string };
+      if (typeof parsed.sha === "string") return parsed.sha;
+    } catch {
+      // next
+    }
+  }
+  return "";
+}
+
+export async function handleCliUpdateCheck(): Promise<{
+  installedSha: string;
+  latestSha: string;
+  updateReady: boolean;
+  note: string;
+}> {
+  const installedSha = buildStamp();
+  let latestSha = "";
+  try {
+    // This media type answers with the bare sha, nothing to parse.
+    const response = await fetch(LATEST_SHA_URL, {
+      headers: { accept: "application/vnd.github.sha" },
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!response.ok) throw new Error(`GitHub answered ${response.status}`);
+    latestSha = (await response.text()).trim();
+  } catch (caught) {
+    return {
+      installedSha,
+      latestSha: "",
+      updateReady: false,
+      note: `Could not reach GitHub: ${caught instanceof Error ? caught.message : String(caught)}`,
+    };
+  }
+  if (!installedSha) {
+    return {
+      installedSha,
+      latestSha,
+      updateReady: true,
+      note: "This install predates the version stamp, so one update from here brings it current and stamps it.",
+    };
+  }
+  return {
+    installedSha,
+    latestSha,
+    updateReady: installedSha !== latestSha,
+    note: "",
+  };
+}
+
+const execFileAsync = promisify(execFile);
+
+export async function handleCliUpdateApply(): Promise<{ ok: boolean; message: string }> {
+  const cli = findCli();
+  if (!cli) {
+    return { ok: false, message: "The agent-link CLI is not installed — install it from the card above first." };
+  }
+  try {
+    // The CLI already knows how to fetch main, typecheck and re-register; the
+    // panel just runs it instead of reimplementing the installer.
+    const { stdout, stderr } = await execFileAsync(cli, ["app", "install", "paseo"], { timeout: 240_000 });
+    const said = `${stdout}\n${stderr}`;
+    if (!/installed and running|installed,/.test(said)) {
+      const tail = said.trim().split("\n").slice(-3).join(" · ");
+      return { ok: false, message: tail || "The installer said nothing — run 'agent-link app install paseo' in a terminal." };
+    }
+    return {
+      ok: true,
+      message:
+        "Updated. If this panel still shows old behaviour, press Reload on agent-link in Settings → Plugins, then navigate away and back.",
+    };
+  } catch (caught) {
+    return {
+      ok: false,
+      message: `Update failed: ${caught instanceof Error ? caught.message.split("\n")[0] : String(caught)}. Run 'agent-link app install paseo' in a terminal to see the full story.`,
+    };
+  }
 }
 
 export async function handleCliInstall({ withRouters }: { withRouters: boolean }): Promise<{

@@ -1,7 +1,7 @@
 import type { PluginContext } from "@getpaseo/plugin";
 import { AgentSyncSurface } from "./agents.client";
-import { cliInstall, cliStatus } from "./cli.shared";
-import { handleCliInstall, handleCliStatus } from "./cli.server";
+import { cliInstall, cliStatus, cliUpdateApply, cliUpdateCheck } from "./cli.shared";
+import { handleCliInstall, handleCliStatus, handleCliUpdateApply, handleCliUpdateCheck } from "./cli.server";
 import {
   diagnoseProvider,
   mcpAdd,
@@ -91,6 +91,8 @@ export default function contribute(plugin: PluginContext) {
   plugin.handle(mcpSync, handleMcpSync);
   plugin.handle(cliStatus, handleCliStatus);
   plugin.handle(cliInstall, handleCliInstall);
+  plugin.handle(cliUpdateCheck, handleCliUpdateCheck);
+  plugin.handle(cliUpdateApply, handleCliUpdateApply);
   plugin.handle(mcpRawGet, handleMcpRawGet);
   plugin.handle(mcpRawPut, handleMcpRawPut);
   plugin.handle(mcpImportParse, handleMcpImportParse);

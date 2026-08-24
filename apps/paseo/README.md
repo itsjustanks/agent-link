@@ -81,6 +81,8 @@ git clone https://github.com/itsjustanks/agent-link
 
 No `npm install` step: the plugin imports only modules Paseo provides at runtime, and Paseo compiles it on install. The same screen has **Reload**, **Disable**, **Remove** and **Logs** per plugin — Logs is the first place to look if a tab misbehaves. Removing a plugin deletes its configuration, never your source directory.
 
+**Updates come to you.** The Agent Link tab checks GitHub once per session and shows an **Update now** card when `main` has moved past the installed build; one press runs the installer, and a Reload in Settings → Plugins finishes it if the panel doesn't pick it up on its own.
+
 **Working on it?** `agent-link app install paseo --link` registers your checkout in place instead of copying, so `paseo plugin reload agent-link` picks up an edit.
 
 Requires Paseo ≥ 0.5 with plugins enabled. Tested against 0.5.0-beta.5.

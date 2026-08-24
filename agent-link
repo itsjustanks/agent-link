@@ -1119,6 +1119,9 @@ install_paseo_plugin() { # $1 source dir, $2 plugin id, $3 "link" to run from so
     mkdir -p "$dest" || return 1
     # Copy the source only: node_modules is rebuilt in place and .git is noise.
     ( cd "$src" && tar --exclude=node_modules --exclude=.git -cf - . ) | ( cd "$dest" && tar -xf - ) || return 1
+    # Stamp what was installed, so the panel can tell whether main has moved on.
+    local sha; sha="$(git -C "$src" rev-parse HEAD 2>/dev/null || true)"
+    [ -n "$sha" ] && printf '{ "sha": "%s", "builtAt": "%s" }\n' "$sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$dest/build.json"
   fi
 
   [ -d "$dest/node_modules" ] || { echo "installing dependencies…"; (cd "$dest" && npm install --silent --no-audit --no-fund) || return 1; }

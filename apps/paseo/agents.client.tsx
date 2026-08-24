@@ -3,7 +3,7 @@ import { useRpc } from "@getpaseo/plugin";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import React, { useState } from "react";
 import { Text, View } from "react-native";
-import { cliInstall, cliStatus } from "./cli.shared";
+import { cliInstall, cliStatus, cliUpdateApply, cliUpdateCheck } from "./cli.shared";
 import {
   accountUsage,
   addAccount,
@@ -93,6 +93,8 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const callScan = useRpc(scan);
   const callCliStatus = useRpc(cliStatus);
   const callCliInstall = useRpc(cliInstall);
+  const callUpdateCheck = useRpc(cliUpdateCheck);
+  const callUpdateApply = useRpc(cliUpdateApply);
   const callWire = useRpc(wireProvider);
   const callDiagnose = useRpc(diagnoseProvider);
   const callHealth = useRpc(providerHealth);
@@ -290,6 +292,38 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
           <Text style={t.text.caption}>or run it yourself:</Text>
         </View>
         <CodeBlock>{cli.data.command}</CodeBlock>
+      </Card>
+    ) : null;
+
+  // One cheap GitHub call per panel session says whether main has moved past
+  // the sha stamped at install; the Update button just runs the CLI installer.
+  const update = useQuery({
+    queryKey: ["agent-link", "update-check"],
+    queryFn: () => callUpdateCheck({}),
+    staleTime: 60 * 60 * 1000,
+    retry: false,
+  });
+  const applyUpdate = useMutation({
+    mutationFn: () => callUpdateApply({}),
+    onSuccess: (result) => {
+      setNotice(result.message);
+      void queryClient.invalidateQueries({ queryKey: ["agent-link"] });
+    },
+    onError: (error: Error) => setNotice(error.message),
+  });
+
+  const updateCard =
+    update.data?.updateReady ? (
+      <Card tone="attention">
+        <Text style={t.text.heading}>Plugin update ready</Text>
+        <Text style={[t.text.body, { color: t.color.muted }]}>
+          {update.data.note ||
+            `agent-link on GitHub has moved on (${update.data.installedSha.slice(0, 7) || "unstamped"} → ${update.data.latestSha.slice(0, 7)}). Updating fetches the latest, typechecks it, and reinstalls this panel — Paseo itself is untouched.`}
+        </Text>
+        <View style={{ flexDirection: "row", gap: t.space.sm, alignItems: "center", flexWrap: "wrap" }}>
+          <Button label="Update now" variant="primary" loading={applyUpdate.isPending} onPress={() => applyUpdate.mutate()} />
+          <Text style={t.text.caption}>or in a terminal: agent-link update</Text>
+        </View>
       </Card>
     ) : null;
 
@@ -800,6 +834,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
 
       {scanQuery.data ? (
         <>
+          {updateCard}
           {cliCard}
           {routingCard}
           {providerCard("claude")}
