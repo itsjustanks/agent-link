@@ -102,6 +102,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const callUsage = useRpc(accountUsage);
 
   const [diagnosis, setDiagnosis] = useState<Record<string, string>>({});
+  const [diagnosing, setDiagnosing] = useState<string | null>(null);
   const [openRows, setOpenRows] = useState<Record<string, boolean>>({});
   const [notice, setNotice] = useState<string | null>(null);
   const [addingFor, setAddingFor] = useState<ProviderId | null>(null);
@@ -209,9 +210,10 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const pad = t.compact ? t.space.md : t.space.lg;
   const toggleRow = (key: string) => setOpenRows((previous) => ({ ...previous, [key]: !previous[key] }));
   const runDiagnose = (providerId: string, key: string) => {
-    void callDiagnose({ providerId }).then((result) =>
-      setDiagnosis((previous) => ({ ...previous, [key]: previous[key] ? "" : result.summary })),
-    );
+    setDiagnosing(key);
+    void callDiagnose({ providerId })
+      .then((result) => setDiagnosis((previous) => ({ ...previous, [key]: previous[key] ? "" : result.summary })))
+      .finally(() => setDiagnosing(null));
   };
 
   // ------------------------------------------------------------------ routing
@@ -413,6 +415,12 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const parkButton = (provider: ProviderId, email: string, parked: boolean) => (
     <Button
       label={parked ? "Resume" : "Park 3h"}
+      loading={
+        cooldownMutation.isPending &&
+        cooldownMutation.variables?.provider === provider &&
+        cooldownMutation.variables?.email === email
+      }
+      disabled={cooldownMutation.isPending}
       onPress={() => cooldownMutation.mutate({ provider, email, minutes: parked ? 0 : 180 })}
     />
   );
@@ -445,7 +453,13 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
           <View style={{ gap: t.space.xs }}>
             <Facts items={[{ value: `own provider: ${slot.wiredProviderId}` }]} />
             <View style={{ flexDirection: "row", gap: t.space.sm }}>
-              <Button label="Diagnose provider" variant="ghost" onPress={() => runDiagnose(slot.wiredProviderId!, slot.dir)} />
+              <Button
+                label="Diagnose provider"
+                variant="ghost"
+                loading={diagnosing === slot.dir}
+                disabled={diagnosing !== null}
+                onPress={() => runDiagnose(slot.wiredProviderId!, slot.dir)}
+              />
             </View>
           </View>
         ) : slot.loggedIn ? (
@@ -690,7 +704,13 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                 </Text>
                 <StatusPill status={status} label={label} />
               </View>
-              <Button label="Diagnose" variant="ghost" onPress={() => runDiagnose(provider, provider)} />
+              <Button
+                label="Diagnose"
+                variant="ghost"
+                loading={diagnosing === provider}
+                disabled={diagnosing !== null}
+                onPress={() => runDiagnose(provider, provider)}
+              />
             </View>
             {health ? (
               health.ok ? (
@@ -728,7 +748,15 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
               title={entry.title}
               subtitle={health?.summary}
               meta={<StatusPill status={status} label={label} />}
-              trailing={<Button label="Diagnose" variant="ghost" onPress={() => runDiagnose(entry.id, entry.id)} />}
+              trailing={
+                <Button
+                  label="Diagnose"
+                  variant="ghost"
+                  loading={diagnosing === entry.id}
+                  disabled={diagnosing !== null}
+                  onPress={() => runDiagnose(entry.id, entry.id)}
+                />
+              }
               expanded={diagnosis[entry.id] ? <CodeBlock>{diagnosis[entry.id]}</CodeBlock> : undefined}
             />
           );
@@ -753,7 +781,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
               loading={healthQuery.isFetching}
               onPress={() => void healthQuery.refetch()}
             />
-            <Button label="Refresh" variant="ghost" onPress={refresh} />
+            <Button label="Refresh" variant="ghost" loading={scanQuery.isFetching} onPress={refresh} />
           </>
         }
       />

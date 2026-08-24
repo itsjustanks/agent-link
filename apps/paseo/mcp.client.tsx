@@ -14,7 +14,7 @@ import type { PluginSurfaceProps } from "@getpaseo/plugin";
 import { useRpc } from "@getpaseo/plugin";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import React, { useEffect, useMemo, useState } from "react";
-import { Clipboard, Text, View } from "react-native";
+import { Text, View } from "react-native";
 import { z } from "zod";
 import {
   mcpAdd,
@@ -70,6 +70,7 @@ import {
   StatusPill,
   Tag,
   Toolbar,
+  copyToClipboard,
   useTokens,
   useUi,
   type Status,
@@ -136,20 +137,6 @@ function formatIssue(source: string, issue: JsonIssue): string {
   const line = source.split("\n")[issue.line - 1];
   if (line === undefined) return head;
   return `${head}\n${line}\n${" ".repeat(Math.max(0, issue.column - 1))}^`;
-}
-
-/**
- * No RPC copies arbitrary text, so this goes through the host's clipboard —
- * which a host is free not to have. The caller says so rather than pretending
- * the copy happened; the URL is selectable either way.
- */
-function copyToClipboard(text: string): boolean {
-  try {
-    Clipboard.setString(text);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function loginCommand(account: McpAuthAccount, server: string): string {
@@ -553,7 +540,7 @@ function AuthRows({
                     />
                   ) : undefined
                 ) : (
-                  <Button label="Sign out" variant="danger" onPress={() => onSignOut(account)} />
+                  <ConfirmButton label="Sign out" confirmLabel="Revoke this grant" onConfirm={() => onSignOut(account)} />
                 )
               }
               meta={<StatusPill status={needs ? "attention" : "ok"} label={needs ? "sign-in needed" : "ready"} />}
@@ -963,7 +950,11 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
               />
             }
             trailing={
-              entryHealth ? <StatusPill status={healthStatus(entryHealth.status)} label={healthWord(entryHealth.status)} /> : undefined
+              healthMutation.isPending ? (
+                <StatusPill status="busy" label="checking" />
+              ) : entryHealth ? (
+                <StatusPill status={healthStatus(entryHealth.status)} label={healthWord(entryHealth.status)} />
+              ) : undefined
             }
           />
         );
@@ -1306,6 +1297,8 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
                   ) : (
                     <Button
                       label="Add here"
+                      loading={applyMutation.isPending && (applyMutation.variables?.targets ?? []).includes(dest.id)}
+                      disabled={applyMutation.isPending}
                       onPress={() => applyMutation.mutate({ name: server.name, targets: [dest.id] })}
                     />
                   )

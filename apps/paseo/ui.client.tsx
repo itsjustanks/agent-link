@@ -1,6 +1,6 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 import React, { createContext, useContext, useMemo, useState } from "react";
-import { ActivityIndicator, Image, Pressable, ScrollView, Text, TextInput, View } from "react-native";
+import { ActivityIndicator, Clipboard, Image, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 
 /**
  * The plugin's design system.
@@ -116,6 +116,9 @@ export function tokens(theme: PluginTheme, compact: boolean) {
       successWash: alpha(success, 0.14),
       warningWash: alpha(warning, 0.14),
       disabled: alpha(fg, 0.38),
+      // Placeholder text is load-bearing (often the field's only label), so it
+      // sits above the disabled tint contrast-wise without shouting.
+      placeholder: alpha(fg, 0.5),
     },
     // Compact means narrow, not cramped: type grows a point and padding grows,
     // because a phone is held further from nobody's face than a monitor.
@@ -225,7 +228,7 @@ export function Toolbar({
           <Text style={t.text.display}>{title}</Text>
           {subtitle ? <Text style={t.text.caption}>{subtitle}</Text> : null}
         </View>
-        {actions ? <View style={{ flexDirection: "row", gap: t.space.sm, flexShrink: 0 }}>{actions}</View> : null}
+        {actions ? <View style={{ flexDirection: "row", flexWrap: "wrap", gap: t.space.sm, flexShrink: 1 }}>{actions}</View> : null}
       </View>
       {below}
     </View>
@@ -529,9 +532,13 @@ export function Segmented<T extends string>({
             accessibilityState={{ selected: active, disabled: Boolean(option.disabled) }}
             disabled={option.disabled}
             onPress={() => onChange(option.value)}
+            hitSlop={t.control.hit}
             style={{
               paddingVertical: t.compact ? 8 : 5,
               paddingHorizontal: 12,
+              minHeight: t.control.min,
+              alignItems: "center",
+              justifyContent: "center",
               borderRadius: t.radius.sm - 2,
               backgroundColor: active ? t.color.surface0 : "transparent",
             }}
@@ -581,7 +588,8 @@ export function Field({
         value={value}
         onChangeText={onChangeText}
         placeholder={placeholder}
-        placeholderTextColor={t.color.disabled}
+        placeholderTextColor={t.color.placeholder}
+        accessibilityLabel={label ?? placeholder}
         multiline={multiline}
         autoFocus={autoFocus}
         autoCorrect={false}
@@ -605,11 +613,29 @@ export function Field({
   );
 }
 
-export function CodeBlock({ children, tone }: { children: string; tone?: Status }) {
+/**
+ * No RPC copies arbitrary text, so this goes through the host's clipboard —
+ * which a host is free not to have. The caller says so rather than pretending
+ * the copy happened; the text stays selectable either way.
+ */
+export function copyToClipboard(text: string): boolean {
+  try {
+    Clipboard.setString(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function CodeBlock({ children, tone, copy = true }: { children: string; tone?: Status; copy?: boolean }) {
   const t = useTokens();
+  const [copied, setCopied] = useState(false);
   return (
     <View
       style={{
+        flexDirection: "row",
+        alignItems: "flex-start",
+        gap: t.space.sm,
         backgroundColor: t.color.surface2,
         borderRadius: t.radius.sm,
         borderLeftWidth: tone ? 2 : 0,
@@ -617,9 +643,25 @@ export function CodeBlock({ children, tone }: { children: string; tone?: Status 
         padding: t.space.sm,
       }}
     >
-      <Text selectable style={t.text.mono}>
+      <Text selectable style={[t.text.mono, { flex: 1, minWidth: 0 }]}>
         {children}
       </Text>
+      {copy ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={copied ? "Copied to clipboard" : "Copy to clipboard"}
+          hitSlop={t.control.hit}
+          onPress={() => {
+            if (!copyToClipboard(children)) return;
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1500);
+          }}
+        >
+          <Text style={[t.text.caption, { fontWeight: "600", color: copied ? t.color.success : t.color.accent }]}>
+            {copied ? "Copied" : "Copy"}
+          </Text>
+        </Pressable>
+      ) : null}
     </View>
   );
 }
@@ -823,7 +865,9 @@ export function SplitView({
   if (t.compact) return <View style={{ flex: 1 }}>{showDetail ? detail : list}</View>;
   return (
     <View style={{ flexDirection: "row", gap: t.space.lg, alignItems: "flex-start" }}>
-      <View style={{ width: listWidth, flexShrink: 0 }}>{list}</View>
+      {/* ponytail: fixed cap — a long list must not scroll the detail away;
+          go viewport-relative via useWindowDimensions if 640 ever feels wrong */}
+      <ScrollView style={{ width: listWidth, flexShrink: 0, maxHeight: 640 }}>{list}</ScrollView>
       <View style={{ flex: 1, minWidth: 0 }}>{detail}</View>
     </View>
   );

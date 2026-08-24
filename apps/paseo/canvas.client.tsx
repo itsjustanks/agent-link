@@ -3,7 +3,7 @@ import { usePaseo, useRpc, useWorkspace } from "@getpaseo/plugin";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import React, { useEffect, useMemo, useState } from "react";
 import * as ReactNative from "react-native";
-import { Clipboard, Platform, Text, View } from "react-native";
+import { Clipboard, Platform, ScrollView, Text, View } from "react-native";
 import {
   canvasCopy,
   canvasOpen,
@@ -19,6 +19,7 @@ import {
   Button,
   Card,
   CodeBlock,
+  ConfirmButton,
   Disclosure,
   EmptyState,
   Facts,
@@ -433,6 +434,11 @@ function CanvasView({
           }
         />
       ))}
+      {filtered.length > 200 ? (
+        <Text style={[t.text.caption, { padding: t.space.md }]}>
+          {`Showing 200 of ${filtered.length} — search to narrow`}
+        </Text>
+      ) : null}
     </Card>
   );
 
@@ -455,7 +461,7 @@ function CanvasView({
       <Field label="File name" value={name} onChangeText={setName} hint={`Saved as artifacts/${(name.trim() || "dashboard").replace(/[^a-zA-Z0-9._-]/g, "-")}.html`} />
       <Section title="Workspace">
         {workspaces.isPending ? <Loading label="Reading workspaces…" /> : null}
-        <View style={{ maxHeight: 220 }}>
+        <ScrollView style={{ maxHeight: 220 }}>
           <Card level={2} padded={false}>
             {(workspaces.data ?? []).slice(0, 40).map((workspace, index) => (
               <Row
@@ -467,7 +473,10 @@ function CanvasView({
               />
             ))}
           </Card>
-        </View>
+        </ScrollView>
+        {(workspaces.data?.length ?? 0) > 40 ? (
+          <Text style={t.text.caption}>{`Showing 40 of ${workspaces.data!.length} workspaces`}</Text>
+        ) : null}
       </Section>
       <View style={{ flexDirection: "row", gap: t.space.sm, alignItems: "center" }}>
         <Button
@@ -504,7 +513,7 @@ function CanvasView({
                 { value: ago(current.modified) },
               ]}
             />
-            <Text selectable style={t.text.mono} numberOfLines={1}>
+            <Text selectable style={t.text.mono} numberOfLines={1} ellipsizeMode="middle">
               {current.dir}/{current.name}
             </Text>
           </View>
@@ -529,7 +538,11 @@ function CanvasView({
                 ]}
               />
             ) : null}
-            <Button label="Refresh" variant="ghost" loading={render.isFetching} onPress={() => void render.refetch()} />
+            {/* The live frame reloads itself on mtime, so Refresh only exists
+                for the rasterised view — live's render query is disabled. */}
+            {!live ? (
+              <Button label="Refresh" variant="ghost" loading={render.isFetching} onPress={() => void render.refetch()} />
+            ) : null}
           </View>
         </View>
 
@@ -752,7 +765,11 @@ function CanvasView({
                       ? "Cloudflare takes a few seconds to publish the address. The link appears once it answers."
                       : data?.tunnel.error || `${data?.serving.length ?? 0} file(s) served on this machine.`}
                 </Text>
-                <Button label="Stop all" variant="danger" onPress={() => stopMutation.mutate(undefined)} />
+                <ConfirmButton
+                  label="Stop all"
+                  confirmLabel="Stop every share"
+                  onConfirm={() => stopMutation.mutate(undefined)}
+                />
               </View>
             </Card>
           ) : undefined
@@ -768,15 +785,9 @@ function CanvasView({
       {state.isPending ? <Loading label="Looking for artifacts…" /> : null}
       {data?.error ? <Notice tone="attention">{data.error}</Notice> : null}
 
-      <SplitView
-        list={list}
-        detail={detail}
-        showDetail={Boolean(current) || mode === "create"}
-      />
-
       {t.compact && (current || mode === "create") ? (
         <Button
-          label="Back to all artifacts"
+          label="← All artifacts"
           variant="ghost"
           onPress={() => {
             setSelected(null);
@@ -784,6 +795,12 @@ function CanvasView({
           }}
         />
       ) : null}
+
+      <SplitView
+        list={list}
+        detail={detail}
+        showDetail={Boolean(current) || mode === "create"}
+      />
     </Screen>
   );
 }
