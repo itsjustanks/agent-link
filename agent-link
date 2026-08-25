@@ -304,6 +304,290 @@ sys.exit(1)
 PY2
 }
 
+# "Nearing" is a soft tier between healthy and parked: routing drains NEW work
+# off the account while anything already running rides it to the actual limit.
+# Written by a Claude Code Notification hook (see `agent-link hooks`) the
+# moment the CLI warns about the approaching limit — which is as early as the
+# machine can know. A nearing account still serves when nothing better exists,
+# so a false warning costs load-balancing, never availability.
+NEARING_TTL_MIN=90
+slot_nearing() { # $1 provider, $2 key (email or "primary") — 0 if marked and fresh
+  local f m
+  f="$(pools_dir)/nearing-$1-$2"
+  [ -f "$f" ] || return 1
+  m="$(cat "$f" 2>/dev/null || echo 0)"
+  if [ $(( $(date +%s) - m )) -gt $(( NEARING_TTL_MIN * 60 )) ]; then
+    rm -f "$f"; return 1
+  fi
+  return 0
+}
+
+# Called by a Claude Code StopFailure hook the moment a turn dies on a
+# rate/billing limit: park the calling session's own account right away, using
+# Claude's parsed reset time when the transcript has one. Without this the park
+# happens lazily at the next pick; with it, even a launch racing the failure
+# avoids the account.
+cmd_refused() { # $1 provider
+  prov_valid "${1:-}" || { echo "usage: agent-link refused <claude|codex>" >&2; return 1; }
+  local p="$1" d key e until
+  d="$(eval "printf '%s' \"\${$(prov_env_var "$p"):-}\"")"
+  if [ -z "$d" ]; then key=primary; d="$(primary_dir "$p")"
+  else
+    key=""
+    for e in $(slot_list "$p"); do
+      [ "$(slot_dir "$p" "$e")" = "$d" ] && key="$e"
+    done
+    [ -n "$key" ] || key="$(basename "$d")"
+  fi
+  until="$(recently_refused "$p" "$d" 2>/dev/null || true)"
+  autopark "$p" "$key" "${until:-}"
+  rm -f "$(pools_dir)/nearing-$p-$key"
+  echo "$p · $key: parked (limit hit)"
+}
+
+cmd_nearing() { # $1 provider [$2 email|primary|clear ...] — mark from a hook or by hand
+  prov_valid "${1:-}" || { echo "usage: agent-link nearing <claude|codex> [email|primary] [clear]" >&2; return 1; }
+  local p="$1" key="${2:-}" d e
+  # No account named: resolve the calling session's own slot from its env var,
+  # which Claude Code passes through to hook commands.
+  if [ -z "$key" ] || [ "$key" = clear ]; then
+    d="$(eval "printf '%s' \"\${$(prov_env_var "$p"):-}\"")"
+    if [ -z "$d" ]; then key2=primary
+    else
+      key2=""
+      for e in $(slot_list "$p"); do
+        [ "$(slot_dir "$p" "$e")" = "$d" ] && key2="$e"
+      done
+      [ -n "$key2" ] || key2="$(basename "$d")"
+    fi
+    if [ "$key" = clear ]; then key="$key2 clear"; else key="$key2"; fi
+  fi
+  set -- $key
+  mkdir -p "$(pools_dir)"
+  if [ "${2:-}" = clear ]; then
+    rm -f "$(pools_dir)/nearing-$p-$1"
+    echo "$p · $1: nearing mark cleared"
+  else
+    date +%s > "$(pools_dir)/nearing-$p-$1"
+    echo "$(date '+%Y-%m-%d %H:%M')  nearing mark on $p/$1 (new work drains elsewhere)" >> "$STATE/autopark.log"
+    echo "$p · $1: marked nearing — new launches prefer other accounts for ${NEARING_TTL_MIN}m"
+  fi
+}
+
+# The statusline wrapper: Claude Code feeds every render a JSON blob that (on
+# Pro/Max) includes rate_limits.{five_hour,seven_day}.used_percentage and
+# resets_at — the only signal that exists BEFORE the wall. The wrapper tees it:
+# >=85%% on either window marks the account nearing (new work drains off it),
+# >=99%% parks it until Claude's own resets_at, and dropping back under 75%%
+# clears the mark (hysteresis so it never flaps). Then it chains to whatever
+# statusline the user already had, so nothing visible changes.
+write_statusline_helper() {
+  mkdir -p "$SHIM_BIN"
+  cat > "$SHIM_BIN/claude-quota-statusline" <<'EOF'
+#!/bin/bash
+# agent-link quota statusline — managed by `agent-link hooks`.
+# Reads the statusline JSON, updates the router's nearing/parked state for the
+# account this session runs on, then chains to the original statusline command
+# (saved next to this session's settings.json as agent-link-statusline.orig).
+root="${AGENT_LINK_HOME:-${AGENT_AUTH_HOME:-$HOME/.agent-auth}}"
+[ -d "$root/accounts" ] || root="$HOME/.agent-link"
+input="$(cat)"
+dir="${CLAUDE_CONFIG_DIR:-}"
+key=primary
+if [ -n "$dir" ]; then
+  key="$(basename "$dir")"
+else
+  dir="$HOME/.claude"
+fi
+pools="$root/state/pools"
+mkdir -p "$pools" 2>/dev/null
+# Debounce: state writes at most once a minute, so a busy session costs nothing.
+stamp="$pools/.quota-check-claude-$key"
+now="$(date +%s)"
+last="$(cat "$stamp" 2>/dev/null || echo 0)"
+if [ $(( now - last )) -ge 60 ]; then
+  echo "$now" > "$stamp"
+  # The heredoc IS python's stdin, so the JSON travels via the environment —
+  # piping it as well would be silently swallowed by the heredoc.
+  AL_JSON="$input" python3 - "$pools" "$key" "$now" <<'PY2' 2>/dev/null
+import json, os, sys
+pools, key, now = sys.argv[1], sys.argv[2], int(sys.argv[3])
+try:
+    data = json.loads(os.environ.get("AL_JSON", ""))
+except Exception:
+    sys.exit(0)
+rl = data.get("rate_limits") or {}
+worst, resets = 0.0, None
+for w in ("five_hour", "seven_day"):
+    win = rl.get(w) or {}
+    u = win.get("used_percentage")
+    if u is None:
+        continue
+    if u > worst:
+        worst, resets = float(u), win.get("resets_at")
+nearing = os.path.join(pools, f"nearing-claude-{key}")
+cooldown = os.path.join(pools, f"cooldown-claude-{key}")
+log = os.path.join(os.path.dirname(pools), "autopark.log")
+def note(msg):
+    try:
+        from time import strftime, localtime
+        open(log, "a").write(strftime("%Y-%m-%d %H:%M", localtime(now)) + "  " + msg + "\n")
+    except OSError:
+        pass
+if worst >= 99 and resets:
+    until = int(resets)
+    prev = 0
+    try: prev = int(open(cooldown).read().strip())
+    except Exception: pass
+    if until > now and prev < until:
+        open(cooldown, "w").write(str(until))
+        open(os.path.join(pools, f"reason-claude-{key}"), "w").write("auto: quota exhausted (statusline)")
+        note(f"parked claude/{key} at {worst:.0f}% until its reset (statusline)")
+elif worst >= 85:
+    if not os.path.exists(nearing):
+        open(nearing, "w").write(str(now))
+        note(f"nearing mark on claude/{key} at {worst:.0f}% (statusline)")
+    else:
+        open(nearing, "w").write(str(now))
+elif worst and worst < 75 and os.path.exists(nearing):
+    os.remove(nearing)
+    note(f"cleared nearing mark on claude/{key} — back to {worst:.0f}%")
+PY2
+fi
+orig="$dir/agent-link-statusline.orig"
+if [ -s "$orig" ]; then
+  printf '%s' "$input" | bash "$orig"
+else
+  # No prior statusline: render a useful default from the same JSON.
+  AL_JSON="$input" python3 - <<'PY3' 2>/dev/null
+import json, os, sys
+try: d = json.loads(os.environ.get("AL_JSON", ""))
+except Exception: sys.exit(0)
+model = (d.get("model") or {}).get("display_name") or ""
+rl = d.get("rate_limits") or {}
+parts = [model] if model else []
+for label, w in (("5h", "five_hour"), ("7d", "seven_day")):
+    u = (rl.get(w) or {}).get("used_percentage")
+    if u is not None:
+        parts.append(f"{label} {u:.0f}%")
+print(" · ".join(parts))
+PY3
+fi
+EOF
+  chmod +x "$SHIM_BIN/claude-quota-statusline"
+}
+
+# Wire the two signals Claude Code actually offers into the router, per config
+# dir: the statusline JSON (the only before-the-wall signal) and a StopFailure
+# hook on rate/billing errors (the instant hard-park). Slots only by default —
+# the primary is opt-in, because "your primary is never modified" is a promise.
+cmd_hooks() { # [install|remove|status] [--primary]
+  local action="${1:-status}" with_primary="" e dirs d self_bin
+  case "${2:-}" in --primary) with_primary=1 ;; esac
+  case "${1:-}" in --primary) action=status; with_primary=1 ;; esac
+  self_bin="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+  dirs=""
+  for e in $(slot_list claude); do dirs="$dirs $(slot_dir claude "$e")"; done
+  [ -n "$with_primary" ] && dirs="$dirs $HOME/.claude"
+  case "$action" in
+    install)
+      write_statusline_helper
+      for d in $dirs; do
+        hooks_wire_dir "$d" "$self_bin" || return 1
+      done
+      echo "hooks installed. New Claude sessions mark accounts nearing at 85%, park at 99% and on hard refusals."
+      [ -z "$with_primary" ] && echo "(slots only — add the primary with: agent-link hooks install --primary)"
+      ;;
+    remove)
+      for d in $dirs; do hooks_unwire_dir "$d"; done
+      echo "hooks removed"
+      ;;
+    *)
+      for d in $dirs; do
+        if python3 -c "
+import json,sys
+try: s=json.load(open('$d/settings.json'))
+except Exception: sys.exit(1)
+sl=(s.get('statusLine') or {}).get('command','')
+hk=json.dumps(s.get('hooks') or {})
+sys.exit(0 if 'claude-quota-statusline' in sl and 'agent-link refused' in hk else 1)
+" 2>/dev/null; then echo "  [x] $d"; else echo "  [ ] $d"; fi
+      done
+      ;;
+  esac
+}
+
+# Merge our statusline + StopFailure hook into one settings.json. Missing file:
+# create it. Unreadable file: refuse and write NOTHING — a running session can
+# leave settings momentarily unparseable, and a blind write would destroy it.
+hooks_wire_dir() { # $1 config dir, $2 absolute agent-link path
+  mkdir -p "$1"
+  python3 - "$1" "$2" "$SHIM_BIN" <<'PY2'
+import json, os, sys
+d, self_bin, shim = sys.argv[1], sys.argv[2], sys.argv[3]
+path = os.path.join(d, "settings.json")
+if os.path.exists(path):
+    try:
+        settings = json.load(open(path))
+    except Exception:
+        print(f"refusing to touch unreadable {path}", file=sys.stderr)
+        sys.exit(1)
+else:
+    settings = {}
+wrapper = os.path.join(shim, "claude-quota-statusline")
+sl = settings.get("statusLine") or {}
+orig_path = os.path.join(d, "agent-link-statusline.orig")
+if sl.get("command") and wrapper not in sl["command"]:
+    with open(orig_path, "w") as f:
+        f.write(sl["command"] + "\n")
+settings["statusLine"] = {"type": "command", "command": wrapper}
+hooks = settings.setdefault("hooks", {})
+entries = hooks.setdefault("StopFailure", [])
+marker = f"{self_bin} refused claude"
+if not any(marker in json.dumps(e) for e in entries):
+    entries.append({
+        "matcher": "rate_limit|billing_error",
+        "hooks": [{"type": "command", "command": marker}],
+    })
+tmp = path + ".tmp"
+with open(tmp, "w") as f:
+    json.dump(settings, f, indent=2)
+os.replace(tmp, path)
+PY2
+}
+
+hooks_unwire_dir() { # $1 config dir
+  python3 - "$1" <<'PY2'
+import json, os, sys
+d = sys.argv[1]
+path = os.path.join(d, "settings.json")
+try:
+    settings = json.load(open(path))
+except Exception:
+    sys.exit(0)
+orig_path = os.path.join(d, "agent-link-statusline.orig")
+sl = settings.get("statusLine") or {}
+if "claude-quota-statusline" in sl.get("command", ""):
+    orig = ""
+    try: orig = open(orig_path).read().strip()
+    except OSError: pass
+    if orig:
+        settings["statusLine"] = {"type": "command", "command": orig}
+        os.remove(orig_path)
+    else:
+        settings.pop("statusLine", None)
+hooks = settings.get("hooks") or {}
+if "StopFailure" in hooks:
+    hooks["StopFailure"] = [e for e in hooks["StopFailure"] if "agent-link" not in json.dumps(e)]
+    if not hooks["StopFailure"]:
+        del hooks["StopFailure"]
+tmp = path + ".tmp"
+with open(tmp, "w") as f:
+    json.dump(settings, f, indent=2)
+os.replace(tmp, path)
+PY2
+}
+
 # Park an account that just refused, until the reset time when one was parsed.
 autopark() { # $1 provider, $2 key (email or "primary"), $3 until-epoch (optional)
   mkdir -p "$(pools_dir)"
@@ -327,24 +611,32 @@ slot_available() { # $1 provider, $2 email
 
 # Print the slot to use next ("primary" or an email), and stamp it as used.
 pick_slot() { # $1 provider
-  local best="" best_ts="" e ts pemail covered
+  local best="" best_ts="" e ts pemail covered pass
   mkdir -p "$(pools_dir)"
   # The primary counts as a candidate unless a slot already holds that account.
   pemail="$(primary_email "$1")"
+  covered=""
   if [ -n "$pemail" ]; then
-    covered=""
     for e in $(slot_list "$1"); do
       [ "$(prov_email "$1" "$(slot_dir "$1" "$e")")" = "$pemail" ] && covered=1
     done
-    if [ -z "$covered" ] && slot_available_primary "$1"; then
-      ts="$(cat "$(pools_dir)/last-$1-primary" 2>/dev/null || echo 0)"
-      best="primary"; best_ts="$ts"
-    fi
   fi
-  for e in $(slot_list "$1"); do
-    slot_available "$1" "$e" || continue
-    ts="$(cat "$(pools_dir)/last-$1-$e" 2>/dev/null || echo 0)"
-    if [ -z "$best" ] || [ "$ts" -lt "$best_ts" ]; then best="$e"; best_ts="$ts"; fi
+  # Two passes: accounts flagged as nearing their limit are only considered
+  # when nothing unflagged is available — drain new work off them early.
+  for pass in fresh nearing; do
+    if [ -n "$pemail" ] && [ -z "$covered" ] && slot_available_primary "$1"; then
+      if [ "$pass" = nearing ] || ! slot_nearing "$1" primary; then
+        ts="$(cat "$(pools_dir)/last-$1-primary" 2>/dev/null || echo 0)"
+        best="primary"; best_ts="$ts"
+      fi
+    fi
+    for e in $(slot_list "$1"); do
+      slot_available "$1" "$e" || continue
+      [ "$pass" = fresh ] && slot_nearing "$1" "$e" && continue
+      ts="$(cat "$(pools_dir)/last-$1-$e" 2>/dev/null || echo 0)"
+      if [ -z "$best" ] || [ "$ts" -lt "$best_ts" ]; then best="$e"; best_ts="$ts"; fi
+    done
+    [ -n "$best" ] && break
   done
   # Everyone parked: hand out the account whose bench ends soonest instead of
   # silently dumping every launch on the primary (which may itself be parked).
@@ -858,24 +1150,31 @@ cmd_resume_target() { # $1 provider, $2 session-id
   if [ "$owner" = primary ]; then slot_available_primary "$p" && healthy=1
   else slot_available "$p" "$owner" && healthy=1; fi
   if [ -n "$healthy" ]; then echo "$([ "$owner" = primary ] && echo primary || echo "$owner_dir")"; return 0; fi
-  # The owner is benched. LRU among the healthy others; the primary counts
-  # unless a slot already holds that account (same rule as pick_slot).
+  # The owner is benched. LRU among the healthy others, nearing accounts last;
+  # the primary counts unless a slot already holds that account (pick_slot's rule).
   mkdir -p "$(pools_dir)"
   pemail="$(primary_email "$p")"
+  covered=""
   if [ -n "$pemail" ] && [ "$owner" != primary ]; then
-    covered=""
     for e in $(slot_list "$p"); do
       [ "$(prov_email "$p" "$(slot_dir "$p" "$e")")" = "$pemail" ] && covered=1
     done
-    if [ -z "$covered" ] && slot_available_primary "$p"; then
-      best=primary; best_ts="$(cat "$(pools_dir)/last-$p-primary" 2>/dev/null || echo 0)"
-    fi
   fi
-  for e in $(slot_list "$p"); do
-    [ "$e" = "$owner" ] && continue
-    slot_available "$p" "$e" || continue
-    ts="$(cat "$(pools_dir)/last-$p-$e" 2>/dev/null || echo 0)"
-    if [ -z "$best" ] || [ "$ts" -lt "$best_ts" ]; then best="$e"; best_ts="$ts"; fi
+  local pass
+  for pass in fresh nearing; do
+    if [ -n "$pemail" ] && [ "$owner" != primary ] && [ -z "$covered" ] && slot_available_primary "$p"; then
+      if [ "$pass" = nearing ] || ! slot_nearing "$p" primary; then
+        best=primary; best_ts="$(cat "$(pools_dir)/last-$p-primary" 2>/dev/null || echo 0)"
+      fi
+    fi
+    for e in $(slot_list "$p"); do
+      [ "$e" = "$owner" ] && continue
+      slot_available "$p" "$e" || continue
+      [ "$pass" = fresh ] && slot_nearing "$p" "$e" && continue
+      ts="$(cat "$(pools_dir)/last-$p-$e" 2>/dev/null || echo 0)"
+      if [ -z "$best" ] || [ "$ts" -lt "$best_ts" ]; then best="$e"; best_ts="$ts"; fi
+    done
+    [ -n "$best" ] && break
   done
   if [ -z "$best" ]; then
     # Nowhere healthier to go — stay with the owner, where the transcript is.
@@ -1385,6 +1684,8 @@ cmd_pools() { # show what auto-routing sees
         state="not logged in"
       elif [ "$until" -gt "$now" ]; then
         state="cooling down $(( (until - now + 59) / 60 ))m"
+      elif slot_nearing "$p" "$e"; then
+        state="nearing limit"
       else
         state="available"
       fi
@@ -1736,6 +2037,8 @@ usage:
   agent-link auto                  write auto-routing launchers (one provider, many accounts)
   agent-link pools                 show what auto-routing sees (available / cooling down)
   agent-link cooldown <prov> <email> [min|clear]   park an exhausted account
+  agent-link nearing <prov> [email|primary] [clear]  soft-flag an account nearing its limit
+  agent-link hooks [install|remove|status] [--primary]  wire Claude Code itself to report limits
   agent-link handoff <prov> <session-id> <email>   move a chat to another account
   agent-link env <prov> <email>    print an eval-able export for one slot
   agent-link run <prov> <email> [cmd...]   run a command under a slot's account
@@ -1767,6 +2070,9 @@ main() {
     pick)    shift; cmd_pick "$@" ;;
     handoff) shift; cmd_handoff "$@" ;;
     resume-target) shift; cmd_resume_target "$@" ;;
+    nearing) shift; cmd_nearing "$@" ;;
+    refused) shift; cmd_refused "$@" ;;
+    hooks)   shift; cmd_hooks "$@" ;;
     pools)   cmd_pools ;;
     whoami)  shift; cmd_whoami "$@" ;;
     plugin)  shift; cmd_plugin "$@" ;;

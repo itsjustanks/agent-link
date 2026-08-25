@@ -158,6 +158,20 @@ Be clear about what is and is not possible:
 - **A running agent cannot be switched.** Its account is fixed when the process starts, and the conversation lives inside that account's store. Anything claiming to hot-swap an account mid-turn is either restarting the process or lying.
 - **Recovery is a move, not a switch** — and through the auto launcher it is automatic: resume the chat (`claude --resume <id>`, or restart the agent in your editor) and the launcher parks the refused account, copies the conversation to the healthiest other one, and continues there. `agent-link resume-target claude <session-id>` shows where a resume would land without running anything.
 
+### Before the wall: let Claude Code itself report its quota
+
+```sh
+agent-link hooks install             # account slots
+agent-link hooks install --primary   # include your primary login too (opt-in)
+```
+
+This wires the two signals Claude Code actually emits, per account:
+
+- **The statusline JSON** (Pro/Max) carries live 5-hour and weekly `used_percentage` plus the reset time. A tiny wrapper tees it on every render: at **85%** the account is flagged *nearing* — new launches and resume targets drain to other accounts while anything already running rides on; at **99%** it is parked until Claude's own reported reset. Your existing statusline keeps rendering unchanged (and if you had none, you get one showing the percentages).
+- **A `StopFailure` hook** on `rate_limit`/`billing_error` parks the account the instant a turn actually dies on a limit — no waiting for the next launch to notice.
+
+So the full lifecycle is hands-off: drain at 85% → park at 99% or on the refusal → dead chats continue on the next `--resume` → the park expires at the real reset. `agent-link pools` shows the *nearing limit* tier; `agent-link hooks remove` undoes everything.
+
 To sweep up in bulk, or move a chat somewhere specific by hand:
 
 ```sh
