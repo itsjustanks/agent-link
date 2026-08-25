@@ -1618,6 +1618,17 @@ PY2
 # only when Paseo is actually present — the CLI never depends on it.
 REPO_URL="https://github.com/itsjustanks/agent-link"
 RAW_URL="https://raw.githubusercontent.com/itsjustanks/agent-link/main/agent-link"
+RELEASES_URL="https://api.github.com/repos/itsjustanks/agent-link/releases/latest"
+
+# Updates follow RELEASES, not main: a release is a version someone chose to
+# announce, main is whatever landed last. Falls back to main when the API is
+# unreachable, so an update is never impossible.
+latest_release_tag() {
+  curl -fsSL -m 8 "$RELEASES_URL" 2>/dev/null |
+    python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("tag_name") or "")
+except Exception: pass' 2>/dev/null
+}
 
 # ---------------------------------------------------------------- apps
 #
@@ -1636,7 +1647,12 @@ apps_dir() { # find the apps/ directory, fetching or refreshing the repo
   # The managed copy must be brought up to date, or an install would keep
   # reinstalling whatever was published the first time the CLI ever ran.
   if [ -d "$ROOT/src/.git" ]; then
-    git -C "$ROOT/src" fetch -q --depth 1 origin HEAD 2>/dev/null &&
+    # The panel must match the CLI, so the managed clone follows the same
+    # release tag the updater installs — main only when no release resolves.
+    local tag ref
+    tag="$(latest_release_tag)"
+    ref="${tag:+refs/tags/$tag}"; ref="${ref:-HEAD}"
+    git -C "$ROOT/src" fetch -q --depth 1 origin "$ref" 2>/dev/null &&
       git -C "$ROOT/src" reset -q --hard FETCH_HEAD 2>/dev/null ||
       echo "could not refresh $ROOT/src — installing the copy already there" >&2
     [ -d "$ROOT/src/apps" ] && { echo "$ROOT/src/apps"; return 0; }
@@ -1658,8 +1674,14 @@ cmd_update() {
   if [ -d "$(dirname "$self")/.git" ] || [ -d "$(dirname "$self")/../.git" ]; then
     echo "  ${C_DIM}$self is a git checkout — pull it yourself.${C_OFF}"
   else
-    target="$RAW_URL"
-    printf '  updating %s… ' "$self"
+    local tag; tag="$(latest_release_tag)"
+    if [ -n "$tag" ]; then
+      target="https://raw.githubusercontent.com/itsjustanks/agent-link/$tag/agent-link"
+      printf '  updating %s to %s… ' "$self" "$tag"
+    else
+      target="$RAW_URL"
+      printf '  updating %s (no release info — using main)… ' "$self"
+    fi
     if curl -fsSL "$target" -o "$self.new" 2>/dev/null && [ -s "$self.new" ]; then
       chmod +x "$self.new"; mv "$self.new" "$self"
       echo "${C_GREEN}done${C_OFF} (now $("$self" --version 2>/dev/null || echo "?"))"

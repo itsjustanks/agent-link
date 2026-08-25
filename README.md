@@ -53,7 +53,7 @@ agent-link claude                       # Claude Code on the next account in rot
 
 `agent-link status` shows every account: signed in, in rotation, parked, out of credit, or the wrong account signed into a slot.
 
-**Updating** is one command — it replaces the CLI, refreshes the app sources, and reinstalls the apps you have, so the CLI and its UI never drift apart:
+**Updating** is one command — it installs the [latest release](https://github.com/itsjustanks/agent-link/releases) (CLI and app sources from the same tag) and reinstalls the apps you have, so the CLI and its UI never drift apart:
 
 ```sh
 agent-link update

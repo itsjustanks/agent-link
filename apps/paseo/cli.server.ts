@@ -63,7 +63,10 @@ export async function handleCliStatus(): Promise<CliStatus> {
 
 // ------------------------------------------------------------ plugin updates
 
-const LATEST_SHA_URL = "https://api.github.com/repos/itsjustanks/agent-link/commits/main";
+// Updates follow RELEASES: compare the installed build against the latest
+// release tag's commit, falling back to main only when no release resolves.
+const LATEST_RELEASE_URL = "https://api.github.com/repos/itsjustanks/agent-link/releases/latest";
+const COMMIT_SHA_URL = (ref: string) => `https://api.github.com/repos/itsjustanks/agent-link/commits/${encodeURIComponent(ref)}`;
 
 // The plugin cannot ask Paseo where it is installed, so it looks in the places
 // the daemon actually uses. ponytail: fixed candidate list — extend it if a
@@ -94,8 +97,18 @@ export async function handleCliUpdateCheck(): Promise<{
   const installedSha = buildStamp();
   let latestSha = "";
   try {
+    let ref = "main";
+    try {
+      const release = await fetch(LATEST_RELEASE_URL, { signal: AbortSignal.timeout(8_000) });
+      if (release.ok) {
+        const tag = ((await release.json()) as { tag_name?: string }).tag_name;
+        if (typeof tag === "string" && tag) ref = tag;
+      }
+    } catch {
+      // No release info — main is still an honest comparison point.
+    }
     // This media type answers with the bare sha, nothing to parse.
-    const response = await fetch(LATEST_SHA_URL, {
+    const response = await fetch(COMMIT_SHA_URL(ref), {
       headers: { accept: "application/vnd.github.sha" },
       signal: AbortSignal.timeout(8_000),
     });
