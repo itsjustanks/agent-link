@@ -1453,7 +1453,10 @@ const SYNC_SETTINGS_KEYS = ["outputStyle", "includeCoAuthoredBy", "env", "permis
 // Seeded into ~/.claude/output-styles once (never overwritten), then synced to
 // every account like any other style. Select it with settings.json
 // "outputStyle": "concise" — sync carries that setting to all accounts too.
-const CONCISE_STYLE = `---
+// Earlier versions of the seeded style, byte-exact. A seed that still
+// matches one was never touched by the user, so it is safe to upgrade;
+// anything else is the user's file and stays theirs.
+const CONCISE_STYLE_PREVIOUS: string[] = [`---
 name: concise
 description: Plain English, short answers, no fluff
 ---
@@ -1470,6 +1473,27 @@ Write like a good engineer answering a busy colleague:
 - Keep the precise parts precise: exact file paths with line numbers, exact commands, exact error text. Never paraphrase these.
 - When you finish a task: one short line on what changed, and state plainly what was verified and what was not.
 - If you hit a usage-limit error, say so in one line and stop; the account router gives the next launch a fresh account.
+`];
+
+const CONCISE_STYLE = `---
+name: concise
+description: Plain English, short answers, no fluff
+---
+
+# Output rules
+
+Write like a good engineer answering a busy colleague:
+
+- Lead with the answer or outcome. Explanation after, only if it changes what the reader does next.
+- Plain English, short sentences, short paragraphs. Define a technical term the first time you use it.
+- No filler: never restate the question, never announce what you are about to do, never pad with "Certainly", "Great question", or a summary of your own message.
+- Match length to the question. One-line question, one-line answer. Only go long when asked, or when skipping detail would mislead.
+- No headers, bullets, or tables unless they genuinely organise the content or the user asked for them.
+- Keep the precise parts precise: exact file paths with line numbers, exact commands, exact error text. Never paraphrase these.
+- When you finish a task: one short line on what changed, and state plainly what was verified and what was not.
+- If you hit a usage-limit error, say so in one line and stop; the account router gives the next launch a fresh account, and a resumed conversation continues on a healthy one.
+- If you were resumed after a usage-limit interruption, continue exactly where you left off; never redo completed work.
+- If you orchestrate Paseo subagents and one stops with a usage-limit error, tell it to continue with send_agent_prompt — its relaunch gets a fresh account automatically.
 `;
 
 const SYNC_PROJECT_FIELDS = [
@@ -1608,7 +1632,11 @@ export async function handleMcpSync(): Promise<{ ok: boolean; log: string }> {
   try {
     mkdirSync(primaryStyles, { recursive: true });
     const seed = join(primaryStyles, "concise.md");
-    if (!existsSync(seed)) writeFileSync(seed, CONCISE_STYLE);
+    if (!existsSync(seed)) {
+      writeFileSync(seed, CONCISE_STYLE);
+    } else if (CONCISE_STYLE_PREVIOUS.includes(readFileSync(seed, "utf8"))) {
+      writeFileSync(seed, CONCISE_STYLE);
+    }
   } catch {
     // A read-only home is unusual but not a reason to fail the sync.
   }

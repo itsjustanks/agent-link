@@ -80,12 +80,13 @@ function record(event: LimitEvent): void {
   saveState(state);
 }
 
-function snapshotOf(update: unknown): { id?: string; status?: string; provider?: string; workspaceId?: string | null; title?: string | null } {
+function snapshotOf(update: unknown): { id?: string; status?: string; attentionReason?: string | null; provider?: string; workspaceId?: string | null; title?: string | null } {
   const u = update as Record<string, unknown>;
   const snap = (u?.agent ?? u) as Record<string, unknown>;
   return {
     id: typeof snap?.id === "string" ? snap.id : undefined,
     status: typeof snap?.status === "string" ? snap.status : undefined,
+    attentionReason: typeof snap?.attentionReason === "string" ? snap.attentionReason : null,
     provider: typeof snap?.provider === "string" ? snap.provider : "",
     workspaceId: typeof snap?.workspaceId === "string" ? snap.workspaceId : null,
     title: typeof snap?.title === "string" ? snap.title : null,
@@ -113,7 +114,10 @@ async function diedOnLimit(paseo: PaseoLike, agentId: string): Promise<string | 
 
 async function handleErroredAgent(paseo: PaseoLike, update: unknown): Promise<void> {
   const snap = snapshotOf(update);
-  if (!snap.id || snap.status !== "error") return;
+  // An ACP agent whose turn failed can settle as idle-with-attention rather
+  // than "error" — both shapes mean the same thing here.
+  const errored = snap.status === "error" || snap.attentionReason === "error";
+  if (!snap.id || !errored) return;
   if (!OUR_PROVIDERS.test(snap.provider ?? "")) return;
   const now = Date.now();
   const seen = lastSeen.get(snap.id) ?? 0;
