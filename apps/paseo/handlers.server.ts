@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { basename, delimiter, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import type { Destination, Slot } from "./contracts.shared";
+import { onStart } from "./lifecycle.shared";
 import type { Dialect } from "./mcpjson.shared";
 
 const HOME = homedir();
@@ -226,6 +227,10 @@ export function searchPath(): string[] {
   }
   return cachedSearchPath;
 }
+
+// A slow shell rc can take seconds, so fill the cache once the plugin is up
+// rather than leaving the first RPC that needs a PATH lookup to stall on it.
+onStart(searchPath);
 
 function agentLinkInstalled(): boolean {
   return searchPath().some((dir) => existsSync(join(dir, "agent-link")) || existsSync(join(dir, "agent-auth")));

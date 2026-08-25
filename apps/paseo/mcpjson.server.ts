@@ -4,6 +4,7 @@ import { chmodSync, existsSync, mkdirSync, renameSync, writeFileSync } from "nod
 import { homedir, hostname } from "node:os";
 import { basename, join, resolve, sep } from "node:path";
 import type { Destination } from "./contracts.shared";
+import { onShutdown } from "./lifecycle.shared";
 import {
   DIALECTS,
   backupFile,
@@ -1243,10 +1244,12 @@ export async function handleMcpLogout({
 }
 
 /** A login child outlives its RPC on purpose, so nothing else will reap it. */
-export function mcpLoginShutdown(): void {
+function mcpLoginShutdown(): void {
   for (const live of logins.values()) {
     clearTimeout(live.timer);
     live.child.kill("SIGTERM");
   }
   logins.clear();
 }
+
+onShutdown(mcpLoginShutdown);

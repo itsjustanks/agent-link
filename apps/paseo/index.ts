@@ -39,8 +39,8 @@ import {
   handleSetCooldown,
   handleWireAuto,
   handleWireProvider,
-  searchPath,
 } from "./handlers.server";
+import { runShutdown, runStart } from "./lifecycle.shared";
 import { McpSurface } from "./mcp.client";
 import {
   mcpExport,
@@ -65,7 +65,6 @@ import {
   handleMcpLogout,
   handleMcpRawGet,
   handleMcpRawPut,
-  mcpLoginShutdown,
 } from "./mcpjson.server";
 
 // Every contract defined in a *.shared.ts must be registered here. One that is
@@ -128,12 +127,10 @@ export default function contribute(plugin: PluginContext) {
       openSurface("mcp");
     },
   });
-  // Warm the login-shell PATH cache now (a slow shell rc can take seconds), off
-  // the startup path, so the first RPC that needs it does not stall on it.
-  setTimeout(searchPath, 0);
-  return () => {
-    // A login child is deliberately kept alive across its RPC, so nothing else
-    // would ever reap it.
-    mcpLoginShutdown();
-  };
+  // Server modules register their own start/shutdown work at import time, so
+  // this entry never names a *.server binding outside a `plugin.handle(...)`
+  // statement — see lifecycle.shared.ts for why that rule exists. Both calls are
+  // no-ops in the client bundle.
+  runStart();
+  return runShutdown;
 }
