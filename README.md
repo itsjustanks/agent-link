@@ -148,7 +148,7 @@ Each account answers one token on that model; `--park` sidelines the ones that r
 Two guarantees that make this safe:
 
 - **A running process is never re-routed.** Routing happens at launch; nothing switches under a live session.
-- **Resumes stay on their own account.** A conversation only exists inside the account that created it, so `--resume <id>` is pinned to whichever account holds that session — including your **primary**, which owns every conversation started before you added accounts. (Without this you get *"No conversation found with session ID"*.)
+- **Resumes follow their conversation.** A conversation only exists inside the account that created it, so `--resume <id>` runs on whichever account holds that session — including your **primary**, which owns every conversation started before you added accounts. (Without this you get *"No conversation found with session ID"*.) And when that account is parked or just got refused for a limit, the launcher **moves the conversation to a healthy account first** and resumes there.
 
 ### When an account hits its limit mid-conversation
 
@@ -156,17 +156,14 @@ Be clear about what is and is not possible:
 
 - **New agents** are unaffected — the next launch goes to a healthy account automatically.
 - **A running agent cannot be switched.** Its account is fixed when the process starts, and the conversation lives inside that account's store. Anything claiming to hot-swap an account mid-turn is either restarting the process or lying.
-- **Recovery is a move, not a switch:** park the exhausted account, copy the conversation to a healthy one, resume there.
+- **Recovery is a move, not a switch** — and through the auto launcher it is automatic: resume the chat (`claude --resume <id>`, or restart the agent in your editor) and the launcher parks the refused account, copies the conversation to the healthiest other one, and continues there. `agent-link resume-target claude <session-id>` shows where a resume would land without running anything.
+
+To sweep up in bulk, or move a chat somewhere specific by hand:
 
 ```sh
 agent-link rescue              # which conversations died on a limit, and where
 agent-link rescue 6 --go       # park those accounts and move the chats to a healthy one
-```
-
-`--go` prints the exact resume command for each. Or do one by hand:
-
-```sh
-agent-link handoff claude <session-id> you@other.com
+agent-link handoff claude <session-id> you@other.com   # "primary" works too
 agent-link run claude you@other.com claude --resume <session-id>
 ```
 

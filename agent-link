@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.4.0"
+VERSION="0.5.0"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -683,27 +683,35 @@ for aa_a in "\$@"; do
   esac
   aa_prev="\$aa_a"
 done
-aa_pinned=""
-aa_pin_primary=""
+aa_pin=""
 if [ -n "\$aa_sid" ]; then
-  # The primary owns sessions too, so it must be searched as well — otherwise a
-  # conversation started there gets routed to a slot that has never seen it.
-  if [ -n "\$(find "$primary_search" -maxdepth 4 -name "*\$aa_sid*" -print -quit 2>/dev/null)" ]; then
-    aa_pin_primary=1
-  else
-    for aa_d in "\$aa_root/accounts/$p"/*/; do
-      [ -d "\$aa_d" ] || continue
-      if [ -n "\$(find "\$aa_d" -maxdepth 4 -name "*\$aa_sid*" -print -quit 2>/dev/null)" ]; then
-        aa_pinned="\${aa_d%/}"
-        break
-      fi
-    done
+  # The CLI resolves which account owns this session — and when that account is
+  # parked or was just refused for a limit, it hands the transcript to a
+  # healthy account and answers with THAT dir, so a plain --resume recovers a
+  # chat that died on a limit. "primary" means: leave the env var unset.
+  if [ -x "$self" ]; then
+    aa_pin="\$("$self" resume-target $p "\$aa_sid" 2>/dev/null || true)"
+  fi
+  if [ -z "\$aa_pin" ]; then
+    # The CLI was missing or failed — at least pin to the owner so the resume
+    # still works. The primary owns sessions too, so it must be searched.
+    if [ -n "\$(find "$primary_search" -maxdepth 4 -name "*\$aa_sid*" -print -quit 2>/dev/null)" ]; then
+      aa_pin="primary"
+    else
+      for aa_d in "\$aa_root/accounts/$p"/*/; do
+        [ -d "\$aa_d" ] || continue
+        if [ -n "\$(find "\$aa_d" -maxdepth 4 -name "*\$aa_sid*" -print -quit 2>/dev/null)" ]; then
+          aa_pin="\${aa_d%/}"
+          break
+        fi
+      done
+    fi
   fi
 fi
 # An explicitly inherited value always wins, then a pinned resume, then rotation.
-if [ -z "\${$env_var:-}" ] && [ -z "\$aa_pin_primary" ]; then
-  if [ -n "\$aa_pinned" ]; then
-    export $env_var="\$aa_pinned"
+if [ -z "\${$env_var:-}" ] && [ "\$aa_pin" != primary ]; then
+  if [ -n "\$aa_pin" ]; then
+    export $env_var="\$aa_pin"
   elif [ -x "$self" ]; then
     slot="\$("$self" pick $p 2>/dev/null || true)"
     if [ -n "\$slot" ] && [ "\$slot" != primary ]; then
@@ -771,32 +779,115 @@ cmd_exec_auto() { # $1 provider, rest = args for the real CLI
   exec "$real" "$@"
 }
 
+# Which account owns a session? Prints "primary" or a slot email. The primary
+# owns every conversation started before any slots existed, so it is searched
+# first — leaving it out is how resumes end up "not found".
+session_owner() { # $1 provider, $2 session-id
+  local d
+  if [ -n "$(find "$(primary_dir "$1")" -maxdepth 4 -name "*$2*" -print -quit 2>/dev/null)" ]; then
+    echo primary; return 0
+  fi
+  for d in "$ACCOUNTS/$1"/*/; do
+    [ -d "$d" ] || continue
+    if [ -n "$(find "$d" -maxdepth 4 -name "*$2*" -print -quit 2>/dev/null)" ]; then
+      basename "${d%/}"; return 0
+    fi
+  done
+  return 1
+}
+
+session_dir() { # $1 provider, $2 owner (primary|email) — the config dir behind it
+  if [ "$2" = primary ]; then primary_dir "$1"; else slot_dir "$1" "$2"; fi
+}
+
+# Copy every file of one session between config dirs, preserving layout. A
+# session can be more than one file (transcript plus sidecars), so copy every
+# match rather than the first — a partial copy resumes with holes.
+session_copy() { # $1 src dir, $2 dest dir, $3 session-id
+  local hit rel copied=""
+  while IFS= read -r hit; do
+    [ -n "$hit" ] || continue
+    rel="${hit#$1/}"
+    mkdir -p "$(dirname "$2/$rel")"
+    cp "$hit" "$2/$rel" && copied=1
+  done <<EOF2
+$(find "$1" -maxdepth 4 -name "*$3*" -type f 2>/dev/null)
+EOF2
+  [ -n "$copied" ]
+}
+
 # Move a conversation to another account so it can be continued there.
 # Sessions are stored per config dir, so a chat started on account A simply
 # does not exist for account B — this copies the transcript across. The model
 # re-sends the transcript on resume, so the conversation continues; the new
-# account is billed from that point on.
-cmd_handoff() { # $1 provider, $2 session-id, $3 target email
-  prov_valid "${1:-}" || { echo "usage: agent-link handoff <claude|codex> <session-id> <email>" >&2; return 1; }
-  [ -n "${2:-}" ] || { echo "usage: agent-link handoff <claude|codex> <session-id> <email>" >&2; return 1; }
-  valid_account "${3:-}" || { echo "usage: agent-link handoff <claude|codex> <session-id> <email>" >&2; return 1; }
-  local p="$1" sid="$2" target="$3" src="" hit="" rel dest
-  [ -d "$(slot_dir "$p" "$target")" ] || { echo "no $p account '$target'" >&2; return 1; }
-  for d in "$ACCOUNTS/$p"/*/; do
-    [ -d "$d" ] || continue
-    hit="$(find "$d" -maxdepth 4 -name "*$sid*" -print -quit 2>/dev/null)"
-    [ -n "$hit" ] && { src="${d%/}"; break; }
-  done
-  [ -n "$src" ] || { echo "session '$sid' not found in any $p account" >&2; return 1; }
-  [ "$src" = "$(slot_dir "$p" "$target")" ] && { echo "already on $target"; return 0; }
-  rel="${hit#$src/}"
-  dest="$(slot_dir "$p" "$target")/$rel"
-  mkdir -p "$(dirname "$dest")"
-  cp "$hit" "$dest"
+# account is billed from that point on. "primary" works on both ends.
+cmd_handoff() { # $1 provider, $2 session-id, $3 target email|primary
+  prov_valid "${1:-}" || { echo "usage: agent-link handoff <claude|codex> <session-id> <email|primary>" >&2; return 1; }
+  [ -n "${2:-}" ] || { echo "usage: agent-link handoff <claude|codex> <session-id> <email|primary>" >&2; return 1; }
+  { [ "${3:-}" = primary ] || valid_account "${3:-}"; } || { echo "usage: agent-link handoff <claude|codex> <session-id> <email|primary>" >&2; return 1; }
+  local p="$1" sid="$2" target="$3" owner src dest_dir
+  dest_dir="$(session_dir "$p" "$target")"
+  [ -d "$dest_dir" ] || { echo "no $p account '$target'" >&2; return 1; }
+  owner="$(session_owner "$p" "$sid")" || { echo "session '$sid' not found in any $p account" >&2; return 1; }
+  src="$(session_dir "$p" "$owner")"
+  [ "$src" = "$dest_dir" ] && { echo "already on $target"; return 0; }
+  session_copy "$src" "$dest_dir" "$sid" || { echo "copying session '$sid' failed" >&2; return 1; }
   echo "copied session $sid"
-  echo "  from: $(basename "$src")"
+  echo "  from: $owner"
   echo "    to: $target"
-  echo "continue it with: agent-link run $p $target $p --resume $sid"
+  if [ "$target" = primary ]; then
+    echo "continue it with: $p --resume $sid"
+  else
+    echo "continue it with: agent-link run $p $target $p --resume $sid"
+  fi
+}
+
+# Where should a resume run? Prints the config dir to export, "primary" for the
+# primary login (leave the env var unset), or nothing when the session is
+# unknown (the caller falls back to rotation). A running process can never
+# change accounts — but its NEXT resume can: when the owning account is parked,
+# or was just refused for a limit, the transcript is handed to the healthiest
+# other account and THAT dir is printed. This is what lets a chat that died on
+# a limit continue with a plain --resume, no rescue by hand.
+cmd_resume_target() { # $1 provider, $2 session-id
+  prov_valid "${1:-}" && [ -n "${2:-}" ] || {
+    echo "usage: agent-link resume-target <claude|codex> <session-id>" >&2; return 1; }
+  local p="$1" sid="$2" owner owner_dir healthy="" e ts best="" best_ts="" pemail covered dest_dir
+  owner="$(session_owner "$p" "$sid")" || return 0
+  owner_dir="$(session_dir "$p" "$owner")"
+  if [ "$owner" = primary ]; then slot_available_primary "$p" && healthy=1
+  else slot_available "$p" "$owner" && healthy=1; fi
+  if [ -n "$healthy" ]; then echo "$([ "$owner" = primary ] && echo primary || echo "$owner_dir")"; return 0; fi
+  # The owner is benched. LRU among the healthy others; the primary counts
+  # unless a slot already holds that account (same rule as pick_slot).
+  mkdir -p "$(pools_dir)"
+  pemail="$(primary_email "$p")"
+  if [ -n "$pemail" ] && [ "$owner" != primary ]; then
+    covered=""
+    for e in $(slot_list "$p"); do
+      [ "$(prov_email "$p" "$(slot_dir "$p" "$e")")" = "$pemail" ] && covered=1
+    done
+    if [ -z "$covered" ] && slot_available_primary "$p"; then
+      best=primary; best_ts="$(cat "$(pools_dir)/last-$p-primary" 2>/dev/null || echo 0)"
+    fi
+  fi
+  for e in $(slot_list "$p"); do
+    [ "$e" = "$owner" ] && continue
+    slot_available "$p" "$e" || continue
+    ts="$(cat "$(pools_dir)/last-$p-$e" 2>/dev/null || echo 0)"
+    if [ -z "$best" ] || [ "$ts" -lt "$best_ts" ]; then best="$e"; best_ts="$ts"; fi
+  done
+  if [ -z "$best" ]; then
+    # Nowhere healthier to go — stay with the owner, where the transcript is.
+    echo "$([ "$owner" = primary ] && echo primary || echo "$owner_dir")"; return 0
+  fi
+  dest_dir="$(session_dir "$p" "$best")"
+  if ! session_copy "$owner_dir" "$dest_dir" "$sid"; then
+    echo "$([ "$owner" = primary ] && echo primary || echo "$owner_dir")"; return 0
+  fi
+  date +%s > "$(pools_dir)/last-$p-$best"
+  echo "$(date '+%Y-%m-%d %H:%M')  moved session $sid $owner -> $best on resume (owner parked)" >> "$STATE/autopark.log"
+  echo "$([ "$best" = primary ] && echo primary || echo "$dest_dir")"
 }
 
 cmd_pick() { # provider — print the account to use next (used by the launchers)
@@ -1675,6 +1766,7 @@ main() {
     auto)    cmd_auto ;;
     pick)    shift; cmd_pick "$@" ;;
     handoff) shift; cmd_handoff "$@" ;;
+    resume-target) shift; cmd_resume_target "$@" ;;
     pools)   cmd_pools ;;
     whoami)  shift; cmd_whoami "$@" ;;
     plugin)  shift; cmd_plugin "$@" ;;
