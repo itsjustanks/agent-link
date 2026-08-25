@@ -978,9 +978,13 @@ async function usageForClaudeDir(dir: string, sinceMs: number, days: number) {
         const lines = createInterface({ input: createReadStream(file, { encoding: "utf8" }), crlfDelay: Infinity });
         for await (const line of lines) {
           if (!line) continue;
-          // Cheap string test before paying for a JSON parse.
+          // Cheap string test before paying for a JSON parse. A limit only
+          // counts on the record Claude stamps for an API error — a chat that
+          // merely mentions limits is not a refusal.
           const hasUsage = line.indexOf('"usage"') !== -1;
-          const hasLimit = line.indexOf("spend limit") !== -1 || line.indexOf("usage limit") !== -1;
+          const hasLimit =
+            line.indexOf('"isApiErrorMessage":true') !== -1 &&
+            /spend limit|usage limit|limit reached/i.test(line);
           if (!hasUsage && !hasLimit) continue;
           let entry: { message?: { usage?: Record<string, number>; model?: string }; timestamp?: string };
           try {
@@ -1438,6 +1442,28 @@ const SYNC_GLOBAL_FLAGS = ["hasCompletedOnboarding", "bypassPermissionsModeAccep
 // the same wherever rotation sends it.
 const SYNC_SETTINGS_KEYS = ["outputStyle", "includeCoAuthoredBy", "env", "permissions", "model"];
 
+// Seeded into ~/.claude/output-styles once (never overwritten), then synced to
+// every account like any other style. Select it with settings.json
+// "outputStyle": "concise" — sync carries that setting to all accounts too.
+const CONCISE_STYLE = `---
+name: concise
+description: Plain English, short answers, no fluff
+---
+
+# Output rules
+
+Write like a good engineer answering a busy colleague:
+
+- Lead with the answer or outcome. Explanation after, only if it changes what the reader does next.
+- Plain English, short sentences, short paragraphs. Define a technical term the first time you use it.
+- No filler: never restate the question, never announce what you are about to do, never pad with "Certainly", "Great question", or a summary of your own message.
+- Match length to the question. One-line question, one-line answer. Only go long when asked, or when skipping detail would mislead.
+- No headers, bullets, or tables unless they genuinely organise the content or the user asked for them.
+- Keep the precise parts precise: exact file paths with line numbers, exact commands, exact error text. Never paraphrase these.
+- When you finish a task: one short line on what changed, and state plainly what was verified and what was not.
+- If you hit a usage-limit error, say so in one line and stop; the account router gives the next launch a fresh account.
+`;
+
 const SYNC_PROJECT_FIELDS = [
   "hasTrustDialogAccepted",
   "hasCompletedProjectOnboarding",
@@ -1557,7 +1583,27 @@ export async function handleMcpSync(): Promise<{ ok: boolean; log: string }> {
       logs.push(`claude · ${slot.email}: settings ${changed > 0 ? `updated (${changed})` : "already match"}`);
     }
   }
+  // The user-level system prompt. Each config dir has its own CLAUDE.md, so a
+  // rotated account without this copy runs with no brief at all.
+  const primaryBrief = join(HOME, ".claude", "CLAUDE.md");
+  if (existsSync(primaryBrief)) {
+    let briefed = 0;
+    for (const slot of slots.filter((entry) => entry.provider === "claude")) {
+      copyFileSync(primaryBrief, join(slot.dir, "CLAUDE.md"));
+      briefed += 1;
+    }
+    if (briefed > 0) logs.push(`CLAUDE.md (system prompt) synced to ${briefed} account(s)`);
+  }
   const primaryStyles = join(HOME, ".claude", "output-styles");
+  // Seed the concise style once, so "keep output short" is a setting away on
+  // every synced account. Never overwritten: the user's edit wins.
+  try {
+    mkdirSync(primaryStyles, { recursive: true });
+    const seed = join(primaryStyles, "concise.md");
+    if (!existsSync(seed)) writeFileSync(seed, CONCISE_STYLE);
+  } catch {
+    // A read-only home is unusual but not a reason to fail the sync.
+  }
   if (existsSync(primaryStyles)) {
     let styles: string[] = [];
     try {

@@ -114,6 +114,17 @@ PY
 # One-time slot preparation after mkdir.
 prov_prepare() { # $1 provider, $2 slot dir
   case "$1" in
+    claude)
+      # A config dir carries its own system prompt and settings; a fresh slot
+      # without them runs bare. Seed from the primary so the account behaves
+      # like the others from its first launch.
+      for f in CLAUDE.md settings.json; do
+        [ ! -f "$2/$f" ] && [ -f "$HOME/.claude/$f" ] && cp "$HOME/.claude/$f" "$2/$f"
+      done
+      if [ -d "$HOME/.claude/output-styles" ] && [ ! -d "$2/output-styles" ]; then
+        cp -R "$HOME/.claude/output-styles" "$2/output-styles"
+      fi
+      ;;
     codex)
       # Seed from the user's real config so slots behave like the primary
       # (MCP servers etc.), then pin credentials to file storage.
@@ -227,8 +238,9 @@ slot_available_primary() { # $1 provider
   until="$(cat "$(pools_dir)/cooldown-$1-primary" 2>/dev/null || echo 0)"
   now="$(date +%s)"
   [ "$until" -gt "$now" ] && return 1
-  if recently_refused "$1" "$([ "$1" = claude ] && echo "$HOME/.claude" || echo "$HOME/.codex")"; then
-    autopark "$1" primary
+  local reset
+  if reset="$(recently_refused "$1" "$([ "$1" = claude ] && echo "$HOME/.claude" || echo "$HOME/.codex")")"; then
+    autopark "$1" primary "$reset"
     return 1
   fi
   return 0
@@ -239,10 +251,14 @@ slot_available_primary() { # $1 provider
 # without anyone running a command — the dead agent is lost either way, but
 # every launch after it avoids that account.
 REFUSAL_WINDOW_MIN=45
+# On a real refusal, prints the epoch to park until (parsed from Claude's own
+# "resets 3am" when present, else an hour) and exits 0. A transcript that merely
+# TALKS about limits is not a refusal — only API-error records count, which is
+# what stops an account being benched for having a conversation about quotas.
 recently_refused() { # $1 provider, $2 config dir
   [ "$1" = claude ] || return 1
   python3 - "$2" "$REFUSAL_WINDOW_MIN" <<'PY2'
-import glob, os, sys, time
+import glob, os, re, sys, time
 d, window = sys.argv[1], float(sys.argv[2])
 cutoff = time.time() - window * 60
 newest, newest_m = None, 0
@@ -261,26 +277,49 @@ try:
         tail = fh.read().decode("utf-8", "ignore")
 except OSError:
     sys.exit(1)
-sys.exit(0 if ("spend limit" in tail or "usage limit" in tail) else 1)
+now = time.time()
+for line in tail.splitlines():
+    # Claude Code stamps the assistant message it synthesises for an API error;
+    # a limit phrase anywhere else is just conversation. ponytail: marker string,
+    # parse the JSON per line if a future CLI changes the spelling.
+    if '"isApiErrorMessage":true' not in line:
+        continue
+    low = line.lower()
+    if "usage limit" not in low and "spend limit" not in low and "limit reached" not in low:
+        continue
+    until = now + 60 * 60  # unknown reset: a short bench, re-proved on expiry
+    m = re.search(r"resets?\s*(?:at\s*)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)", low)
+    if m:
+        hour = int(m.group(1)) % 12 + (12 if m.group(3) == "pm" else 0)
+        t = time.localtime(now)
+        target = time.mktime((t.tm_year, t.tm_mon, t.tm_mday, hour, int(m.group(2) or 0), 0, 0, 0, -1))
+        if target <= now:
+            target += 24 * 60 * 60
+        until = target
+    # Never bench longer than one rolling window, never shorter than 10 minutes.
+    until = max(now + 10 * 60, min(until, now + 5 * 60 * 60))
+    print(int(until))
+    sys.exit(0)
+sys.exit(1)
 PY2
 }
 
-# Park an account that just refused, so the decision persists for later launches.
-autopark() { # $1 provider, $2 key (email or "primary")
+# Park an account that just refused, until the reset time when one was parsed.
+autopark() { # $1 provider, $2 key (email or "primary"), $3 until-epoch (optional)
   mkdir -p "$(pools_dir)"
-  echo "$(( $(date +%s) + 180 * 60 ))" > "$(pools_dir)/cooldown-$1-$2"
+  echo "${3:-$(( $(date +%s) + 60 * 60 ))}" > "$(pools_dir)/cooldown-$1-$2"
   echo "auto: refused for a limit" > "$(pools_dir)/reason-$1-$2"
   echo "$(date '+%Y-%m-%d %H:%M')  auto-parked $1/$2 after a limit refusal" >> "$STATE/autopark.log"
 }
 
 slot_available() { # $1 provider, $2 email
-  local until now
+  local until now reset
   prov_logged_in "$1" "$(slot_dir "$1" "$2")" || return 1
   until="$(cat "$(pools_dir)/cooldown-$1-$2" 2>/dev/null || echo 0)"
   now="$(date +%s)"
   [ "$until" -gt "$now" ] && return 1
-  if recently_refused "$1" "$(slot_dir "$1" "$2")"; then
-    autopark "$1" "$2"
+  if reset="$(recently_refused "$1" "$(slot_dir "$1" "$2")")"; then
+    autopark "$1" "$2" "$reset"
     return 1
   fi
   return 0
@@ -307,7 +346,21 @@ pick_slot() { # $1 provider
     ts="$(cat "$(pools_dir)/last-$1-$e" 2>/dev/null || echo 0)"
     if [ -z "$best" ] || [ "$ts" -lt "$best_ts" ]; then best="$e"; best_ts="$ts"; fi
   done
-  [ -n "$best" ] || return 1
+  # Everyone parked: hand out the account whose bench ends soonest instead of
+  # silently dumping every launch on the primary (which may itself be parked).
+  if [ -z "$best" ]; then
+    local u best_u=""
+    if [ -n "$pemail" ] && prov_logged_in "$1" "$(primary_dir "$1")"; then
+      best="primary"; best_u="$(cat "$(pools_dir)/cooldown-$1-primary" 2>/dev/null || echo 0)"
+    fi
+    for e in $(slot_list "$1"); do
+      prov_logged_in "$1" "$(slot_dir "$1" "$e")" || continue
+      u="$(cat "$(pools_dir)/cooldown-$1-$e" 2>/dev/null || echo 0)"
+      if [ -z "$best_u" ] || [ "$u" -lt "$best_u" ]; then best="$e"; best_u="$u"; fi
+    done
+    [ -n "$best" ] || return 1
+    echo "$(date '+%Y-%m-%d %H:%M')  all $1 accounts parked — using $best (earliest reset)" >> "$STATE/autopark.log"
+  fi
   [ "${2:-}" = dry ] && { echo "$best"; return 0; }
   date +%s > "$(pools_dir)/last-$1-$best"
   # Launch counter: how many agents this account has actually been handed.
