@@ -41,6 +41,7 @@ const NUDGE =
   "You stopped because the provider account hit its usage limit. The account router has moved this conversation to a healthy account. Continue the task exactly where you left off; do not redo completed work. If the remaining work is long-running and you have Paseo tools, create a heartbeat (for example every 10 minutes, stopping when the task is complete) so you keep making progress without supervision.";
 const EVENT_KEEP = 20;
 const DEBOUNCE_MS = 5 * 60 * 1000;
+const NON_LIMIT_GUARD_MS = 20 * 1000;
 
 type PaseoLike = {
   agents: {
@@ -103,13 +104,25 @@ async function diedOnLimit(paseo: PaseoLike, agentId: string): Promise<string | 
   try {
     const page = await paseo.agents.ref(agentId).timeline.refetch({ limit: 25 });
     const entries = ((page as Record<string, unknown>)?.entries ?? []) as unknown[];
-    // Only error-shaped entries count; a conversation about limits is not a
-    // refusal. We do not know every entry variant, so: an entry whose own JSON
-    // mentions an error marker AND a limit phrase.
+    // Only genuinely errored entries count, and only their ERROR TEXT is
+    // searched. Timeline items carry an \`error: null\` field even on success,
+    // and tool-call payloads can quote rate-limit-related code or output — a
+    // regex over the whole serialized entry would nudge agents that died of
+    // something else entirely, with a fabricated premise.
     for (const entry of [...entries].reverse()) {
-      const text = JSON.stringify(entry);
-      if (!/"(error|failed|failure)"/i.test(text)) continue;
-      const match = LIMIT_ERROR.exec(text);
+      const e = entry as Record<string, unknown>;
+      const item = (e.item ?? {}) as Record<string, unknown>;
+      const kindText = [e.type, e.kind, e.status, item.type, item.status]
+        .filter((v): v is string => typeof v === "string")
+        .join(" ");
+      const errValue = e.error ?? item.error ?? (e.payload as Record<string, unknown> | undefined)?.error;
+      const isError = /error|failed|failure/i.test(kindText) || (errValue !== undefined && errValue !== null && errValue !== false);
+      if (!isError) continue;
+      const searchable =
+        errValue !== undefined && errValue !== null
+          ? JSON.stringify(errValue)
+          : [e.message, e.text, item.message, item.text].filter((v) => typeof v === "string").join(" ");
+      const match = LIMIT_ERROR.exec(searchable);
       if (match) return match[0];
     }
   } catch {
@@ -127,9 +140,14 @@ async function handleErroredAgent(paseo: PaseoLike, update: unknown): Promise<vo
   const now = Date.now();
   const seen = lastSeen.get(snap.id) ?? 0;
   if (now - seen < DEBOUNCE_MS) return;
-  lastSeen.set(snap.id, now);
   const matched = await diedOnLimit(paseo, snap.id);
-  if (!matched) return;
+  if (!matched) {
+    // A non-limit error must not swallow a limit death moments later — hold
+    // only a short guard against timeline-refetch flapping.
+    lastSeen.set(snap.id, now - DEBOUNCE_MS + NON_LIMIT_GUARD_MS);
+    return;
+  }
+  lastSeen.set(snap.id, now);
   const base = {
     agentId: snap.id,
     workspaceId: snap.workspaceId ?? null,

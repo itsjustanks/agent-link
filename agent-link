@@ -356,32 +356,32 @@ cmd_refused() { # $1 provider
   echo "$p · $key: parked (limit hit)"
 }
 
-cmd_nearing() { # $1 provider [$2 email|primary|clear ...] — mark from a hook or by hand
+cmd_nearing() { # $1 provider [$2 email|primary] [clear] — mark from a hook or by hand
   prov_valid "${1:-}" || { echo "usage: agent-link nearing <claude|codex> [email|primary] [clear]" >&2; return 1; }
-  local p="$1" key="${2:-}" d e
+  local p="$1" key="${2:-}" verb="${3:-}" d e
+  # `nearing claude clear` (no account named) clears the calling session's own.
+  if [ "$key" = clear ]; then key=""; verb=clear; fi
   # No account named: resolve the calling session's own slot from its env var,
   # which Claude Code passes through to hook commands.
-  if [ -z "$key" ] || [ "$key" = clear ]; then
+  if [ -z "$key" ]; then
     d="$(eval "printf '%s' \"\${$(prov_env_var "$p"):-}\"")"
-    if [ -z "$d" ]; then key2=primary
+    if [ -z "$d" ]; then key=primary
     else
-      key2=""
+      key=""
       for e in $(slot_list "$p"); do
-        [ "$(slot_dir "$p" "$e")" = "$d" ] && key2="$e"
+        [ "$(slot_dir "$p" "$e")" = "$d" ] && key="$e"
       done
-      [ -n "$key2" ] || key2="$(basename "$d")"
+      [ -n "$key" ] || key="$(basename "$d")"
     fi
-    if [ "$key" = clear ]; then key="$key2 clear"; else key="$key2"; fi
   fi
-  set -- $key
   mkdir -p "$(pools_dir)"
-  if [ "${2:-}" = clear ]; then
-    rm -f "$(pools_dir)/nearing-$p-$1"
-    echo "$p · $1: nearing mark cleared"
+  if [ "$verb" = clear ]; then
+    rm -f "$(pools_dir)/nearing-$p-$key"
+    echo "$p · $key: nearing mark cleared"
   else
-    date +%s > "$(pools_dir)/nearing-$p-$1"
-    echo "$(date '+%Y-%m-%d %H:%M')  nearing mark on $p/$1 (new work drains elsewhere)" >> "$STATE/autopark.log"
-    echo "$p · $1: marked nearing — new launches prefer other accounts for ${NEARING_TTL_MIN}m"
+    date +%s > "$(pools_dir)/nearing-$p-$key"
+    echo "$(date '+%Y-%m-%d %H:%M')  nearing mark on $p/$key (new work drains elsewhere)" >> "$STATE/autopark.log"
+    echo "$p · $key: marked nearing — new launches prefer other accounts for ${NEARING_TTL_MIN}m"
   fi
 }
 
@@ -400,8 +400,16 @@ write_statusline_helper() {
 # Reads the statusline JSON, updates the router's nearing/parked state for the
 # account this session runs on, then chains to the original statusline command
 # (saved next to this session's settings.json as agent-link-statusline.orig).
-root="${AGENT_LINK_HOME:-${AGENT_AUTH_HOME:-$HOME/.agent-auth}}"
-[ -d "$root/accounts" ] || root="$HOME/.agent-link"
+# Root resolution mirrors the CLI exactly (env override, then whichever dir
+# actually holds accounts) — diverging here writes quota marks into a pools
+# dir the router never reads, and the whole before-the-wall lifecycle no-ops.
+if [ -n "${AGENT_LINK_HOME:-}" ]; then root="$AGENT_LINK_HOME"
+elif [ -n "${AGENT_AUTH_HOME:-}" ]; then root="$AGENT_AUTH_HOME"
+elif [ -n "$(ls -A "$HOME/.agent-link/accounts/claude" "$HOME/.agent-link/accounts/codex" 2>/dev/null)" ]; then root="$HOME/.agent-link"
+elif [ -n "$(ls -A "$HOME/.agent-auth/accounts/claude" "$HOME/.agent-auth/accounts/codex" 2>/dev/null)" ]; then root="$HOME/.agent-auth"
+elif [ -d "$HOME/.agent-link" ]; then root="$HOME/.agent-link"
+else root="$HOME/.agent-auth"
+fi
 input="$(cat)"
 dir="${CLAUDE_CONFIG_DIR:-}"
 key=primary
@@ -1015,7 +1023,13 @@ cmd_route() { # enable|disable|status
 }
 
 write_auto_launcher() { # $1 provider — one command that routes to a live account
-  local p="$1" env_var self primary_search
+  local p="$1" env_var self primary_search cont_flags
+  # Continue-style flags differ by CLI — and clash: codex uses -c for a CONFIG
+  # override, so treating it as "continue" would reroute a fresh launch.
+  case "$p" in
+    claude) cont_flags='-c|--continue' ;;
+    *)      cont_flags='--last' ;;
+  esac
   primary_search="$(primary_dir "$1")"
   env_var="$(prov_env_var "$p")"
   self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
@@ -1046,7 +1060,7 @@ aa_prev=""
 for aa_a in "\$@"; do
   case "\$aa_a" in
     --resume=*) aa_sid="\${aa_a#--resume=}" ;;
-    -c|--continue|--last) aa_cont=1 ;;
+    $cont_flags) aa_cont=1 ;;
     -*) ;;
     *)
       case "\$aa_prev" in
@@ -1057,10 +1071,13 @@ for aa_a in "\$@"; do
   aa_prev="\$aa_a"
 done
 aa_pin=""
-# "--continue" means the newest chat in THIS project — which may live in any
-# account. The CLI finds it and routes it like a resume of that session.
+# An explicitly inherited env var means the caller already chose the account —
+# compute nothing for it, or a mere launch would copy transcripts around.
+if [ -n "\${$env_var:-}" ]; then aa_sid=""; aa_cont=""; fi
+# "continue" means the newest chat — which may live in any account. The CLI
+# finds it and routes it like a resume of that session.
 if [ -z "\$aa_sid" ] && [ -n "\$aa_cont" ] && [ -x "$self" ]; then
-  aa_pin="\$("$self" continue-target $p "\$PWD" 2>/dev/null || true)"
+  aa_pin="\$("$self" continue-target $p "\$PWD" --go 2>/dev/null || true)"
 fi
 if [ -n "\$aa_sid" ]; then
   # The CLI resolves which account owns this session — and when that account is
@@ -1068,7 +1085,7 @@ if [ -n "\$aa_sid" ]; then
   # healthy account and answers with THAT dir, so a plain --resume recovers a
   # chat that died on a limit. "primary" means: leave the env var unset.
   if [ -x "$self" ]; then
-    aa_pin="\$("$self" resume-target $p "\$aa_sid" 2>/dev/null || true)"
+    aa_pin="\$("$self" resume-target $p "\$aa_sid" --go 2>/dev/null || true)"
   fi
   if [ -z "\$aa_pin" ]; then
     # The CLI was missing or failed — at least pin to the owner so the resume
@@ -1157,21 +1174,29 @@ cmd_exec_auto() { # $1 provider, rest = args for the real CLI
   exec "$real" "$@"
 }
 
-# Which account owns a session? Prints "primary" or a slot email. The primary
-# owns every conversation started before any slots existed, so it is searched
-# first — leaving it out is how resumes end up "not found".
+# Which account owns a session? Prints "primary" or a slot email. A moved
+# session is a COPY, so several accounts can hold the same id — the owner is
+# wherever the newest write happened, or a repeat resume would clobber the
+# account that has been doing the work with a stale copy. The primary counts
+# too: it owns every conversation started before any slots existed.
 session_owner() { # $1 provider, $2 session-id
-  local d
-  if [ -n "$(find "$(primary_dir "$1")" -maxdepth 5 -name "*$2*" -print -quit 2>/dev/null)" ]; then
-    echo primary; return 0
-  fi
-  for d in "$ACCOUNTS/$1"/*/; do
+  local d f m best="" best_m=0 label
+  for d in "$(primary_dir "$1")" "$ACCOUNTS/$1"/*/; do
+    d="${d%/}"
     [ -d "$d" ] || continue
-    if [ -n "$(find "$d" -maxdepth 5 -name "*$2*" -print -quit 2>/dev/null)" ]; then
-      basename "${d%/}"; return 0
-    fi
+    if [ "$d" = "$(primary_dir "$1")" ]; then label=primary; else label="$(basename "$d")"; fi
+    f="$(find "$d" -maxdepth 5 -name "*$2*" -not -name "*.al-moved" -type f 2>/dev/null | head -20)"
+    [ -n "$f" ] || continue
+    while IFS= read -r hit; do
+      [ -n "$hit" ] || continue
+      m="$(stat -f %m "$hit" 2>/dev/null || stat -c %Y "$hit" 2>/dev/null || echo 0)"
+      if [ "$m" -gt "$best_m" ]; then best_m="$m"; best="$label"; fi
+    done <<EOF2
+$f
+EOF2
   done
-  return 1
+  [ -n "$best" ] || return 1
+  echo "$best"
 }
 
 session_dir() { # $1 provider, $2 owner (primary|email) — the config dir behind it
@@ -1187,6 +1212,15 @@ session_copy() { # $1 src dir, $2 dest dir, $3 session-id
     [ -n "$hit" ] || continue
     case "$hit" in *.al-moved) continue ;; esac
     rel="${hit#$1/}"
+    # A destination copy that is newer than the source has real work in it —
+    # overwriting it would destroy conversation turns. Leave it (and its
+    # .al-moved floor) alone; the resume runs against the newer copy.
+    if [ -f "$2/$rel" ]; then
+      local src_m dest_m
+      src_m="$(stat -f %m "$hit" 2>/dev/null || stat -c %Y "$hit" 2>/dev/null || echo 0)"
+      dest_m="$(stat -f %m "$2/$rel" 2>/dev/null || stat -c %Y "$2/$rel" 2>/dev/null || echo 0)"
+      if [ "$dest_m" -ge "$src_m" ]; then copied=1; continue; fi
+    fi
     mkdir -p "$(dirname "$2/$rel")"
     if cp "$hit" "$2/$rel"; then
       copied=1
@@ -1235,10 +1269,14 @@ cmd_handoff() { # $1 provider, $2 session-id, $3 target email|primary
 # or was just refused for a limit, the transcript is handed to the healthiest
 # other account and THAT dir is printed. This is what lets a chat that died on
 # a limit continue with a plain --resume, no rescue by hand.
-cmd_resume_target() { # $1 provider, $2 session-id
+cmd_resume_target() { # $1 provider, $2 session-id [--go]
   prov_valid "${1:-}" && [ -n "${2:-}" ] || {
-    echo "usage: agent-link resume-target <claude|codex> <session-id>" >&2; return 1; }
-  local p="$1" sid="$2" owner owner_dir healthy="" e ts best="" best_ts="" pemail covered dest_dir
+    echo "usage: agent-link resume-target <claude|codex> <session-id> [--go]" >&2; return 1; }
+  # Without --go this is a pure query: it prints where a resume would land and
+  # touches nothing. The launchers pass --go, which is when the transcript
+  # actually moves and the LRU stamp is written.
+  local p="$1" sid="$2" go="" owner owner_dir healthy="" e ts best="" best_ts="" pemail covered dest_dir
+  [ "${3:-}" = --go ] && go=1
   owner="$(session_owner "$p" "$sid")" || return 0
   owner_dir="$(session_dir "$p" "$owner")"
   if [ "$owner" = primary ]; then slot_available_primary "$p" && healthy=1
@@ -1275,6 +1313,9 @@ cmd_resume_target() { # $1 provider, $2 session-id
     echo "$([ "$owner" = primary ] && echo primary || echo "$owner_dir")"; return 0
   fi
   dest_dir="$(session_dir "$p" "$best")"
+  if [ -z "$go" ]; then
+    echo "$([ "$best" = primary ] && echo primary || echo "$dest_dir")"; return 0
+  fi
   if ! session_copy "$owner_dir" "$dest_dir" "$sid"; then
     echo "$([ "$owner" = primary ] && echo primary || echo "$owner_dir")"; return 0
   fi
@@ -1288,7 +1329,7 @@ cmd_resume_target() { # $1 provider, $2 session-id
 # and every slot, then route it exactly like a --resume of that session (so a
 # parked owner hands the chat to a healthy account first). Claude names project
 # dirs by replacing every non-alphanumeric in the cwd with a dash.
-cmd_continue_target() { # $1 provider, $2 cwd
+cmd_continue_target() { # $1 provider, $2 cwd [--go]
   prov_valid "${1:-}" && [ -n "${2:-}" ] || return 0
   local p="$1" slug d f m best="" best_m=0 sid
   slug="$(printf %s "$2" | LC_ALL=C sed 's/[^A-Za-z0-9]/-/g')"
@@ -1314,7 +1355,7 @@ cmd_continue_target() { # $1 provider, $2 cwd
     sid="$(basename "$best" .jsonl | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' || true)"
     [ -n "$sid" ] || return 0
   fi
-  cmd_resume_target "$p" "$sid"
+  cmd_resume_target "$p" "$sid" "${3:-}"
 }
 
 cmd_pick() { # provider — print the account to use next (used by the launchers)
@@ -1422,8 +1463,20 @@ def scan(root, label):
             continue
         if st.st_mtime < since or st.st_size > 25_000_000:
             continue
+        # Content before the .al-moved floor was copied in from another
+        # account; blaming this account for it would park a healthy account
+        # and move the chat AGAIN — the exact loop the marker exists to stop.
+        floor = 0
         try:
-            text = open(f, errors="ignore").read()
+            floor = int(open(f + ".al-moved").read().strip())
+        except (OSError, ValueError):
+            pass
+        if st.st_size <= floor:
+            continue
+        try:
+            fh = open(f, errors="ignore")
+            fh.seek(floor)
+            text = fh.read()
         except OSError:
             continue
         if "spend limit" not in text and "usage limit" not in text:
@@ -1469,8 +1522,19 @@ def scan(d):
         t["last"] = max(t["last"], st.st_mtime)
         label = os.path.basename(os.path.dirname(f)).split("--")[-1]
         t["proj"][label] = t["proj"].get(label, 0) + 1
+        # Skip content copied in from another account (see .al-moved): its
+        # tokens were spent there and its refusals happened there.
+        floor = 0
         try:
-            text = open(f, errors="ignore").read()
+            floor = int(open(f + ".al-moved").read().strip())
+        except (OSError, ValueError):
+            pass
+        if st.st_size <= floor:
+            continue
+        try:
+            fh = open(f, errors="ignore")
+            fh.seek(floor)
+            text = fh.read()
         except OSError:
             continue
         for line in text.split("\n"):
