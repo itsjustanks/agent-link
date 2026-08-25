@@ -1,8 +1,7 @@
-import { execFile, execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
-import { promisify } from "node:util";
 import type { CliStatus } from "./cli.shared";
 
 const HOME = homedir();
@@ -126,31 +125,32 @@ export async function handleCliUpdateCheck(): Promise<{
   };
 }
 
-const execFileAsync = promisify(execFile);
-
 export async function handleCliUpdateApply(): Promise<{ ok: boolean; message: string }> {
   const cli = findCli();
   if (!cli) {
     return { ok: false, message: "The agent-link CLI is not installed — install it from the card above first." };
   }
+  // The installer removes and re-registers THIS plugin, so it must never run
+  // inside one of this plugin's own RPCs — the daemon tears the handler down
+  // mid-call and the panel sees "Plugin is not available … handler_error".
+  // Fire it detached with a beat of delay so this response flushes first; the
+  // reinstall's outcome is visible in the version stamp once the new plugin
+  // is serving, and in `paseo plugin logs agent-link` if it goes wrong.
   try {
-    // The CLI already knows how to fetch main, typecheck and re-register; the
-    // panel just runs it instead of reimplementing the installer.
-    const { stdout, stderr } = await execFileAsync(cli, ["app", "install", "paseo"], { timeout: 240_000 });
-    const said = `${stdout}\n${stderr}`;
-    if (!/installed and running|installed,/.test(said)) {
-      const tail = said.trim().split("\n").slice(-3).join(" · ");
-      return { ok: false, message: tail || "The installer said nothing — run 'agent-link app install paseo' in a terminal." };
-    }
+    const child = spawn("/bin/sh", ["-c", `sleep 1; ${JSON.stringify(cli)} app install paseo >/dev/null 2>&1`], {
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref();
     return {
       ok: true,
       message:
-        "Updated. If this panel still shows old behaviour, press Reload on agent-link in Settings → Plugins, then navigate away and back.",
+        "Update started. The panel is being reinstalled and reloaded — come back to this tab in about 30 seconds; the version stamp above will show the new build.",
     };
   } catch (caught) {
     return {
       ok: false,
-      message: `Update failed: ${caught instanceof Error ? caught.message.split("\n")[0] : String(caught)}. Run 'agent-link app install paseo' in a terminal to see the full story.`,
+      message: `Could not start the update: ${caught instanceof Error ? caught.message.split("\n")[0] : String(caught)}. Run 'agent-link app install paseo' in a terminal instead.`,
     };
   }
 }
