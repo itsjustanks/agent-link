@@ -19,9 +19,11 @@
     dynamic routing: ready (~/.agent-link/bin/claude-auto)
 ```
 
-## Two problems this solves
+## Three problems this solves
 
 **You can only use one account at a time.** If you have more than one Claude or Codex account, you hit a usage limit on one while the others sit idle. Account-switcher tools swap credentials in and out, which logs running sessions out mid-task. agent-link instead gives each account its own config directory — `CLAUDE_CONFIG_DIR` for Claude Code, `CODEX_HOME` for Codex — so every account is live at the same time. **N accounts, N rate limits.** It never reads, copies or backs up a token, so nothing decays and no running agent is ever signed out.
+
+**A usage limit kills your afternoon.** As an account climbs toward its limit, agent-link drains new work off it; when it hits the wall it is parked until the provider's own reset time; and a conversation that died mid-task continues on a healthy account with a plain `--resume` — or resumes itself, if it was a [Paseo](https://paseo.sh) agent. Claude reports through its statusline and hooks, Codex through its own rollout files. You stop noticing limits.
 
 **Your agents write things you never see.** Dashboards, reports and diagrams land in a worktree you would have to go and find in a terminal. agent-link finds them and renders them — live, inside your editor.
 
