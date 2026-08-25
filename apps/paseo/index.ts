@@ -41,6 +41,8 @@ import {
   handleWireProvider,
 } from "./handlers.server";
 import { runShutdown, runStart } from "./lifecycle.shared";
+import { limitsResume, limitsSetAuto, limitsStatus } from "./limits.shared";
+import { handleLimitsResume, handleLimitsSetAuto, handleLimitsStatus } from "./limits.server";
 import { McpSurface } from "./mcp.client";
 import {
   mcpExport,
@@ -102,6 +104,9 @@ export default function contribute(plugin: PluginContext) {
   plugin.handle(mcpLoginStatus, handleMcpLoginStatus);
   plugin.handle(mcpLoginCancel, handleMcpLoginCancel);
   plugin.handle(mcpLogout, handleMcpLogout);
+  plugin.handle(limitsStatus, handleLimitsStatus);
+  plugin.handle(limitsSetAuto, handleLimitsSetAuto);
+  plugin.handle(limitsResume, handleLimitsResume);
 
   plugin.addSurface("agent-sync", AgentSyncSurface);
   plugin.addSurface("mcp", McpSurface);

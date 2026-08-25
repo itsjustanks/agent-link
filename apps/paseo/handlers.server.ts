@@ -6,6 +6,7 @@ import { basename, delimiter, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import type { Destination, Slot } from "./contracts.shared";
 import { onStart } from "./lifecycle.shared";
+import { ensureLimitSentry } from "./limits.server";
 import type { Dialect } from "./mcpjson.shared";
 
 const HOME = homedir();
@@ -728,6 +729,8 @@ function autoWiredId(overrides: ProviderOverrides, provider: "claude" | "codex")
 }
 
 export async function handleScan(_input: Record<string, never>, { paseo }: PluginHandlerContext) {
+  // First panel contact after a daemon start arms the resident limit sentry.
+  ensureLimitSentry(paseo);
   const overrides = await providerOverrides(paseo);
   // Everything the sections below share is read once here, not once per section.
   const baseSettings = readJson(join(HOME, ".claude", "settings.json")) ?? {};

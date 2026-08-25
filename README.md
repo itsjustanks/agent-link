@@ -174,6 +174,8 @@ So the full lifecycle is hands-off: drain at 85% → park at 99% or on the refus
 
 **Codex gets the same lifecycle with no hooks at all**: every Codex turn writes `used_percent`, the reset time, and a limit-reached flag into its own rollout file, and the router reads the newest one at routing time — 85% flags nearing, 99% or the flag parks until Codex's own reset. `codex resume <id>` and `codex resume --last` route through the same owner-or-healthiest logic as Claude resumes, and `claude -c` / `--continue` finds the newest chat for the current project across every account. Moved transcripts are offset-marked so a dead account's telemetry can never park the healthy account it was moved to.
 
+**Running agents in [Paseo](https://paseo.dev) resume themselves.** The panel's *limit sentry* watches the daemon's agent stream: when an agent errors out and its timeline shows a genuine limit/billing failure (not a conversation about limits), it appears in the Agent Link tab with a one-click **Resume** — and with **Auto** switched on, the sentry nudges the agent immediately. Either way the relaunch goes through the account router, so the conversation continues on a healthy account with nobody watching.
+
 To sweep up in bulk, or move a chat somewhere specific by hand:
 
 ```sh

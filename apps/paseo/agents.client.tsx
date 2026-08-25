@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import React, { useState } from "react";
 import { Text, View } from "react-native";
 import { cliInstall, cliStatus, cliUpdateApply, cliUpdateCheck } from "./cli.shared";
+import { limitsResume, limitsSetAuto, limitsStatus, type LimitEvent } from "./limits.shared";
 import {
   accountUsage,
   addAccount,
@@ -102,6 +103,9 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const callCooldown = useRpc(setCooldown);
   const callAddAccount = useRpc(addAccount);
   const callUsage = useRpc(accountUsage);
+  const callLimitsStatus = useRpc(limitsStatus);
+  const callLimitsSetAuto = useRpc(limitsSetAuto);
+  const callLimitsResume = useRpc(limitsResume);
 
   const [diagnosis, setDiagnosis] = useState<Record<string, string>>({});
   const [diagnosing, setDiagnosing] = useState<string | null>(null);
@@ -125,6 +129,25 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
     enabled: false,
   });
   const refresh = () => void queryClient.invalidateQueries({ queryKey: ["agent-link"] });
+
+  // Cheap (a JSON file read) and it arms the sentry, so it runs on mount and
+  // refreshes on a slow poll — a dead agent shows up without a manual refresh.
+  const limitsQuery = useQuery({
+    queryKey: ["agent-link", "limits"],
+    queryFn: () => callLimitsStatus({}),
+    refetchInterval: 30000,
+  });
+  const limitsAutoMutation = useMutation({
+    mutationFn: (auto: boolean) => callLimitsSetAuto({ auto }),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["agent-link", "limits"] }),
+  });
+  const limitsResumeMutation = useMutation({
+    mutationFn: (agentId: string) => callLimitsResume({ agentId }),
+    onSuccess: (result) => {
+      setNotice(result.ok ? "Agent nudged — it continues on a healthy account" : `Resume failed: ${result.error ?? "unknown"}`);
+      void queryClient.invalidateQueries({ queryKey: ["agent-link", "limits"] });
+    },
+  });
 
   const routerMutation = useMutation({
     mutationFn: async (providers: ProviderId[]) => {
@@ -843,6 +866,53 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
         </>
       ) : scanQuery.isLoading ? (
         <Loading label="Reading accounts…" />
+      ) : null}
+
+      {limitsQuery.data ? (
+        <Section title="limit sentry">
+          <Card>
+            <Row
+              first
+              title="Auto-resume agents that die on a limit"
+              subtitle={
+                limitsQuery.data.watching
+                  ? "Watching this daemon. A relaunch goes through the account router, so the chat continues on a healthy account."
+                  : "Arms when the panel talks to the daemon — it is armed now."
+              }
+              trailing={
+                <Button
+                  label={limitsQuery.data.auto ? "Auto: on" : "Auto: off"}
+                  variant={limitsQuery.data.auto ? "primary" : "ghost"}
+                  loading={limitsAutoMutation.isPending}
+                  onPress={() => limitsAutoMutation.mutate(!limitsQuery.data.auto)}
+                />
+              }
+            />
+            {limitsQuery.data.events.map((event: LimitEvent) => (
+              <Row
+                key={event.agentId}
+                title={event.title ?? event.agentId}
+                subtitle={`${event.provider} · ${new Date(event.at).toLocaleString()} · ${event.detail}`}
+                trailing={
+                  event.action === "auto-resumed" ? (
+                    <StatusPill status="ok" label="resumed" />
+                  ) : event.action === "resume-failed" ? (
+                    <StatusPill status="error" label="resume failed" />
+                  ) : (
+                    <Button
+                      label="Resume"
+                      loading={limitsResumeMutation.isPending}
+                      onPress={() => limitsResumeMutation.mutate(event.agentId)}
+                    />
+                  )
+                }
+              />
+            ))}
+            {limitsQuery.data.events.length === 0 ? (
+              <Text style={t.text.caption}>No agent has died on a limit since the daemon started. Good.</Text>
+            ) : null}
+          </Card>
+        </Section>
       ) : null}
 
       <Disclosure title="How this works">
