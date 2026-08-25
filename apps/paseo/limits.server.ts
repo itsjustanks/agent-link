@@ -33,7 +33,10 @@ const STATE_PATH = (() => {
 })();
 
 const LIMIT_ERROR = /usage limit|rate limit|spend limit|limit reached|billing|out of credits|quota exceeded/i;
-const OUR_PROVIDERS = /^(claude|codex)/;
+// Every provider's limit-death is worth SHOWING; only providers with an
+// account pool behind them are worth auto-nudging — for the rest a retry just
+// hammers the same exhausted account, so the human picks the moment.
+const ROUTED_PROVIDERS = /^(claude|codex)/;
 const NUDGE =
   "You stopped because the provider account hit its usage limit. The account router has moved this conversation to a healthy account. Continue the task exactly where you left off; do not redo completed work.";
 const EVENT_KEEP = 20;
@@ -118,7 +121,6 @@ async function handleErroredAgent(paseo: PaseoLike, update: unknown): Promise<vo
   // than "error" — both shapes mean the same thing here.
   const errored = snap.status === "error" || snap.attentionReason === "error";
   if (!snap.id || !errored) return;
-  if (!OUR_PROVIDERS.test(snap.provider ?? "")) return;
   const now = Date.now();
   const seen = lastSeen.get(snap.id) ?? 0;
   if (now - seen < DEBOUNCE_MS) return;
@@ -132,8 +134,13 @@ async function handleErroredAgent(paseo: PaseoLike, update: unknown): Promise<vo
     provider: snap.provider ?? "",
     at: new Date(now).toISOString(),
   };
-  if (!loadState().auto) {
-    record({ ...base, action: "needs-resume", detail: matched });
+  const routed = ROUTED_PROVIDERS.test(snap.provider ?? "");
+  if (!loadState().auto || !routed) {
+    record({
+      ...base,
+      action: "needs-resume",
+      detail: routed ? matched : `${matched} — no account pool for this provider; resume when its limit resets`,
+    });
     return;
   }
   try {
