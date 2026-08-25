@@ -32,6 +32,7 @@ import {
   Row,
   Screen,
   Section,
+  Segmented,
   Spark,
   StatusPill,
   Tag,
@@ -869,22 +870,28 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
       ) : null}
 
       {limitsQuery.data ? (
-        <Section title="limit sentry">
+        <Section
+          title="limit sentry"
+          trailing={
+            <StatusPill
+              status={limitsQuery.data.watching ? "ok" : "neutral"}
+              label={limitsQuery.data.watching ? "watching" : "arming\u2026"}
+            />
+          }
+        >
           <Card>
             <Row
               first
               title="Auto-resume agents that die on a limit"
-              subtitle={
-                limitsQuery.data.watching
-                  ? "Watching this daemon. A relaunch goes through the account router, so the chat continues on a healthy account."
-                  : "Arms when the panel talks to the daemon — it is armed now."
-              }
+              subtitle="A dead agent gets one nudge to continue; the relaunch routes to a healthy account. Kimi, Grok and other single-account providers are listed for manual resume instead."
               trailing={
-                <Button
-                  label={limitsQuery.data.auto ? "Auto: on" : "Auto: off"}
-                  variant={limitsQuery.data.auto ? "primary" : "ghost"}
-                  loading={limitsAutoMutation.isPending}
-                  onPress={() => limitsAutoMutation.mutate(!limitsQuery.data.auto)}
+                <Segmented
+                  options={[
+                    { value: "on", label: "Auto" },
+                    { value: "off", label: "Manual" },
+                  ]}
+                  value={limitsQuery.data.auto ? "on" : "off"}
+                  onChange={(value) => limitsAutoMutation.mutate(value === "on")}
                 />
               }
             />
@@ -892,7 +899,13 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
               <Row
                 key={event.agentId}
                 title={event.title ?? event.agentId}
-                subtitle={`${event.provider} · ${new Date(event.at).toLocaleString()} · ${event.detail}`}
+                subtitle={event.detail}
+                meta={
+                  <>
+                    <Tag label={event.provider} />
+                    <Tag label={agoLabel(Math.floor(new Date(event.at).getTime() / 1000)) } />
+                  </>
+                }
                 trailing={
                   event.action === "auto-resumed" ? (
                     <StatusPill status="ok" label="resumed" />
@@ -909,7 +922,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
               />
             ))}
             {limitsQuery.data.events.length === 0 ? (
-              <Text style={t.text.caption}>No agent has died on a limit since the daemon started. Good.</Text>
+              <Text style={t.text.caption}>No agent has died on a limit since the daemon started.</Text>
             ) : null}
           </Card>
         </Section>

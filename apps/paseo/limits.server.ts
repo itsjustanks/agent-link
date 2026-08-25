@@ -38,12 +38,13 @@ const LIMIT_ERROR = /usage limit|rate limit|spend limit|limit reached|billing|ou
 // hammers the same exhausted account, so the human picks the moment.
 const ROUTED_PROVIDERS = /^(claude|codex)/;
 const NUDGE =
-  "You stopped because the provider account hit its usage limit. The account router has moved this conversation to a healthy account. Continue the task exactly where you left off; do not redo completed work.";
+  "You stopped because the provider account hit its usage limit. The account router has moved this conversation to a healthy account. Continue the task exactly where you left off; do not redo completed work. If the remaining work is long-running and you have Paseo tools, create a heartbeat (for example every 10 minutes, stopping when the task is complete) so you keep making progress without supervision.";
 const EVENT_KEEP = 20;
 const DEBOUNCE_MS = 5 * 60 * 1000;
 
 type PaseoLike = {
   agents: {
+    list(options?: Record<string, unknown>): Promise<unknown>;
     subscribe(handler: (update: unknown) => void): () => void;
     ref(id: string): {
       send(text: string): Promise<void>;
@@ -64,9 +65,11 @@ const lastSeen = new Map<string, number>();
 function loadState(): Persisted {
   try {
     const raw = JSON.parse(readFileSync(STATE_PATH, "utf8")) as Persisted;
-    return { auto: raw.auto === true, events: Array.isArray(raw.events) ? raw.events : [] };
+    // Auto is the point of the sentry, so it defaults ON; the toggle records
+    // an explicit false when the user turns it off.
+    return { auto: raw.auto !== false, events: Array.isArray(raw.events) ? raw.events : [] };
   } catch {
-    return { auto: false, events: [] };
+    return { auto: true, events: [] };
   }
 }
 
@@ -159,6 +162,14 @@ export function ensureLimitSentry(paseo: unknown): void {
   unsubscribe = p.agents.subscribe((update) => {
     void handleErroredAgent(p, update).catch(() => {});
   });
+  // subscribe() is only a local listener; the daemon streams agent updates
+  // once a directory subscription exists. Without this, the sentry hears
+  // nothing when no app window is attached.
+  try {
+    void Promise.resolve(p.agents.list({ subscribe: {} })).catch(() => {});
+  } catch {
+    // An older daemon without subscription support still works panel-side.
+  }
   armed = true;
 }
 
