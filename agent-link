@@ -243,6 +243,9 @@ slot_available_primary() { # $1 provider
     autopark "$1" primary "$reset"
     return 1
   fi
+  if [ "$1" = codex ]; then
+    codex_quota_scan primary "$HOME/.codex" || return 1
+  fi
   return 0
 }
 
@@ -271,9 +274,17 @@ for f in glob.glob(os.path.join(d, "projects", "*", "*.jsonl")):
         newest, newest_m = f, m
 if not newest or newest_m < cutoff:
     sys.exit(1)
+floor = 0
 try:
+    floor = int(open(newest + ".al-moved").read().strip())
+except (OSError, ValueError):
+    pass
+try:
+    size = os.path.getsize(newest)
+    if size <= floor:
+        sys.exit(1)  # nothing written since the move — the tail is another account's story
     with open(newest, "rb") as fh:
-        fh.seek(max(0, os.path.getsize(newest) - 20000))
+        fh.seek(max(floor, size - 20000))
         tail = fh.read().decode("utf-8", "ignore")
 except OSError:
     sys.exit(1)
@@ -605,6 +616,74 @@ slot_available() { # $1 provider, $2 email
   if reset="$(recently_refused "$1" "$(slot_dir "$1" "$2")")"; then
     autopark "$1" "$2" "$reset"
     return 1
+  fi
+  if [ "$1" = codex ]; then
+    codex_quota_scan "$2" "$(slot_dir "$1" "$2")" || return 1
+  fi
+  return 0
+}
+
+# Codex needs no hooks at all: every turn's rollout line carries
+# rate_limits.primary.{used_percent,resets_at} and rate_limit_reached_type.
+# Read the newest rollout's tail at routing time and apply the same policy as
+# Claude's statusline wrapper — reached or >=99%% parks until Codex's own
+# resets_at, >=85%% (fresh data only) flags nearing, back under 75%% clears.
+codex_quota_scan() { # $1 key (email|primary), $2 config dir — 1 = just parked
+  local key="$1" dir="$2" f state used resets reached fresh now
+  f="$(ls -t "$dir"/sessions/*/*/*/*.jsonl 2>/dev/null | head -1)"
+  [ -n "$f" ] || return 0
+  now="$(date +%s)"
+  state="$(python3 - "$f" <<'PY2' 2>/dev/null
+import json, os, sys, time
+path = sys.argv[1]
+floor = 0
+try:
+    floor = int(open(path + ".al-moved").read().strip())
+except (OSError, ValueError):
+    pass
+try:
+    size = os.path.getsize(path)
+    if size <= floor:
+        sys.exit(0)  # untouched since the move: the tail is old-account data
+    with open(path, "rb") as fh:
+        fh.seek(max(floor, size - 60000))
+        tail = fh.read().decode("utf-8", "ignore")
+except OSError:
+    sys.exit(0)
+for line in reversed(tail.splitlines()):
+    if '"rate_limits"' not in line:
+        continue
+    try:
+        rl = json.loads(line)["payload"]["rate_limits"]
+    except Exception:
+        continue
+    prim = rl.get("primary") or {}
+    used = prim.get("used_percent")
+    if used is None:
+        continue
+    resets = prim.get("resets_at") or 0
+    reached = 1 if rl.get("rate_limit_reached_type") else 0
+    fresh = 1 if time.time() - os.stat(path).st_mtime < 45 * 60 else 0
+    print(f"{float(used):.1f} {int(resets)} {reached} {fresh}")
+    break
+PY2
+)"
+  [ -n "$state" ] || return 0
+  set -- $state
+  used="${1%%.*}"; resets="$2"; reached="$3"; fresh="$4"
+  mkdir -p "$(pools_dir)"
+  if { [ "$reached" = 1 ] || [ "$used" -ge 99 ]; } && [ "$resets" -gt "$now" ]; then
+    echo "$resets" > "$(pools_dir)/cooldown-codex-$key"
+    echo "auto: quota exhausted (rollout)" > "$(pools_dir)/reason-codex-$key"
+    rm -f "$(pools_dir)/nearing-codex-$key"
+    echo "$(date '+%Y-%m-%d %H:%M')  parked codex/$key at ${used}% until its reset (rollout)" >> "$STATE/autopark.log"
+    return 1
+  fi
+  if [ "$used" -ge 85 ] && [ "$fresh" = 1 ]; then
+    [ -f "$(pools_dir)/nearing-codex-$key" ] ||       echo "$(date '+%Y-%m-%d %H:%M')  nearing mark on codex/$key at ${used}% (rollout)" >> "$STATE/autopark.log"
+    date +%s > "$(pools_dir)/nearing-codex-$key"
+  elif [ "$used" -lt 75 ]; then
+    rm -f "$(pools_dir)/nearing-codex-$key"
   fi
   return 0
 }
@@ -962,10 +1041,12 @@ IFS="\$old_ifs"
 # resume elsewhere fails with "No conversation found with session ID". Detect a
 # session id in the args and pin to the account that owns it.
 aa_sid=""
+aa_cont=""
 aa_prev=""
 for aa_a in "\$@"; do
   case "\$aa_a" in
     --resume=*) aa_sid="\${aa_a#--resume=}" ;;
+    -c|--continue|--last) aa_cont=1 ;;
     -*) ;;
     *)
       case "\$aa_prev" in
@@ -976,6 +1057,11 @@ for aa_a in "\$@"; do
   aa_prev="\$aa_a"
 done
 aa_pin=""
+# "--continue" means the newest chat in THIS project — which may live in any
+# account. The CLI finds it and routes it like a resume of that session.
+if [ -z "\$aa_sid" ] && [ -n "\$aa_cont" ] && [ -x "$self" ]; then
+  aa_pin="\$("$self" continue-target $p "\$PWD" 2>/dev/null || true)"
+fi
 if [ -n "\$aa_sid" ]; then
   # The CLI resolves which account owns this session — and when that account is
   # parked or was just refused for a limit, it hands the transcript to a
@@ -987,12 +1073,12 @@ if [ -n "\$aa_sid" ]; then
   if [ -z "\$aa_pin" ]; then
     # The CLI was missing or failed — at least pin to the owner so the resume
     # still works. The primary owns sessions too, so it must be searched.
-    if [ -n "\$(find "$primary_search" -maxdepth 4 -name "*\$aa_sid*" -print -quit 2>/dev/null)" ]; then
+    if [ -n "\$(find "$primary_search" -maxdepth 5 -name "*\$aa_sid*" -print -quit 2>/dev/null)" ]; then
       aa_pin="primary"
     else
       for aa_d in "\$aa_root/accounts/$p"/*/; do
         [ -d "\$aa_d" ] || continue
-        if [ -n "\$(find "\$aa_d" -maxdepth 4 -name "*\$aa_sid*" -print -quit 2>/dev/null)" ]; then
+        if [ -n "\$(find "\$aa_d" -maxdepth 5 -name "*\$aa_sid*" -print -quit 2>/dev/null)" ]; then
           aa_pin="\${aa_d%/}"
           break
         fi
@@ -1076,12 +1162,12 @@ cmd_exec_auto() { # $1 provider, rest = args for the real CLI
 # first — leaving it out is how resumes end up "not found".
 session_owner() { # $1 provider, $2 session-id
   local d
-  if [ -n "$(find "$(primary_dir "$1")" -maxdepth 4 -name "*$2*" -print -quit 2>/dev/null)" ]; then
+  if [ -n "$(find "$(primary_dir "$1")" -maxdepth 5 -name "*$2*" -print -quit 2>/dev/null)" ]; then
     echo primary; return 0
   fi
   for d in "$ACCOUNTS/$1"/*/; do
     [ -d "$d" ] || continue
-    if [ -n "$(find "$d" -maxdepth 4 -name "*$2*" -print -quit 2>/dev/null)" ]; then
+    if [ -n "$(find "$d" -maxdepth 5 -name "*$2*" -print -quit 2>/dev/null)" ]; then
       basename "${d%/}"; return 0
     fi
   done
@@ -1099,11 +1185,19 @@ session_copy() { # $1 src dir, $2 dest dir, $3 session-id
   local hit rel copied=""
   while IFS= read -r hit; do
     [ -n "$hit" ] || continue
+    case "$hit" in *.al-moved) continue ;; esac
     rel="${hit#$1/}"
     mkdir -p "$(dirname "$2/$rel")"
-    cp "$hit" "$2/$rel" && copied=1
+    if cp "$hit" "$2/$rel"; then
+      copied=1
+      # The copied tail describes the SOURCE account — its refusals and its
+      # rate_limits. Record where the move ended so the health scanners only
+      # read what THIS account appends afterwards; without this, moving a dead
+      # chat parks the healthy account it just moved to.
+      wc -c < "$2/$rel" | tr -d ' ' > "$2/$rel.al-moved"
+    fi
   done <<EOF2
-$(find "$1" -maxdepth 4 -name "*$3*" -type f 2>/dev/null)
+$(find "$1" -maxdepth 5 -name "*$3*" -type f 2>/dev/null)
 EOF2
   [ -n "$copied" ]
 }
@@ -1187,6 +1281,40 @@ cmd_resume_target() { # $1 provider, $2 session-id
   date +%s > "$(pools_dir)/last-$p-$best"
   echo "$(date '+%Y-%m-%d %H:%M')  moved session $sid $owner -> $best on resume (owner parked)" >> "$STATE/autopark.log"
   echo "$([ "$best" = primary ] && echo primary || echo "$dest_dir")"
+}
+
+# `claude -c` means "continue the newest chat in this project" — but newest in
+# WHICH account? Find the freshest transcript for this cwd across the primary
+# and every slot, then route it exactly like a --resume of that session (so a
+# parked owner hands the chat to a healthy account first). Claude names project
+# dirs by replacing every non-alphanumeric in the cwd with a dash.
+cmd_continue_target() { # $1 provider, $2 cwd
+  prov_valid "${1:-}" && [ -n "${2:-}" ] || return 0
+  local p="$1" slug d f m best="" best_m=0 sid
+  slug="$(printf %s "$2" | LC_ALL=C sed 's/[^A-Za-z0-9]/-/g')"
+  for d in "$(primary_dir "$p")" "$ACCOUNTS/$p"/*/; do
+    d="${d%/}"
+    if [ "$p" = claude ]; then
+      # Claude keys history by project: newest transcript for THIS cwd.
+      [ -d "$d/projects/$slug" ] || continue
+      f="$(ls -t "$d/projects/$slug"/*.jsonl 2>/dev/null | head -1)"
+    else
+      # Codex `resume --last` is global: newest rollout, whatever the cwd.
+      f="$(ls -t "$d"/sessions/*/*/*/*.jsonl 2>/dev/null | head -1)"
+    fi
+    [ -n "$f" ] || continue
+    m="$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)"
+    if [ "$m" -gt "$best_m" ]; then best_m="$m"; best="$f"; fi
+  done
+  [ -n "$best" ] || return 0
+  if [ "$p" = claude ]; then
+    sid="$(basename "$best" .jsonl)"
+  else
+    # rollout-<timestamp>-<uuid>.jsonl — the uuid is the session id.
+    sid="$(basename "$best" .jsonl | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' || true)"
+    [ -n "$sid" ] || return 0
+  fi
+  cmd_resume_target "$p" "$sid"
 }
 
 cmd_pick() { # provider — print the account to use next (used by the launchers)
@@ -2070,6 +2198,7 @@ main() {
     pick)    shift; cmd_pick "$@" ;;
     handoff) shift; cmd_handoff "$@" ;;
     resume-target) shift; cmd_resume_target "$@" ;;
+    continue-target) shift; cmd_continue_target "$@" ;;
     nearing) shift; cmd_nearing "$@" ;;
     refused) shift; cmd_refused "$@" ;;
     hooks)   shift; cmd_hooks "$@" ;;

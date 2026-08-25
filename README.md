@@ -172,6 +172,8 @@ This wires the two signals Claude Code actually emits, per account:
 
 So the full lifecycle is hands-off: drain at 85% → park at 99% or on the refusal → dead chats continue on the next `--resume` → the park expires at the real reset. `agent-link pools` shows the *nearing limit* tier; `agent-link hooks remove` undoes everything.
 
+**Codex gets the same lifecycle with no hooks at all**: every Codex turn writes `used_percent`, the reset time, and a limit-reached flag into its own rollout file, and the router reads the newest one at routing time — 85% flags nearing, 99% or the flag parks until Codex's own reset. `codex resume <id>` and `codex resume --last` route through the same owner-or-healthiest logic as Claude resumes, and `claude -c` / `--continue` finds the newest chat for the current project across every account. Moved transcripts are offset-marked so a dead account's telemetry can never park the healthy account it was moved to.
+
 To sweep up in bulk, or move a chat somewhere specific by hand:
 
 ```sh
