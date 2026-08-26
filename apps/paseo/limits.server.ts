@@ -59,6 +59,7 @@ type PaseoLike = {
       timeline: { refetch(options?: { limit?: number }): Promise<unknown> };
       refresh(): Promise<unknown>;
       current(): unknown;
+      archive(): Promise<unknown>;
     };
   };
 };
@@ -222,6 +223,42 @@ async function actOnLimitDeath(
   }
 }
 
+// Janitor: every live agent holds its whole timeline in the daemon's JS heap,
+// and heap pressure is what starts the eviction spiral (dead runtimes, blank
+// tabs). Agents idle for over a day are finished work nobody archived — sweep
+// them into the archive, a few at a time, once an hour. Soft-delete only:
+// archived agents remain in the archived list.
+const JANITOR_IDLE_MS = 24 * 60 * 60 * 1000;
+const JANITOR_INTERVAL_MS = 60 * 60 * 1000;
+const JANITOR_BATCH = 10;
+let janitorTimer: ReturnType<typeof setInterval> | null = null;
+
+async function janitorSweep(paseo: PaseoLike): Promise<void> {
+  try {
+    const page = (await paseo.agents.list({})) as { entries?: unknown[] };
+    const now = Date.now();
+    let archived = 0;
+    for (const raw of page.entries ?? []) {
+      if (archived >= JANITOR_BATCH) break;
+      const snap = ((raw as Record<string, unknown>).agent ?? raw) as Record<string, unknown>;
+      const id = typeof snap.id === "string" ? snap.id : "";
+      const status = typeof snap.status === "string" ? snap.status : "";
+      const last = typeof snap.lastActivityAt === "string" ? Date.parse(snap.lastActivityAt) : NaN;
+      if (!id || (status !== "idle" && status !== "closed")) continue;
+      if (!Number.isFinite(last) || now - last < JANITOR_IDLE_MS) continue;
+      try {
+        await paseo.agents.ref(id).archive();
+        archived += 1;
+      } catch {
+        // an agent that refuses to archive is left alone
+      }
+    }
+    if (archived > 0) console.log(`[agent-link] janitor archived ${archived} agents idle >24h`);
+  } catch {
+    // list unavailable — try again next hour
+  }
+}
+
 export function ensureLimitSentry(paseo: unknown): void {
   lastPaseo = paseo as PaseoLike;
   if (armed) return;
@@ -238,6 +275,10 @@ export function ensureLimitSentry(paseo: unknown): void {
   } catch {
     // An older daemon without subscription support still works panel-side.
   }
+  if (!janitorTimer) {
+    janitorTimer = setInterval(() => void janitorSweep(p), JANITOR_INTERVAL_MS);
+    void janitorSweep(p);
+  }
   armed = true;
 }
 
@@ -247,6 +288,10 @@ onShutdown(() => {
   } finally {
     unsubscribe = null;
     armed = false;
+    if (janitorTimer) {
+      clearInterval(janitorTimer);
+      janitorTimer = null;
+    }
   }
 });
 
