@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.5.6"
+VERSION="0.5.7"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -815,6 +815,97 @@ EOF
 }
 
 
+# A hold never expires — which is right for "this account is refusing" and
+# WRONG the moment the month rolls over or the user raises the cap. Nothing
+# but a real call can tell the difference, so re-prove held accounts on a
+# schedule: one tiny call each, and any that serves is released immediately.
+# Move a conversation to a healthy account and print the one command that
+# continues it there. This is the honest form of "switch accounts": a running
+# process can never change account, but its next resume can.
+cmd_switch() { # [provider] [session-id] — default: the newest session in this cwd
+  local p="${1:-claude}" sid="${2:-}" target owner
+  prov_valid "$p" || { echo "usage: agent-link switch [claude|codex] [session-id]" >&2; return 1; }
+  if [ -z "$sid" ]; then
+    target="$(cmd_continue_target "$p" "$PWD" 2>/dev/null || true)"
+    local slug f best="" best_m=0 d m
+    slug="$(printf %s "$PWD" | LC_ALL=C sed 's/[^A-Za-z0-9]/-/g')"
+    for d in "$(primary_dir "$p")" "$ACCOUNTS/$p"/*/; do
+      d="${d%/}"
+      if [ "$p" = claude ]; then f="$(ls -t "$d/projects/$slug"/*.jsonl 2>/dev/null | head -1)"
+      else f="$(ls -t "$d"/sessions/*/*/*/*.jsonl 2>/dev/null | head -1)"; fi
+      [ -n "$f" ] || continue
+      m="$(stat -f %m "$f" 2>/dev/null || echo 0)"
+      [ "$m" -gt "$best_m" ] && { best_m="$m"; best="$f"; }
+    done
+    [ -n "$best" ] || { echo "no conversation found for $PWD" >&2; return 1; }
+    if [ "$p" = claude ]; then sid="$(basename "$best" .jsonl)"
+    else sid="$(basename "$best" .jsonl | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')"; fi
+  fi
+  owner="$(session_owner "$p" "$sid")" || { echo "session '$sid' not found in any $p account" >&2; return 1; }
+  echo "session $sid"
+  echo "  currently on: $owner"
+  target="$(cmd_resume_target "$p" "$sid" --go 2>/dev/null || true)"
+  [ -n "$target" ] || { echo "  no healthy account to move to — run: agent-link revalidate" >&2; return 1; }
+  if [ "$target" = primary ]; then
+    echo "  moved to: primary"
+    echo
+    echo "continue it with:  $p --resume $sid"
+  else
+    echo "  moved to: $(basename "$target")"
+    echo
+    echo "continue it with:  agent-link run $p $(basename "$target") $p --resume $sid"
+  fi
+  echo "(in Paseo: just send the agent a message — the launcher routes the resume for you)"
+}
+
+HOLD_RECHECK_HOURS=6
+
+cmd_revalidate() { # [provider] — probe only HELD accounts, release those that serve
+  local p="${1:-claude}" e dir out held=0
+  prov_valid "$p" || { echo "usage: agent-link revalidate [claude]" >&2; return 1; }
+  [ "$p" = claude ] || { echo "revalidate supports claude only" >&2; return 1; }
+  for e in primary $(slot_list "$p"); do
+    [ -f "$(pools_dir)/hold-$p-$e" ] || continue
+    held=$((held+1))
+    if [ "$e" = primary ]; then dir=""; else dir="$(slot_dir "$p" "$e")"; fi
+    printf '  %-28s ' "$e"
+    if [ -n "$dir" ]; then
+      out="$(CLAUDE_CONFIG_DIR="$dir" claude -p "ok" 2>&1 | tr '\n' ' ')"
+    else
+      out="$(claude -p "ok" 2>&1 | tr '\n' ' ')"
+    fi
+    case "$out" in
+      *"spend limit"*|*"usage limit"*|*"rate limit"*|*"Credit balance"*)
+        printf 'still refusing — hold stands\n' ;;
+      *)
+        rm -f "$(pools_dir)/hold-$p-$e" "$(pools_dir)/cooldown-$p-$e" "$(pools_dir)/reason-$p-$e"
+        printf 'RECOVERED — released back into rotation\n'
+        echo "$(date '+%Y-%m-%d %H:%M')  released $p/$e — it serves again (revalidate)" >> "$STATE/autopark.log"
+        ;;
+    esac
+    date +%s > "$(pools_dir)/holdcheck-$p-$e"
+  done
+  [ "$held" -gt 0 ] || echo "  no held $p accounts to re-prove"
+}
+
+# Fired detached from a launch when a hold has gone stale, so recovery happens
+# without anyone remembering to run anything.
+maybe_revalidate() { # $1 provider
+  local e f age now self
+  [ "$1" = claude ] || return 0
+  now="$(date +%s)"
+  for f in "$(pools_dir)"/hold-$1-*; do
+    [ -f "$f" ] || continue
+    e="${f##*/hold-$1-}"
+    age="$(cat "$(pools_dir)/holdcheck-$1-$e" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo 0)"
+    if [ $(( now - age )) -gt $(( HOLD_RECHECK_HOURS * 3600 )) ]; then
+      self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+      [ -x "$self" ] && ( "$self" revalidate "$1" >/dev/null 2>&1 & ) 
+      return 0
+    fi
+  done
+}
+
 cmd_router() { # [install|status]
   case "${1:-install}" in
     install)
@@ -914,6 +1005,7 @@ cmd_prefer() { # $1 provider [$2 email|primary] [first|last|clear]
 # Print the slot to use next ("primary" or an email), and stamp it as used.
 pick_slot() { # $1 provider
   local best="" best_ts="" e ts pemail covered pass
+  maybe_revalidate "$1"
   mkdir -p "$(pools_dir)"
   # The primary counts as a candidate unless a slot already holds that account.
   pemail="$(primary_email "$1")"
@@ -2537,6 +2629,8 @@ usage:
   agent-link nearing <prov> [email|primary] [clear]  soft-flag an account nearing its limit
   agent-link usage                 /usage across accounts: live window %%, resets, park state
   agent-link router [install|status]   optional AgentRouter provider: cheap triage, task-based delegation
+  agent-link switch [prov] [sid]   move this conversation to a healthy account and print the resume
+  agent-link revalidate [prov]     re-prove HELD accounts; release any that serve again
   agent-link prefer <prov> [email|primary] [first|last|clear]  bias routing toward/away from an account
   agent-link cooldown <prov> <email> hold          park with NO expiry (release: clear, or a passing probe)
   agent-link hooks [install|remove|status] [--primary]  wire Claude Code itself to report limits
@@ -2576,6 +2670,8 @@ main() {
     prefer)  shift; cmd_prefer "$@" ;;
     usage)   cmd_usage ;;
     router)  shift; cmd_router "$@" ;;
+    revalidate) shift; cmd_revalidate "$@" ;;
+    switch)  shift; cmd_switch "$@" ;;
     refused) shift; cmd_refused "$@" ;;
     hooks)   shift; cmd_hooks "$@" ;;
     pools)   cmd_pools ;;
