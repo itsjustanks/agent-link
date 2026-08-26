@@ -299,6 +299,11 @@ for line in tail.splitlines():
     if "usage limit" not in low and "spend limit" not in low and "limit reached" not in low:
         continue
     until = now + 60 * 60  # unknown reset: a short bench, re-proved on expiry
+    # A spend limit is monthly (or a budget someone must raise) — an hourly
+    # bench just re-burns one agent launch every hour, all day. Bench to the
+    # cap; each retry after that re-parks it in one launch, not twelve.
+    if "spend limit" in low:
+        until = now + 5 * 60 * 60
     m = re.search(r"resets?\s*(?:at\s*)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)", low)
     if m:
         hour = int(m.group(1)) % 12 + (12 if m.group(3) == "pm" else 0)

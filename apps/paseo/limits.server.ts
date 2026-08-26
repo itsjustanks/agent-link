@@ -42,6 +42,13 @@ const NUDGE =
 const EVENT_KEEP = 20;
 const DEBOUNCE_MS = 5 * 60 * 1000;
 const NON_LIMIT_GUARD_MS = 20 * 1000;
+// Claude Code delivers a limit refusal as a normal synthetic assistant
+// message: the turn COMPLETES and the agent settles at "idle", never "error".
+// So idle transitions get a cheap check of just the newest timeline entry for
+// the refusal phrasing — the error path alone would miss every such death.
+const REFUSAL_TEXT = /you've hit your [^.!\n]{0,40}limit|usage limit reached|monthly spend limit|spend limit reached/i;
+const IDLE_CHECK_GUARD_MS = 60 * 1000;
+const lastIdleCheck = new Map<string, number>();
 
 type PaseoLike = {
   agents: {
@@ -131,12 +138,45 @@ async function diedOnLimit(paseo: PaseoLike, agentId: string): Promise<string | 
   return null;
 }
 
+// The newest timeline entry's text, when it is a message-ish entry.
+async function newestEntryRefusal(paseo: PaseoLike, agentId: string): Promise<string | null> {
+  try {
+    const page = await paseo.agents.ref(agentId).timeline.refetch({ limit: 3 });
+    const entries = ((page as Record<string, unknown>)?.entries ?? []) as unknown[];
+    const last = entries[entries.length - 1] as Record<string, unknown> | undefined;
+    if (!last) return null;
+    const item = (last.item ?? {}) as Record<string, unknown>;
+    const text = [last.text, last.message, item.text, item.message]
+      .filter((v): v is string => typeof v === "string")
+      .join(" ");
+    const match = REFUSAL_TEXT.exec(text);
+    return match ? match[0] : null;
+  } catch {
+    return null;
+  }
+}
+
 async function handleErroredAgent(paseo: PaseoLike, update: unknown): Promise<void> {
   const snap = snapshotOf(update);
   // An ACP agent whose turn failed can settle as idle-with-attention rather
   // than "error" — both shapes mean the same thing here.
   const errored = snap.status === "error" || snap.attentionReason === "error";
-  if (!snap.id || !errored) return;
+  if (!snap.id) return;
+  if (!errored && snap.status === "idle") {
+    // Synthetic-refusal path: turn completed normally, but its final message
+    // is the provider saying no. Only the newest entry counts — a refusal
+    // deeper in the chat already had its chance.
+    const now = Date.now();
+    if (now - (lastIdleCheck.get(snap.id) ?? 0) < IDLE_CHECK_GUARD_MS) return;
+    lastIdleCheck.set(snap.id, now);
+    if (now - (lastSeen.get(snap.id) ?? 0) < DEBOUNCE_MS) return;
+    const refusal = await newestEntryRefusal(paseo, snap.id);
+    if (!refusal) return;
+    lastSeen.set(snap.id, now);
+    await actOnLimitDeath(paseo, snap, now, refusal);
+    return;
+  }
+  if (!errored) return;
   const now = Date.now();
   const seen = lastSeen.get(snap.id) ?? 0;
   if (now - seen < DEBOUNCE_MS) return;
@@ -148,6 +188,16 @@ async function handleErroredAgent(paseo: PaseoLike, update: unknown): Promise<vo
     return;
   }
   lastSeen.set(snap.id, now);
+  await actOnLimitDeath(paseo, snap, now, matched);
+}
+
+async function actOnLimitDeath(
+  paseo: PaseoLike,
+  snap: ReturnType<typeof snapshotOf>,
+  now: number,
+  matched: string,
+): Promise<void> {
+  if (!snap.id) return;
   const base = {
     agentId: snap.id,
     workspaceId: snap.workspaceId ?? null,
