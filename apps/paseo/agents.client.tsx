@@ -436,6 +436,24 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
 
   const usageDetail = (provider: ProviderId, row: AccountUsage) => (
     <Section title="last 7 days">
+      {row.held ? <ErrorText>{`HELD — ${row.held}`}</ErrorText> : null}
+      {row.quota ? (
+        <View style={{ gap: t.space.xs }}>
+          {row.quota.windows.map((w) => (
+            <Meter
+              key={w.label}
+              fraction={w.pct / 100}
+              tone={w.pct >= 99 ? "error" : w.pct >= 85 ? "attention" : "neutral"}
+              label={`${w.label} ${Math.round(w.pct)}%${w.resetsAt ? ` · resets ${new Date(w.resetsAt * 1000).toLocaleString(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit" })}` : ""}`}
+            />
+          ))}
+          <Text style={t.text.caption}>
+            {`${row.quota.model ? `${row.quota.model} · ` : ""}live usage as of ${agoLabel(row.quota.at)} — captured from the account's own sessions`}
+          </Text>
+        </View>
+      ) : (
+        <Text style={t.text.caption}>No live usage yet — it appears after this account runs one hooked session.</Text>
+      )}
       {row.models.length > 0 ? (
         <View style={{ flexDirection: "row", alignItems: "center", gap: t.space.xs }}>
           {row.models.slice(0, 3).map((model) => (

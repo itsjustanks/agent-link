@@ -1029,7 +1029,33 @@ async function usageForClaudeDir(dir: string, sinceMs: number, days: number) {
 export async function handleAccountUsage({ days }: { days: number }) {
   const window = Math.max(1, Math.min(30, days));
   const sinceMs = Date.now() - window * 86_400_000;
-  const shape = async (provider: "claude" | "codex", email: string, dir: string) => {
+  const readQuota = (provider: string, key: string) => {
+    const raw = readJson(join(poolsDir(), `quota-${provider}-${key}.json`)) as Record<string, unknown> | null;
+    if (!raw) return null;
+    const windows: Array<{ label: string; pct: number; resetsAt: number | null }> = [];
+    for (const [label, k] of [
+      ["5h", "five_hour"],
+      ["7d", "seven_day"],
+      ["week", "primary"],
+    ] as const) {
+      const w = raw[k] as { pct?: number; resets_at?: number } | undefined;
+      if (w && typeof w.pct === "number") windows.push({ label, pct: w.pct, resetsAt: typeof w.resets_at === "number" ? w.resets_at : null });
+    }
+    if (windows.length === 0) return null;
+    return {
+      at: typeof raw.at === "number" ? raw.at : 0,
+      model: typeof raw.model === "string" ? raw.model : typeof raw.plan === "string" ? raw.plan : "",
+      windows,
+    };
+  };
+  const readHeld = (provider: string, key: string): string | null => {
+    try {
+      return readFileSync(join(poolsDir(), `hold-${provider}-${key}`), "utf8").trim() || "held";
+    } catch {
+      return null;
+    }
+  };
+  const shape = async (provider: "claude" | "codex", email: string, dir: string, poolKey: string) => {
     const t = await usageForClaudeDir(dir, sinceMs, window);
     return {
       provider,
@@ -1045,14 +1071,16 @@ export async function handleAccountUsage({ days }: { days: number }) {
       daily: t.daily,
       topProject: t.topProject,
       models: [...t.models].sort(),
+      quota: readQuota(provider, poolKey),
+      held: readHeld(provider, poolKey),
     };
   };
   const pending = [];
   const primaryEmail = claudeAccountEmail(HOME);
-  if (primaryEmail) pending.push(shape("claude", primaryEmail, join(HOME, ".claude")));
+  if (primaryEmail) pending.push(shape("claude", primaryEmail, join(HOME, ".claude"), "primary"));
   for (const slot of collectSlots()) {
     if (slot.provider !== "claude") continue;
-    pending.push(shape("claude", slot.email, slot.dir));
+    pending.push(shape("claude", slot.email, slot.dir, slot.email));
   }
   return { accounts: await Promise.all(pending) };
 }

@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.5.2"
+VERSION="0.5.3"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -235,6 +235,7 @@ PY2
 # The primary has no slot dir, so its cooldown is tracked under "primary".
 slot_available_primary() { # $1 provider
   local until now
+  [ -f "$(pools_dir)/hold-$1-primary" ] && return 1
   until="$(cat "$(pools_dir)/cooldown-$1-primary" 2>/dev/null || echo 0)"
   now="$(date +%s)"
   [ "$until" -gt "$now" ] && return 1
@@ -299,11 +300,12 @@ for line in tail.splitlines():
     if "usage limit" not in low and "spend limit" not in low and "limit reached" not in low:
         continue
     until = now + 60 * 60  # unknown reset: a short bench, re-proved on expiry
-    # A spend limit is monthly (or a budget someone must raise) — an hourly
-    # bench just re-burns one agent launch every hour, all day. Bench to the
-    # cap; each retry after that re-parks it in one launch, not twelve.
+    # A spend limit is monthly, or a budget someone must raise. No amount of
+    # waiting proves it over, so it is a HOLD, not a bench — the caller parks
+    # it with no expiry and only a probe or an explicit clear releases it.
     if "spend limit" in low:
-        until = now + 5 * 60 * 60
+        print("hold")
+        sys.exit(0)
     m = re.search(r"resets?\s*(?:at\s*)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)", low)
     if m:
         hour = int(m.group(1)) % 12 + (12 if m.group(3) == "pm" else 0)
@@ -442,13 +444,22 @@ except Exception:
     sys.exit(0)
 rl = data.get("rate_limits") or {}
 worst, resets = 0.0, None
+snap = {"at": now, "model": ((data.get("model") or {}).get("display_name") or "")}
 for w in ("five_hour", "seven_day"):
     win = rl.get(w) or {}
     u = win.get("used_percentage")
     if u is None:
         continue
+    snap[w] = {"pct": float(u), "resets_at": win.get("resets_at")}
     if u > worst:
         worst, resets = float(u), win.get("resets_at")
+# The /usage numbers Claude showed this session, kept where the panel and
+# `agent-link usage` can render them per account.
+if len(snap) > 2:
+    try:
+        open(os.path.join(pools, f"quota-claude-{key}.json"), "w").write(json.dumps(snap))
+    except OSError:
+        pass
 nearing = os.path.join(pools, f"nearing-claude-{key}")
 cooldown = os.path.join(pools, f"cooldown-claude-{key}")
 log = os.path.join(os.path.dirname(pools), "autopark.log")
@@ -612,9 +623,28 @@ os.replace(tmp, path)
 PY2
 }
 
-# Park an account that just refused, until the reset time when one was parsed.
-autopark() { # $1 provider, $2 key (email or "primary"), $3 until-epoch (optional)
+# A HOLD is a park that never expires: a monthly spend limit, or a person
+# saying "keep this account out". Time cannot prove either one over — only a
+# passing probe or an explicit clear releases it.
+hold_set() { # $1 provider, $2 key, $3 reason
   mkdir -p "$(pools_dir)"
+  printf '%s\n' "${3:-held}" > "$(pools_dir)/hold-$1-$2"
+  rm -f "$(pools_dir)/nearing-$1-$2"
+}
+hold_get() { # $1 provider, $2 key — prints the reason if held
+  cat "$(pools_dir)/hold-$1-$2" 2>/dev/null
+}
+hold_clear() { rm -f "$(pools_dir)/hold-$1-$2"; }
+
+# Park an account that just refused, until the reset time when one was parsed.
+autopark() { # $1 provider, $2 key (email or "primary"), $3 until-epoch or "hold"
+  mkdir -p "$(pools_dir)"
+  if [ "${3:-}" = hold ]; then
+    hold_set "$1" "$2" "monthly spend limit — raise it at claude.ai/settings/usage, then: agent-link probe $1 (or cooldown clear)"
+    echo "$(date '+%Y-%m-%d %H:%M')  HELD $1/$2 (spend limit — no expiry; probe or clear to release)" >> "$STATE/autopark.log"
+    echo "auto: monthly spend limit" > "$(pools_dir)/reason-$1-$2"
+    return 0
+  fi
   echo "${3:-$(( $(date +%s) + 60 * 60 ))}" > "$(pools_dir)/cooldown-$1-$2"
   echo "auto: refused for a limit" > "$(pools_dir)/reason-$1-$2"
   echo "$(date '+%Y-%m-%d %H:%M')  auto-parked $1/$2 after a limit refusal" >> "$STATE/autopark.log"
@@ -623,6 +653,7 @@ autopark() { # $1 provider, $2 key (email or "primary"), $3 until-epoch (optiona
 slot_available() { # $1 provider, $2 email
   local until now reset
   prov_logged_in "$1" "$(slot_dir "$1" "$2")" || return 1
+  [ -f "$(pools_dir)/hold-$1-$2" ] && return 1
   until="$(cat "$(pools_dir)/cooldown-$1-$2" 2>/dev/null || echo 0)"
   now="$(date +%s)"
   [ "$until" -gt "$now" ] && return 1
@@ -646,7 +677,7 @@ codex_quota_scan() { # $1 key (email|primary), $2 config dir — 1 = just parked
   f="$(ls -t "$dir"/sessions/*/*/*/*.jsonl 2>/dev/null | head -1)"
   [ -n "$f" ] || return 0
   now="$(date +%s)"
-  state="$(python3 - "$f" <<'PY2' 2>/dev/null
+  state="$(python3 - "$f" "$(pools_dir)" "$key" <<'PY2' 2>/dev/null
 import json, os, sys, time
 path = sys.argv[1]
 floor = 0
@@ -677,6 +708,15 @@ for line in reversed(tail.splitlines()):
     resets = prim.get("resets_at") or 0
     reached = 1 if rl.get("rate_limit_reached_type") else 0
     fresh = 1 if time.time() - os.stat(path).st_mtime < 45 * 60 else 0
+    try:
+        pools = sys.argv[2] if len(sys.argv) > 2 else ""
+        key = sys.argv[3] if len(sys.argv) > 3 else ""
+        if pools and key:
+            snap = {"at": int(os.stat(path).st_mtime), "window_minutes": prim.get("window_minutes"),
+                    "primary": {"pct": float(used), "resets_at": int(resets)}, "plan": rl.get("plan_type")}
+            open(os.path.join(pools, f"quota-codex-{key}.json"), "w").write(json.dumps(snap))
+    except OSError:
+        pass
     print(f"{float(used):.1f} {int(resets)} {reached} {fresh}")
     break
 PY2
@@ -701,6 +741,96 @@ PY2
   return 0
 }
 
+# Routing preference: 0 = prefer first, 1 = normal, 2 = prefer last. Set with
+# `agent-link prefer <prov> <email|primary> first|last|clear`. Preference is a
+# tie-breaker ABOVE recency but BELOW health — a preferred account that is
+# parked, held or nearing still loses to a healthy ordinary one.
+pref_rank() { # $1 provider, $2 key
+  if grep -qxF "$2" "$STATE/prefer-$1-first" 2>/dev/null; then echo 0
+  elif grep -qxF "$2" "$STATE/prefer-$1-last" 2>/dev/null; then echo 2
+  else echo 1
+  fi
+}
+
+# The /usage view, across every account: live window percentages captured from
+# each session's own telemetry (Claude statusline, Codex rollouts), with age,
+# park/hold state and routing preference. Stale snapshots say so — an account
+# that has not run recently has no fresher truth to offer without a paid probe.
+cmd_usage() {
+  local p e key f state pref
+  for p in $PROVIDERS; do
+    echo "$p"
+    for key in primary $(slot_list "$p"); do
+      if [ "$key" = primary ]; then
+        e="$(primary_email "$p")"; [ -n "$e" ] || continue
+        e="$e (primary)"
+      else
+        prov_logged_in "$p" "$(slot_dir "$p" "$key")" || continue
+        e="$key"
+      fi
+      if [ -f "$(pools_dir)/hold-$p-$key" ]; then state="HELD"
+      elif [ "$(cat "$(pools_dir)/cooldown-$p-$key" 2>/dev/null || echo 0)" -gt "$(date +%s)" ]; then state="parked"
+      elif slot_nearing "$p" "$key" 2>/dev/null; then state="nearing"
+      else state="ok"
+      fi
+      pref="$(pref_rank "$p" "$key")"
+      case "$pref" in 0) pref=" · prefer first" ;; 2) pref=" · prefer last" ;; *) pref="" ;; esac
+      f="$(pools_dir)/quota-$p-$key.json"
+      printf '  %-34s %-8s%s\n' "$e" "$state" "$pref"
+      if [ -f "$f" ]; then
+        python3 - "$f" <<'PY3'
+import json, sys, time
+try: q = json.load(open(sys.argv[1]))
+except Exception: sys.exit(0)
+age = int((time.time() - q.get("at", 0)) / 60)
+stale = f" (as of {age}m ago)" if age > 30 else ""
+def bar(pct):
+    filled = int(round(pct / 10))
+    return "#" * filled + "-" * (10 - filled)
+def when(ts):
+    if not ts: return ""
+    return time.strftime("resets %a %H:%M", time.localtime(ts))
+rows = []
+for label, k in (("5h", "five_hour"), ("7d", "seven_day"), ("wk", "primary")):
+    w = q.get(k)
+    if not w: continue
+    rows.append(f"{label} [{bar(w['pct'])}] {w['pct']:.0f}%  {when(w.get('resets_at'))}")
+model = q.get("model") or q.get("plan") or ""
+for r in rows:
+    print(f"      {r}")
+if model or stale:
+    print(f"      {model}{stale}")
+PY3
+      else
+        echo "      no telemetry yet — run one session on it (or: agent-link probe $p)"
+      fi
+    done
+  done
+}
+
+cmd_prefer() { # $1 provider [$2 email|primary] [first|last|clear]
+  prov_valid "${1:-}" || { echo "usage: agent-link prefer <claude|codex> [email|primary] [first|last|clear]" >&2; return 1; }
+  local p="$1" key="${2:-}" verb="${3:-}" f
+  if [ -z "$key" ]; then
+    echo "$p routing preference:"
+    for f in first last; do
+      [ -s "$STATE/prefer-$p-$f" ] && while IFS= read -r e; do echo "  $f: $e"; done < "$STATE/prefer-$p-$f"
+    done
+    [ -s "$STATE/prefer-$p-first" ] || [ -s "$STATE/prefer-$p-last" ] || echo "  (none — pure least-recently-used)"
+    return 0
+  fi
+  { [ "$key" = primary ] || valid_account "$key"; } || { echo "bad account '$key'" >&2; return 1; }
+  mkdir -p "$STATE"
+  for f in first last; do
+    [ -f "$STATE/prefer-$p-$f" ] && grep -vxF "$key" "$STATE/prefer-$p-$f" > "$STATE/prefer-$p-$f.tmp" 2>/dev/null && mv "$STATE/prefer-$p-$f.tmp" "$STATE/prefer-$p-$f" || rm -f "$STATE/prefer-$p-$f.tmp"
+  done
+  case "$verb" in
+    first|last) echo "$key" >> "$STATE/prefer-$p-$verb"; echo "$p · $key: preferred $verb" ;;
+    clear|"")   echo "$p · $key: preference cleared" ;;
+    *) echo "usage: agent-link prefer <claude|codex> <email|primary> first|last|clear" >&2; return 1 ;;
+  esac
+}
+
 # Print the slot to use next ("primary" or an email), and stamp it as used.
 pick_slot() { # $1 provider
   local best="" best_ts="" e ts pemail covered pass
@@ -715,18 +845,22 @@ pick_slot() { # $1 provider
   fi
   # Two passes: accounts flagged as nearing their limit are only considered
   # when nothing unflagged is available — drain new work off them early.
+  local rank best_rank=""
   for pass in fresh nearing; do
     if [ -n "$pemail" ] && [ -z "$covered" ] && slot_available_primary "$1"; then
       if [ "$pass" = nearing ] || ! slot_nearing "$1" primary; then
         ts="$(cat "$(pools_dir)/last-$1-primary" 2>/dev/null || echo 0)"
-        best="primary"; best_ts="$ts"
+        best="primary"; best_ts="$ts"; best_rank="$(pref_rank "$1" primary)"
       fi
     fi
     for e in $(slot_list "$1"); do
       slot_available "$1" "$e" || continue
       [ "$pass" = fresh ] && slot_nearing "$1" "$e" && continue
       ts="$(cat "$(pools_dir)/last-$1-$e" 2>/dev/null || echo 0)"
-      if [ -z "$best" ] || [ "$ts" -lt "$best_ts" ]; then best="$e"; best_ts="$ts"; fi
+      rank="$(pref_rank "$1" "$e")"
+      if [ -z "$best" ] || [ "$rank" -lt "$best_rank" ] || { [ "$rank" -eq "$best_rank" ] && [ "$ts" -lt "$best_ts" ]; }; then
+        best="$e"; best_ts="$ts"; best_rank="$rank"
+      fi
     done
     [ -n "$best" ] && break
   done
@@ -1297,11 +1431,11 @@ cmd_resume_target() { # $1 provider, $2 session-id [--go]
       [ "$(prov_email "$p" "$(slot_dir "$p" "$e")")" = "$pemail" ] && covered=1
     done
   fi
-  local pass
+  local pass rank best_rank=""
   for pass in fresh nearing; do
     if [ -n "$pemail" ] && [ "$owner" != primary ] && [ -z "$covered" ] && slot_available_primary "$p"; then
       if [ "$pass" = nearing ] || ! slot_nearing "$p" primary; then
-        best=primary; best_ts="$(cat "$(pools_dir)/last-$p-primary" 2>/dev/null || echo 0)"
+        best=primary; best_ts="$(cat "$(pools_dir)/last-$p-primary" 2>/dev/null || echo 0)"; best_rank="$(pref_rank "$p" primary)"
       fi
     fi
     for e in $(slot_list "$p"); do
@@ -1309,7 +1443,10 @@ cmd_resume_target() { # $1 provider, $2 session-id [--go]
       slot_available "$p" "$e" || continue
       [ "$pass" = fresh ] && slot_nearing "$p" "$e" && continue
       ts="$(cat "$(pools_dir)/last-$p-$e" 2>/dev/null || echo 0)"
-      if [ -z "$best" ] || [ "$ts" -lt "$best_ts" ]; then best="$e"; best_ts="$ts"; fi
+      rank="$(pref_rank "$p" "$e")"
+      if [ -z "$best" ] || [ "$rank" -lt "$best_rank" ] || { [ "$rank" -eq "$best_rank" ] && [ "$ts" -lt "$best_ts" ]; }; then
+        best="$e"; best_ts="$ts"; best_rank="$rank"
+      fi
     done
     [ -n "$best" ] && break
   done
@@ -1374,8 +1511,14 @@ cmd_cooldown() { # provider email minutes — park an exhausted account
   local p="$1" e="$2" arg="${3:-180}"
   mkdir -p "$(pools_dir)"
   if [ "$arg" = clear ]; then
-    rm -f "$(pools_dir)/cooldown-$p-$e" "$(pools_dir)/reason-$p-$e"
-    echo "$p · $e: cooldown cleared"
+    rm -f "$(pools_dir)/cooldown-$p-$e" "$(pools_dir)/reason-$p-$e" "$(pools_dir)/hold-$p-$e"
+    echo "$p · $e: released (cooldown and hold cleared)"
+    return 0
+  fi
+  if [ "$arg" = hold ]; then
+    hold_set "$p" "$e" "held by you — release with: agent-link cooldown $p $e clear"
+    echo "held by you" > "$(pools_dir)/reason-$p-$e"
+    echo "$p · $e: HELD — routing skips it until you clear it (no expiry)"
     return 0
   fi
   echo "$(( $(date +%s) + arg * 60 ))" > "$(pools_dir)/cooldown-$p-$e"
@@ -1413,9 +1556,24 @@ cmd_probe() { # $1 provider (default claude), $2 model, [--park]
         ;;
       *) ok=1; printf '%sok%s\n' "$C_GREEN" "$C_OFF" ;;
     esac
-    if [ -z "$ok" ] && [ -n "$park" ]; then
-      cmd_cooldown "$p" "$e" 180 >/dev/null
-      echo "      parked for 180m — routing will skip it"
+    if [ -n "$ok" ]; then
+      # Proof of service releases whatever was holding the account back.
+      if [ -f "$(pools_dir)/hold-$p-$e" ] || [ -f "$(pools_dir)/cooldown-$p-$e" ]; then
+        rm -f "$(pools_dir)/hold-$p-$e" "$(pools_dir)/cooldown-$p-$e" "$(pools_dir)/reason-$p-$e"
+        echo "      released — it just served, so its park is over"
+      fi
+    elif [ -n "$park" ]; then
+      case "$out" in
+        *"spend limit"*)
+          hold_set "$p" "$e" "monthly spend limit — raise it at claude.ai/settings/usage, then: agent-link probe $p"
+          echo "auto: monthly spend limit" > "$(pools_dir)/reason-$p-$e"
+          echo "      HELD (spend limit) — no expiry; probe again or clear to release"
+          ;;
+        *)
+          cmd_cooldown "$p" "$e" 180 >/dev/null
+          echo "      parked for 180m — routing will skip it"
+          ;;
+      esac
     fi
   done
 }
@@ -1901,6 +2059,8 @@ cmd_pools() { # show what auto-routing sees
       last="$(cat "$(pools_dir)/last-$p-$e" 2>/dev/null || echo 0)"
       if ! prov_logged_in "$p" "$(slot_dir "$p" "$e")"; then
         state="not logged in"
+      elif [ -f "$(pools_dir)/hold-$p-$e" ]; then
+        state="HELD (no expiry)"
       elif [ "$until" -gt "$now" ]; then
         state="cooling down $(( (until - now + 59) / 60 ))m"
       elif slot_nearing "$p" "$e"; then
@@ -2257,6 +2417,9 @@ usage:
   agent-link pools                 show what auto-routing sees (available / cooling down)
   agent-link cooldown <prov> <email> [min|clear]   park an exhausted account
   agent-link nearing <prov> [email|primary] [clear]  soft-flag an account nearing its limit
+  agent-link usage                 /usage across accounts: live window %%, resets, park state
+  agent-link prefer <prov> [email|primary] [first|last|clear]  bias routing toward/away from an account
+  agent-link cooldown <prov> <email> hold          park with NO expiry (release: clear, or a passing probe)
   agent-link hooks [install|remove|status] [--primary]  wire Claude Code itself to report limits
   agent-link handoff <prov> <session-id> <email>   move a chat to another account
   agent-link env <prov> <email>    print an eval-able export for one slot
@@ -2291,6 +2454,8 @@ main() {
     resume-target) shift; cmd_resume_target "$@" ;;
     continue-target) shift; cmd_continue_target "$@" ;;
     nearing) shift; cmd_nearing "$@" ;;
+    prefer)  shift; cmd_prefer "$@" ;;
+    usage)   cmd_usage ;;
     refused) shift; cmd_refused "$@" ;;
     hooks)   shift; cmd_hooks "$@" ;;
     pools)   cmd_pools ;;

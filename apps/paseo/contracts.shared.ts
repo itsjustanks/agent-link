@@ -101,6 +101,16 @@ export const AccountUsageSchema = z.object({
   limitLast: z.number(), // epoch seconds of the most recent refusal
   daily: z.array(z.number()), // output tokens per day, oldest first
   topProject: z.string(),
+  /** Live window usage captured from the account's own telemetry (statusline / rollouts). */
+  quota: z
+    .object({
+      at: z.number(), // epoch seconds the snapshot was taken
+      model: z.string(),
+      windows: z.array(z.object({ label: z.string(), pct: z.number(), resetsAt: z.number().nullable() })),
+    })
+    .nullable(),
+  /** Non-expiring park reason (spend limit / held by hand), null when not held. */
+  held: z.string().nullable(),
 });
 export type AccountUsage = z.infer<typeof AccountUsageSchema>;
 
