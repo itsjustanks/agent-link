@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.5.4"
+VERSION="0.5.5"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -1177,7 +1177,8 @@ cmd_use() { # provider email|primary|<number>
 }
 
 write_router_shim() { # $1 provider
-  local p="$1"
+  local p="$1" trust_block=""
+  [ "$p" = claude ] && trust_block="$(claude_trust_block)"
   mkdir -p "$SHIM_BIN"
   cat > "$SHIM_BIN/$p" <<EOF
 #!/usr/bin/env bash
@@ -1199,6 +1200,7 @@ IFS="\$old_ifs"
 if [ -z "\${$(prov_env_var "$p"):-}" ] && [ -n "\$target" ] && [ "\$target" != "primary" ]; then
   export $(prov_env_var "$p")="\$aa_root/accounts/$p/\$target"
 fi
+$trust_block
 exec "\$real" "\$@"
 EOF
   chmod +x "$SHIM_BIN/$p"
@@ -1241,6 +1243,36 @@ cmd_route() { # enable|disable|status
   esac
 }
 
+# An untrusted project makes Claude IGNORE every permissions.allow entry, and a
+# freshly created slot trusts nothing — agents routed there stall on permission
+# prompts until their runtime dies (measured: repeated "Ignoring 69
+# permissions.allow entries" stderr, every one on an unsynced slot). Launching
+# in a directory IS the user's trust decision, so each claude launcher marks
+# its cwd trusted in the chosen account first. Unreadable config: touch nothing.
+claude_trust_block() {
+  cat <<'TRUST'
+aa_cfg="${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"
+if [ -f "$aa_cfg" ]; then
+  python3 - "$aa_cfg" "$PWD" <<'AAPY' 2>/dev/null
+import json, os, sys
+path, cwd = sys.argv[1], sys.argv[2]
+try:
+    config = json.load(open(path))
+except Exception:
+    sys.exit(0)  # exists but unreadable: never rewrite what could not be read
+projects = config.setdefault("projects", {})
+entry = projects.setdefault(cwd, {})
+if entry.get("hasTrustDialogAccepted") is not True:
+    entry["hasTrustDialogAccepted"] = True
+    tmp = path + ".al-tmp"
+    with open(tmp, "w") as fh:
+        json.dump(config, fh, indent=2)
+    os.replace(tmp, path)
+AAPY
+fi
+TRUST
+}
+
 write_auto_launcher() { # $1 provider — one command that routes to a live account
   local p="$1" env_var self primary_search cont_flags
   # Continue-style flags differ by CLI — and clash: codex uses -c for a CONFIG
@@ -1249,6 +1281,8 @@ write_auto_launcher() { # $1 provider — one command that routes to a live acco
     claude) cont_flags='-c|--continue' ;;
     *)      cont_flags='--last' ;;
   esac
+  local trust_block=""
+  [ "$p" = claude ] && trust_block="$(claude_trust_block)"
   primary_search="$(primary_dir "$1")"
   env_var="$(prov_env_var "$p")"
   self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
@@ -1333,6 +1367,7 @@ if [ -z "\${$env_var:-}" ] && [ "\$aa_pin" != primary ]; then
     fi
   fi
 fi
+$trust_block
 exec "\$real" "\$@"
 EOF
   chmod +x "$SHIM_BIN/$p-auto"
@@ -2160,9 +2195,11 @@ cmd_pools() { # show what auto-routing sees
 }
 
 cmd_shims() { # numbered per-slot shims: claude-1, codex-2, ...
-  local p e i env_var f
+  local p e i env_var f trust_block
   mkdir -p "$SHIM_BIN"
   for p in $PROVIDERS; do
+    trust_block=""
+    [ "$p" = claude ] && trust_block="$(claude_trust_block)"
     for f in "$SHIM_BIN/$p"-[0-9] "$SHIM_BIN/$p"-[0-9][0-9]; do
       [ -e "$f" ] && rm -f "$f"
     done
@@ -2202,6 +2239,7 @@ done
 IFS="\$old_ifs"
 [ -n "\$real" ] || { echo "agent-link: real '$p' binary not found in PATH" >&2; exit 127; }
 export $env_var="\${AGENT_LINK_HOME:-\${AGENT_AUTH_HOME:-$ROOT}}/accounts/$p/$e"
+$trust_block
 exec "\$real" "\$@"
 EOF
       chmod +x "$SHIM_BIN/$p-$i"
