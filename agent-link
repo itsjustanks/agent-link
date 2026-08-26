@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.5.9"
+VERSION="0.5.10"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -832,22 +832,28 @@ EOF
 # through the launcher, which picks a live account. Only processes bound to a
 # HELD (refusing) account are touched: they cannot serve anything anyway.
 cmd_evict() { # [provider] — end processes pinned to a held account
-  local p="${1:-claude}" pid dir key ended=0
+  local p="${1:-claude}" pid dir key ended=0 until_ts
   prov_valid "$p" || { echo "usage: agent-link evict [claude]" >&2; return 1; }
   [ "$p" = claude ] || { echo "evict supports claude only" >&2; return 1; }
   for pid in $(ps -axo pid,command | grep "[c]laude " | awk '{print $1}'); do
     dir="$(ps eww -p "$pid" 2>/dev/null | tr ' ' '\n' | grep '^CLAUDE_CONFIG_DIR=' | head -1 | cut -d= -f2-)"
     [ -n "$dir" ] || continue
     key="$(basename "$dir")"
-    [ -f "$(pools_dir)/hold-$p-$key" ] || continue
+    # A timed cooldown is just as fatal as a hold while it lasts: a session
+    # limit resets at midnight, and until then every message to that pinned
+    # process comes back refused. Retire on either.
+    if [ ! -f "$(pools_dir)/hold-$p-$key" ]; then
+      until_ts="$(cat "$(pools_dir)/cooldown-$p-$key" 2>/dev/null || echo 0)"
+      [ "$until_ts" -gt "$(date +%s)" ] || continue
+    fi
     kill "$pid" 2>/dev/null && ended=$((ended+1))
   done
   if [ "$ended" -gt 0 ]; then
-    echo "ended $ended process(es) pinned to a held account"
+    echo "ended $ended process(es) pinned to an exhausted account"
     echo "send those agents a message — the relaunch lands on a live account"
     echo "$(date '+%Y-%m-%d %H:%M')  evicted $ended $p process(es) from held accounts" >> "$STATE/autopark.log"
   else
-    echo "nothing pinned to a held $p account"
+    echo "nothing pinned to an exhausted $p account"
   fi
 }
 
