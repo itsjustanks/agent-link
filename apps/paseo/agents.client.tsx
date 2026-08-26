@@ -12,6 +12,7 @@ import {
   providerHealth,
   scan,
   setCooldown,
+  routerLaunch,
   wireAuto,
   wireProvider,
   type AccountUsage,
@@ -101,6 +102,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const callDiagnose = useRpc(diagnoseProvider);
   const callHealth = useRpc(providerHealth);
   const callWireAuto = useRpc(wireAuto);
+  const callRouterLaunch = useRpc(routerLaunch);
   const callCooldown = useRpc(setCooldown);
   const callAddAccount = useRpc(addAccount);
   const callUsage = useRpc(accountUsage);
@@ -114,6 +116,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const [notice, setNotice] = useState<string | null>(null);
   const [addingFor, setAddingFor] = useState<ProviderId | null>(null);
   const [newEmail, setNewEmail] = useState("");
+  const [routerTask, setRouterTask] = useState("");
 
   const scanQuery = useQuery({ queryKey: ["agent-link", "scan"], queryFn: () => callScan({}) });
   // Health spawns a real process per provider — for the ACP providers that
@@ -141,6 +144,13 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const limitsAutoMutation = useMutation({
     mutationFn: (auto: boolean) => callLimitsSetAuto({ auto }),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["agent-link", "limits"] }),
+  });
+  const routerLaunchMutation = useMutation({
+    mutationFn: (prompt: string) => callRouterLaunch({ prompt }),
+    onSuccess: (result) => {
+      setNotice(result.message);
+      if (result.ok) setRouterTask("");
+    },
   });
   const limitsResumeMutation = useMutation({
     mutationFn: (agentId: string) => callLimitsResume({ agentId }),
@@ -945,6 +955,32 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
           </Card>
         </Section>
       ) : null}
+
+      <Section title="agentrouter (optional)">
+        <Card>
+          <Row
+            first
+            title="One agent that picks the right model per task"
+            subtitle="Runs a cheap base model that triages your task: small things it answers itself, bigger ones it delegates to the best provider/model through Paseo's own tools — and every reply ends with the provider/model it chose. Rules: ~/.agent-auth/router/rules.md. Account choice underneath stays automatic."
+          />
+          <Field
+            label="Task"
+            value={routerTask}
+            onChangeText={setRouterTask}
+            placeholder="What should it do?"
+          />
+          <Button
+            label="Start AgentRouter"
+            loading={routerLaunchMutation.isPending}
+            disabled={routerTask.trim().length === 0}
+            onPress={() => routerLaunchMutation.mutate(routerTask.trim())}
+          />
+          <Text style={t.text.caption}>
+            Optional — nothing changes if you never press it. Delegation needs Paseo tools injected into agents
+            (Settings → Agents → Enable Paseo tools).
+          </Text>
+        </Card>
+      </Section>
 
       <Disclosure title="How this works">
         <Text style={t.text.body}>

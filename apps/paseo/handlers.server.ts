@@ -822,6 +822,66 @@ export async function handleWireAuto({ provider }: { provider: "claude" | "codex
   return { ok: true, message: `'${providerId}' wired — restart the Paseo daemon to load it` };
 }
 
+// AgentRouter: an on-demand orchestrating agent — a cheap base model that
+// triages the task and delegates to the right provider/model through Paseo's
+// own tools, naming its choice in every reply. It is an AGENT, not a provider:
+// Paseo's adapter owns a provider command's CLI arguments (an injected
+// --append-system-prompt-file never reached the session — measured), while
+// agents.create carries a real per-agent systemPrompt.
+const ROUTER_FALLBACK_PROMPT = `You are AgentRouter: a routing layer over the coding agents on this machine.
+You run on a cheap base model. On EVERY user message: answer directly when the
+task is small, otherwise delegate via your Paseo tools (create_agent in THIS
+workspace with the best provider, e.g. "claude-auto" or "codex-auto", or
+"provider/model"), relay the result faithfully, and reuse a subagent for
+follow-ups. Account choice under a provider is automatic — never pick accounts.
+MANDATORY: end EVERY response with exactly one line:
+Routed: <provider/model> — <short reason>`;
+
+function routerSystemPrompt(): string {
+  try {
+    const dir = join(AGENT_LINK_HOME_DIR, "router");
+    const prompt = readFileSync(join(dir, "prompt.md"), "utf8");
+    let rules = "";
+    try {
+      rules = readFileSync(join(dir, "rules.md"), "utf8");
+    } catch {
+      // rules are optional
+    }
+    return rules ? `${prompt}\n----- ROUTING RULES (user-edited) -----\n${rules}` : prompt;
+  } catch {
+    return ROUTER_FALLBACK_PROMPT;
+  }
+}
+
+export async function handleRouterLaunch({ prompt }: { prompt: string }, { paseo }: PluginHandlerContext) {
+  let model = "";
+  try {
+    const models = (await paseo.providers.listModels("claude" as never)) as { models?: Array<{ id?: string }> };
+    model = models.models?.map((m) => m.id ?? "").find((id) => /haiku/i.test(id)) ?? "";
+  } catch {
+    // Without a model id the provider default serves; dearer, still correct.
+  }
+  const overrides = await providerOverrides(paseo);
+  const base = overrides["claude-auto"] ? "claude-auto" : "claude";
+  const provider = model ? `${base}/${model}` : base;
+  const workspaces = await paseo.workspaces.list();
+  const workspace = (workspaces as { entries?: Array<{ id: string; name?: string | null }> }).entries?.[0];
+  if (!workspace) return { ok: false, message: "no workspace to run in — open one in Paseo first" };
+  try {
+    await paseo.workspaces.ref(workspace.id).agents.create({
+      config: { provider, systemPrompt: routerSystemPrompt() },
+      title: "AgentRouter",
+      prompt,
+    });
+    return {
+      ok: true,
+      message: `AgentRouter started in "${workspace.name ?? workspace.id}" on ${provider} — every reply names its routing choice`,
+    };
+  } catch (caught) {
+    return { ok: false, message: `could not start: ${caught instanceof Error ? caught.message.split("\n")[0] : String(caught)}` };
+  }
+}
+
 // Create the slot and kick off that CLI's own browser login. The flow opens a
 // browser and completes there, so it can be started detached — the panel then
 // shows the account as logged in once its config records the identity.

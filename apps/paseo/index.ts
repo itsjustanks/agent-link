@@ -16,6 +16,7 @@ import {
   providerHealth,
   accountUsage,
   addAccount,
+  routerLaunch,
   scan,
   setCooldown,
   wireAuto,
@@ -35,6 +36,7 @@ import {
   handleProviderHealth,
   handleAccountUsage,
   handleAddAccount,
+  handleRouterLaunch,
   handleScan,
   handleSetCooldown,
   handleWireAuto,
@@ -76,6 +78,7 @@ export default function contribute(plugin: PluginContext) {
   plugin.handle(scan, handleScan);
   plugin.handle(wireProvider, handleWireProvider);
   plugin.handle(wireAuto, handleWireAuto);
+  plugin.handle(routerLaunch, handleRouterLaunch);
   plugin.handle(setCooldown, handleSetCooldown);
   plugin.handle(addAccount, handleAddAccount);
   plugin.handle(accountUsage, handleAccountUsage);

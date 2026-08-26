@@ -53,6 +53,12 @@ export const scan = defineRpc({
   }),
 });
 
+export const routerLaunch = defineRpc({
+  name: "agent-link.router-launch",
+  input: z.object({ prompt: z.string().min(1) }),
+  output: z.object({ ok: z.boolean(), message: z.string() }),
+});
+
 export const wireAuto = defineRpc({
   name: "agent-link.wire-auto",
   input: z.object({ provider: z.enum(["claude", "codex"]) }),

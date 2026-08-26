@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.5.3"
+VERSION="0.5.4"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -756,6 +756,86 @@ pref_rank() { # $1 provider, $2 key
 # each session's own telemetry (Claude statusline, Codex rollouts), with age,
 # park/hold state and routing preference. Stale snapshots say so — an account
 # that has not run recently has no fresher truth to offer without a paid probe.
+# ------------------------------------------------------------ AgentRouter
+# An OPTIONAL Paseo provider profile: a cheap base model triages every prompt
+# and either answers directly or delegates to the right provider/model through
+# Paseo's own orchestration tools, always naming what it chose. The brain is a
+# system prompt appended to the claude-auto launcher; the rules are a plain
+# file the user edits.
+router_dir() { echo "$ROOT/router"; }
+
+router_write_files() {
+  mkdir -p "$(router_dir)"
+  if [ ! -f "$(router_dir)/rules.md" ]; then
+    cat > "$(router_dir)/rules.md" <<'EOF'
+# AgentRouter rules — edit freely; read at every launch.
+# The router follows these before its own judgment.
+
+## Stay on the base (cheap) model for
+- triage, short answers, explanations, summaries, formatting
+- single-file edits under ~40 lines, quick lookups
+
+## Delegate
+- heavy coding, multi-file changes, debugging, reviews -> claude-auto (its default model)
+- long autonomous builds, wide refactors, migrations   -> codex-auto
+- if the user names a provider or model, use exactly that
+
+## Never
+- delegate anything the user asked you to keep private
+- spawn more than 2 subagents for one request unless asked
+EOF
+  fi
+  cat > "$(router_dir)/prompt.md" <<'EOF'
+You are AgentRouter: a routing layer over every coding agent on this machine.
+You run on a deliberately cheap base model. Your job on EVERY user message:
+
+1. Read the routing rules included below. They outrank your own judgment.
+2. Decide: answer directly on the base model (default — it is free-tier cheap),
+   or delegate to a better-suited provider/model.
+3. To delegate, use your Paseo tools: create_agent in THIS workspace with the
+   chosen provider (e.g. "claude-auto" or "codex-auto", optionally
+   "provider/model"), send it the task with full context, wait, then relay its
+   result faithfully. Reuse an existing subagent for follow-ups on the same
+   thread of work instead of spawning a new one.
+4. If Paseo tools are unavailable, say so and answer directly.
+
+Account routing below the provider level (which login serves the call) is
+handled automatically by agent-link — never pick accounts.
+
+MANDATORY: end EVERY response with exactly one line:
+`Routed: <provider/model> — <short reason>`
+Use your own provider/model on that line when you answered directly.
+EOF
+  {
+    cat "$(router_dir)/prompt.md"
+    echo
+    echo "----- ROUTING RULES (user-edited) -----"
+    cat "$(router_dir)/rules.md"
+  } > "$(router_dir)/system.md"
+}
+
+
+cmd_router() { # [install|status]
+  case "${1:-install}" in
+    install)
+      router_write_files
+      echo "AgentRouter brain written."
+      echo "  rules:  $(router_dir)/rules.md   (edit freely — read at every launch)"
+      echo "  prompt: $(router_dir)/prompt.md"
+      echo
+      echo "Start one from the Paseo panel: Agent Link tab → AgentRouter → type the"
+      echo "task → Start. It runs as an agent with this system prompt on a cheap"
+      echo "model and delegates through Paseo's own tools. (A provider-shaped router"
+      echo "is not possible: Paseo's adapter owns the CLI arguments, so a provider"
+      echo "command cannot carry a system prompt — measured, not assumed.)"
+      ;;
+    status)
+      [ -f "$(router_dir)/rules.md" ] && echo "rules: $(router_dir)/rules.md" || echo "not installed — agent-link router install"
+      ;;
+    *) echo "usage: agent-link router [install|status]" >&2; return 1 ;;
+  esac
+}
+
 cmd_usage() {
   local p e key f state pref
   for p in $PROVIDERS; do
@@ -2418,6 +2498,7 @@ usage:
   agent-link cooldown <prov> <email> [min|clear]   park an exhausted account
   agent-link nearing <prov> [email|primary] [clear]  soft-flag an account nearing its limit
   agent-link usage                 /usage across accounts: live window %%, resets, park state
+  agent-link router [install|status]   optional AgentRouter provider: cheap triage, task-based delegation
   agent-link prefer <prov> [email|primary] [first|last|clear]  bias routing toward/away from an account
   agent-link cooldown <prov> <email> hold          park with NO expiry (release: clear, or a passing probe)
   agent-link hooks [install|remove|status] [--primary]  wire Claude Code itself to report limits
@@ -2456,6 +2537,7 @@ main() {
     nearing) shift; cmd_nearing "$@" ;;
     prefer)  shift; cmd_prefer "$@" ;;
     usage)   cmd_usage ;;
+    router)  shift; cmd_router "$@" ;;
     refused) shift; cmd_refused "$@" ;;
     hooks)   shift; cmd_hooks "$@" ;;
     pools)   cmd_pools ;;
