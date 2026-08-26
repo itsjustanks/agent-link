@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.5.7"
+VERSION="0.5.8"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -641,6 +641,9 @@ autopark() { # $1 provider, $2 key (email or "primary"), $3 until-epoch or "hold
   mkdir -p "$(pools_dir)"
   if [ "${3:-}" = hold ]; then
     hold_set "$1" "$2" "monthly spend limit — raise it at claude.ai/settings/usage, then: agent-link probe $1 (or cooldown clear)"
+    # Live processes on a just-held account will answer "usage limit" to every
+    # message until they end, so retire them now; the next message re-routes.
+    ( cmd_evict "$1" >/dev/null 2>&1 & )
     echo "$(date '+%Y-%m-%d %H:%M')  HELD $1/$2 (spend limit — no expiry; probe or clear to release)" >> "$STATE/autopark.log"
     echo "auto: monthly spend limit" > "$(pools_dir)/reason-$1-$2"
     return 0
@@ -822,6 +825,32 @@ EOF
 # Move a conversation to a healthy account and print the one command that
 # continues it there. This is the honest form of "switch accounts": a running
 # process can never change account, but its next resume can.
+# Sending a message to an agent whose process is ALREADY RUNNING never routes:
+# the orchestrator writes to that process's stdin, so a session pinned to an
+# exhausted account keeps answering "usage limit" forever. The process cannot
+# be re-pointed — but it can be ended, and the next message then relaunches it
+# through the launcher, which picks a live account. Only processes bound to a
+# HELD (refusing) account are touched: they cannot serve anything anyway.
+cmd_evict() { # [provider] — end processes pinned to a held account
+  local p="${1:-claude}" pid dir key ended=0
+  prov_valid "$p" || { echo "usage: agent-link evict [claude]" >&2; return 1; }
+  [ "$p" = claude ] || { echo "evict supports claude only" >&2; return 1; }
+  for pid in $(ps -axo pid,command | grep "[c]laude " | awk '{print $1}'); do
+    dir="$(ps eww -p "$pid" 2>/dev/null | tr ' ' '\n' | grep '^CLAUDE_CONFIG_DIR=' | head -1 | cut -d= -f2-)"
+    [ -n "$dir" ] || continue
+    key="$(basename "$dir")"
+    [ -f "$(pools_dir)/hold-$p-$key" ] || continue
+    kill "$pid" 2>/dev/null && ended=$((ended+1))
+  done
+  if [ "$ended" -gt 0 ]; then
+    echo "ended $ended process(es) pinned to a held account"
+    echo "send those agents a message — the relaunch lands on a live account"
+    echo "$(date '+%Y-%m-%d %H:%M')  evicted $ended $p process(es) from held accounts" >> "$STATE/autopark.log"
+  else
+    echo "nothing pinned to a held $p account"
+  fi
+}
+
 cmd_switch() { # [provider] [session-id] — default: the newest session in this cwd
   local p="${1:-claude}" sid="${2:-}" target owner
   prov_valid "$p" || { echo "usage: agent-link switch [claude|codex] [session-id]" >&2; return 1; }
@@ -2630,6 +2659,7 @@ usage:
   agent-link usage                 /usage across accounts: live window %%, resets, park state
   agent-link router [install|status]   optional AgentRouter provider: cheap triage, task-based delegation
   agent-link switch [prov] [sid]   move this conversation to a healthy account and print the resume
+  agent-link evict [prov]          end processes stuck on a held account so their next message re-routes
   agent-link revalidate [prov]     re-prove HELD accounts; release any that serve again
   agent-link prefer <prov> [email|primary] [first|last|clear]  bias routing toward/away from an account
   agent-link cooldown <prov> <email> hold          park with NO expiry (release: clear, or a passing probe)
@@ -2672,6 +2702,7 @@ main() {
     router)  shift; cmd_router "$@" ;;
     revalidate) shift; cmd_revalidate "$@" ;;
     switch)  shift; cmd_switch "$@" ;;
+    evict)   shift; cmd_evict "$@" ;;
     refused) shift; cmd_refused "$@" ;;
     hooks)   shift; cmd_hooks "$@" ;;
     pools)   cmd_pools ;;
