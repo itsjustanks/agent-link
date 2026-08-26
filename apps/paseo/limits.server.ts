@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { LimitEvent, LimitsStatus } from "./limits.shared";
@@ -192,6 +193,54 @@ async function handleErroredAgent(paseo: PaseoLike, update: unknown): Promise<vo
   await actOnLimitDeath(paseo, snap, now, matched);
 }
 
+// The refusal has landed, so no turn is in flight — this is the ONE moment a
+// pinned process can be retired without Paseo painting "turn failed" in red.
+// It must be retired: a message to a live process is written to its stdin, so
+// an agent pinned to an exhausted account answers "usage limit" forever, no
+// matter how healthy the pool is. Ending it makes the next message relaunch
+// through the launcher, which picks a live account.
+const PASEO_AGENTS_DIR = join(HOME, ".paseo", "agents");
+
+function sessionIdFor(agentId: string): string | null {
+  try {
+    for (const project of readdirSync(PASEO_AGENTS_DIR)) {
+      const file = join(PASEO_AGENTS_DIR, project, `${agentId}.json`);
+      if (!existsSync(file)) continue;
+      const stored = JSON.parse(readFileSync(file, "utf8")) as { persistence?: { sessionId?: string } };
+      return stored.persistence?.sessionId ?? null;
+    }
+  } catch {
+    // store unreadable — nothing to retire
+  }
+  return null;
+}
+
+function retirePinnedProcess(agentId: string): boolean {
+  const sessionId = sessionIdFor(agentId);
+  if (!sessionId) return false;
+  try {
+    const listing = execFileSync("/bin/ps", ["-axo", "pid=,command="], { encoding: "utf8", timeout: 5_000 });
+    for (const line of listing.split("\n")) {
+      if (!line.includes(sessionId)) continue;
+      const pid = Number.parseInt(line.trim().split(/\s+/)[0] ?? "", 10);
+      if (!Number.isFinite(pid) || pid === process.pid) continue;
+      const command = line.trim().slice(String(pid).length).trim();
+      // Merely CONTAINING the session id is not enough — a shell, an editor or
+      // a log tail can mention it, and killing one of those would be a
+      // catastrophe. Demand an actual provider process resuming that session.
+      const isProvider = /(^|\/)(claude|codex)(\s|$)/.test(command);
+      const isResuming = new RegExp(`--resume[=\\s]${sessionId}|resume\\s+${sessionId}`).test(command);
+      if (!isProvider || !isResuming) continue;
+      process.kill(pid, "SIGTERM");
+      console.log(`[agent-link] retired process ${pid} pinned to the exhausted account (agent ${agentId})`);
+      return true;
+    }
+  } catch {
+    // ps unavailable or the process already gone
+  }
+  return false;
+}
+
 async function actOnLimitDeath(
   paseo: PaseoLike,
   snap: ReturnType<typeof snapshotOf>,
@@ -216,8 +265,12 @@ async function actOnLimitDeath(
     return;
   }
   try {
+    // Retire the pinned process first, then nudge: the nudge is what makes
+    // Paseo relaunch, and only a relaunch consults the account router.
+    const retired = retirePinnedProcess(snap.id);
+    if (retired) await new Promise((resolve) => setTimeout(resolve, 1_500));
     await paseo.agents.ref(snap.id).send(NUDGE);
-    record({ ...base, action: "auto-resumed", detail: matched });
+    record({ ...base, action: "auto-resumed", detail: retired ? `${matched} (relaunched on a live account)` : matched });
   } catch (error) {
     record({ ...base, action: "resume-failed", detail: `${matched}: ${String(error)}` });
   }
