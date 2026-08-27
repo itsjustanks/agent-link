@@ -69,7 +69,7 @@ agent-link update
 
 ![The Agent Link tab: a Routing card showing the auto-router installed for Claude and Codex, then each account with its state, park timer, credit note and launch count](docs/screenshots/agent-link.png)
 
-Every Claude and Codex account on the machine, with live health, **7-day usage** read from your own transcripts (sessions, tokens, cache rate, which models each account actually ran), credit state, and **park/resume** for an account that has hit a limit.
+Every Claude and Codex account on the machine, with an always-visible **Available capacity** card for the provider's live quota windows and reset times. Transcript activity (sessions, tokens, cache rate, and models used) remains available on demand, alongside credit state and **park/resume** for an account that has hit a limit.
 
 One click installs a **Dynamic Agent Link** provider. Pick that single provider and every new agent is routed to the least-recently-used healthy account automatically — no command, no choosing. A running agent is never re-routed: its account is fixed when the process starts, and nothing swaps underneath a live session.
 

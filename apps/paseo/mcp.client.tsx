@@ -14,7 +14,7 @@ import type { PluginSurfaceProps } from "@getpaseo/plugin";
 import { useRpc } from "@getpaseo/plugin";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import React, { useEffect, useMemo, useState } from "react";
-import { Text, View } from "react-native";
+import { Linking, Text, View } from "react-native";
 import { z } from "zod";
 import {
   mcpAdd,
@@ -140,9 +140,10 @@ function formatIssue(source: string, issue: JsonIssue): string {
 }
 
 function loginCommand(account: McpAuthAccount, server: string): string {
+  const variable = account.provider === "claude" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME";
   return account.isPrimary
-    ? `claude mcp login ${server}`
-    : `CLAUDE_CONFIG_DIR="${account.dir}" claude mcp login ${server}`;
+    ? `${account.provider} mcp login ${server}`
+    : `${variable}="${account.dir}" ${account.provider} mcp login ${server}`;
 }
 
 // ----------------------------------------------------------------- fragments
@@ -488,6 +489,7 @@ function AuthRows({
   destinations,
   presentIn,
   sessions,
+  oauthCapable,
   daemonIsLocal,
   pendingDir,
   onAuthorise,
@@ -500,6 +502,7 @@ function AuthRows({
   destinations: Destination[];
   presentIn: string[];
   sessions: LoginSession[];
+  oauthCapable: boolean;
   daemonIsLocal: boolean;
   pendingDir: string | null;
   onAuthorise: (account: McpAuthAccount) => void;
@@ -510,42 +513,60 @@ function AuthRows({
   const t = useTokens();
   const rows = accounts
     .map((account) => {
-      const dest = destinations.find((entry) => entry.provider === "claude" && entry.account === account.email);
-      return { account, defined: dest ? presentIn.includes(dest.id) : false, needs: account.needsAuth.includes(server) };
+      const dest = destinations.find((entry) => entry.provider === account.provider && entry.account === account.email);
+      const needs = account.needsAuth.includes(server);
+      return {
+        account,
+        defined: dest ? presentIn.includes(dest.id) : false,
+        needs,
+        auth: account.authStatus[server] ?? (needs ? "not-connected" : "unknown"),
+      };
     })
     .filter((row) => row.defined || row.needs);
-  if (rows.length === 0) return null;
+  if (rows.length === 0 || !oauthCapable) return null;
 
   return (
-    <Section title="Authorisation">
+    <Section title="OAuth connection">
       <Card padded={false}>
-        {rows.map(({ account, needs }, index) => {
-          const session = sessions.find((entry) => entry.server === server && entry.account === account.email);
+        {rows.map(({ account, auth }, index) => {
+          const session = sessions.find(
+            (entry) => entry.server === server && entry.account === account.email && entry.provider === account.provider,
+          );
           const live = session?.state === "starting" || session?.state === "waiting";
-          const remote = needs && !daemonIsLocal;
+          const connected = session?.state === "done" || auth === "connected";
+          const unsupported = auth === "unsupported";
+          const remote = !connected && !unsupported && !daemonIsLocal;
+          const status: Status = connected ? "ok" : unsupported ? "neutral" : live ? "busy" : auth === "not-connected" ? "attention" : "neutral";
+          const statusLabel = connected
+            ? "connected"
+            : unsupported
+              ? "OAuth unsupported"
+              : live
+                ? "connecting"
+                : auth === "not-connected"
+                  ? "connect required"
+                  : "not checked";
           return (
             <Row
-              key={account.dir}
+              key={`${account.provider}-${account.dir}`}
               first={index === 0}
               title={account.email}
-              subtitle={account.isPrimary ? "primary Claude account" : account.dir}
+              subtitle={`${account.isPrimary ? "primary" : "routed"} ${account.provider === "claude" ? "Claude" : "Codex"} account`}
               trailing={
-                needs ? (
-                  daemonIsLocal ? (
-                    <Button
-                      label="Authorise"
-                      loading={pendingDir === account.dir}
-                      disabled={live}
-                      onPress={() => onAuthorise(account)}
-                    />
-                  ) : undefined
-                ) : (
+                connected ? (
                   <ConfirmButton label="Sign out" confirmLabel="Revoke this grant" onConfirm={() => onSignOut(account)} />
-                )
+                ) : !unsupported && daemonIsLocal ? (
+                  <Button
+                    label="Connect OAuth"
+                    loading={pendingDir === account.dir}
+                    disabled={live}
+                    onPress={() => onAuthorise(account)}
+                  />
+                ) : undefined
               }
-              meta={<StatusPill status={needs ? "attention" : "ok"} label={needs ? "sign-in needed" : "ready"} />}
+              meta={<StatusPill status={status} label={statusLabel} />}
               expanded={
-                remote || session ? (
+                remote || session || (!connected && !unsupported) ? (
                   <View style={{ gap: t.space.sm }}>
                     {remote ? (
                       <>
@@ -554,6 +575,11 @@ function AuthRows({
                         </Text>
                         <CodeBlock>{loginCommand(account, server)}</CodeBlock>
                       </>
+                    ) : null}
+                    {!remote && !session ? (
+                      <Text style={t.text.caption}>
+                        Connect opens this server's own browser sign-in. No token needs to be pasted into Agent Link.
+                      </Text>
                     ) : null}
                     {session ? (
                       <>
@@ -566,7 +592,10 @@ function AuthRows({
                         {session.url ? <CodeBlock>{session.url}</CodeBlock> : null}
                         <View style={{ flexDirection: "row", gap: t.space.sm }}>
                           {session.url ? (
-                            <Button label="Copy link" onPress={() => onCopied(copyToClipboard(session.url))} />
+                            <>
+                              <Button label="Open sign-in" onPress={() => void Linking.openURL(session.url)} />
+                              <Button label="Copy link" onPress={() => onCopied(copyToClipboard(session.url))} />
+                            </>
                           ) : null}
                           {live ? <Button label="Cancel" variant="ghost" onPress={() => onCancel(session.key)} /> : null}
                         </View>
@@ -814,8 +843,8 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
     },
   });
   const loginMutation = useMutation({
-    mutationFn: (input: { accountDir: string; account: string; server: string }) =>
-      callLogin({ provider: "claude", ...input }),
+    mutationFn: (input: { provider: "claude" | "codex"; accountDir: string; account: string; server: string }) =>
+      callLogin(input),
     onError: fail,
     onSuccess: (result) => {
       setFlash({ tone: result.ok ? "ok" : "error", text: result.message });
@@ -832,7 +861,7 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
     },
   });
   const logoutMutation = useMutation({
-    mutationFn: (input: { accountDir: string; server: string }) => callLogout({ provider: "claude", ...input }),
+    mutationFn: (input: { provider: "claude" | "codex"; accountDir: string; server: string }) => callLogout(input),
     onError: fail,
     onSuccess: report,
   });
@@ -1032,8 +1061,12 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
           onChangeText={setAddKv}
           multiline
           mono
-          placeholder={addKind === "http" ? "Authorization=Bearer …" : "API_KEY=…"}
-          hint="One KEY=value per line."
+          placeholder={addKind === "http" ? "Optional: Authorization=Bearer …" : "API_KEY=…"}
+          hint={
+            addKind === "http"
+              ? "OAuth server? Leave this blank. After adding, open the server and choose Connect OAuth."
+              : "One KEY=value per line."
+          }
         />
       </Card>
       <Targets
@@ -1201,6 +1234,7 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
             {server.name}
           </Text>
           <Tag label={server.transport} />
+          {server.transport === "http" && server.authStyle === "oauth-or-none" ? <Tag label="OAuth available" /> : null}
           {serverHealth ? (
             <StatusPill status={healthStatus(serverHealth.status)} label={healthWord(serverHealth.status)} />
           ) : null}
@@ -1256,6 +1290,38 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
             </View>
           </View>
         </Notice>
+      ) : null}
+
+      {authQuery.data ? (
+        <AuthRows
+          server={server.name}
+          accounts={authQuery.data.accounts}
+          destinations={destinations}
+          presentIn={server.presentIn}
+          sessions={sessions}
+          oauthCapable={server.transport === "http" && server.authStyle === "oauth-or-none"}
+          daemonIsLocal={daemonIsLocal}
+          pendingDir={loginMutation.isPending ? loginMutation.variables?.accountDir ?? null : null}
+          onAuthorise={(account) =>
+            loginMutation.mutate({
+              provider: account.provider,
+              accountDir: account.dir,
+              account: account.email,
+              server: server.name,
+            })
+          }
+          onCancel={(key) => loginCancelMutation.mutate(key)}
+          onSignOut={(account) =>
+            logoutMutation.mutate({ provider: account.provider, accountDir: account.dir, server: server.name })
+          }
+          onCopied={(ok) =>
+            setFlash(
+              ok
+                ? { tone: "ok", text: "Sign-in link copied." }
+                : { tone: "attention", text: "No clipboard here — the link above is selectable." },
+            )
+          }
+        />
       ) : null}
 
       <Section title="Destinations">
@@ -1331,29 +1397,6 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
         </Card>
       </Section>
 
-      {authQuery.data ? (
-        <AuthRows
-          server={server.name}
-          accounts={authQuery.data.accounts}
-          destinations={destinations}
-          presentIn={server.presentIn}
-          sessions={sessions}
-          daemonIsLocal={daemonIsLocal}
-          pendingDir={loginMutation.isPending ? loginMutation.variables?.accountDir ?? null : null}
-          onAuthorise={(account) =>
-            loginMutation.mutate({ accountDir: account.dir, account: account.email, server: server.name })
-          }
-          onCancel={(key) => loginCancelMutation.mutate(key)}
-          onSignOut={(account) => logoutMutation.mutate({ accountDir: account.dir, server: server.name })}
-          onCopied={(ok) =>
-            setFlash(
-              ok
-                ? { tone: "ok", text: "Sign-in link copied." }
-                : { tone: "attention", text: "No clipboard here — the link above is selectable." },
-            )
-          }
-        />
-      ) : null}
     </View>
   ) : (
     emptyPane

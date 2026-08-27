@@ -1086,35 +1086,78 @@ async function usageForClaudeDir(dir: string, sinceMs: number, days: number) {
   return totals;
 }
 
+type PoolQuota = {
+  at: number;
+  model: string;
+  windows: Array<{ label: string; pct: number; resetsAt: number | null }>;
+};
+
+function readPoolQuota(provider: string, key: string): PoolQuota | null {
+  const raw = readJson(join(poolsDir(), `quota-${provider}-${key}.json`)) as Record<string, unknown> | null;
+  if (!raw) return null;
+  const windows: PoolQuota["windows"] = [];
+  for (const [label, k] of [
+    ["5h", "five_hour"],
+    ["7d", "seven_day"],
+    ["week", "primary"],
+  ] as const) {
+    const value = raw[k] as { pct?: number; resets_at?: number } | undefined;
+    if (value && typeof value.pct === "number") {
+      windows.push({ label, pct: value.pct, resetsAt: typeof value.resets_at === "number" ? value.resets_at : null });
+    }
+  }
+  if (windows.length === 0) return null;
+  return {
+    at: typeof raw.at === "number" ? raw.at : 0,
+    model: typeof raw.model === "string" ? raw.model : typeof raw.plan === "string" ? raw.plan : "",
+    windows,
+  };
+}
+
+function readHeld(provider: string, key: string): string | null {
+  try {
+    return readFileSync(join(poolsDir(), `hold-${provider}-${key}`), "utf8").trim() || "held";
+  } catch {
+    return null;
+  }
+}
+
+export async function handleAccountCapacity() {
+  const shape = (provider: "claude" | "codex", email: string, poolKey: string, isPrimary: boolean) => {
+    const quota = readPoolQuota(provider, poolKey);
+    const held = readHeld(provider, poolKey);
+    const cooling = cooldownUntil(provider, poolKey);
+    const maxUsed = Math.max(0, ...(quota?.windows.map((entry) => entry.pct) ?? []));
+    const state = held ? "held" : cooling > 0 ? "parked" : maxUsed >= 85 ? "nearing" : quota ? "ready" : "unknown";
+    return {
+      provider,
+      email,
+      isPrimary,
+      poolKey,
+      state: state as "ready" | "nearing" | "parked" | "held" | "unknown",
+      detail: held ?? (cooling > 0 ? parkReason(provider, poolKey) : ""),
+      at: quota?.at ?? 0,
+      plan: quota?.model ?? "",
+      windows: (quota?.windows ?? []).map((entry) => ({ label: entry.label, usedPct: entry.pct, resetsAt: entry.resetsAt })),
+    };
+  };
+  const accounts = [];
+  const primary = {
+    claude: claudeAccountEmail(HOME),
+    codex: codexAccountEmail(join(HOME, ".codex")),
+  };
+  if (primary.claude) accounts.push(shape("claude", primary.claude, "primary", true));
+  if (primary.codex) accounts.push(shape("codex", primary.codex, "primary", true));
+  for (const slot of collectSlots()) {
+    if (!slot.loggedIn) continue;
+    accounts.push(shape(slot.provider, slot.actualEmail || slot.email, slot.email, false));
+  }
+  return { accounts };
+}
+
 export async function handleAccountUsage({ days }: { days: number }) {
   const window = Math.max(1, Math.min(30, days));
   const sinceMs = Date.now() - window * 86_400_000;
-  const readQuota = (provider: string, key: string) => {
-    const raw = readJson(join(poolsDir(), `quota-${provider}-${key}.json`)) as Record<string, unknown> | null;
-    if (!raw) return null;
-    const windows: Array<{ label: string; pct: number; resetsAt: number | null }> = [];
-    for (const [label, k] of [
-      ["5h", "five_hour"],
-      ["7d", "seven_day"],
-      ["week", "primary"],
-    ] as const) {
-      const w = raw[k] as { pct?: number; resets_at?: number } | undefined;
-      if (w && typeof w.pct === "number") windows.push({ label, pct: w.pct, resetsAt: typeof w.resets_at === "number" ? w.resets_at : null });
-    }
-    if (windows.length === 0) return null;
-    return {
-      at: typeof raw.at === "number" ? raw.at : 0,
-      model: typeof raw.model === "string" ? raw.model : typeof raw.plan === "string" ? raw.plan : "",
-      windows,
-    };
-  };
-  const readHeld = (provider: string, key: string): string | null => {
-    try {
-      return readFileSync(join(poolsDir(), `hold-${provider}-${key}`), "utf8").trim() || "held";
-    } catch {
-      return null;
-    }
-  };
   const shape = async (provider: "claude" | "codex", email: string, dir: string, poolKey: string) => {
     const t = await usageForClaudeDir(dir, sinceMs, window);
     return {
@@ -1131,7 +1174,7 @@ export async function handleAccountUsage({ days }: { days: number }) {
       daily: t.daily,
       topProject: t.topProject,
       models: [...t.models].sort(),
-      quota: readQuota(provider, poolKey),
+      quota: readPoolQuota(provider, poolKey),
       held: readHeld(provider, poolKey),
     };
   };
@@ -1597,31 +1640,99 @@ const SYNC_PROJECT_FIELDS = [
 // Which MCP servers each ACCOUNT still has to authorize. Claude records this
 // per config dir, so it is readable without touching a token — and it is the
 // answer to "server X says not connected".
+function codexMcpAuth(accountDir: string): Record<string, "connected" | "not-connected" | "unsupported" | "unknown"> {
+  const binary = searchPath().map((entry) => join(entry, "codex")).find(existsSync);
+  if (!binary) return {};
+  try {
+    const env = { ...process.env, CODEX_HOME: accountDir };
+    const output = execFileSync(binary, ["mcp", "list", "--json"], { encoding: "utf8", timeout: 8_000, maxBuffer: 4 * 1024 * 1024, env });
+    const rows = JSON.parse(output) as Array<{ name?: string; auth_status?: string }>;
+    return Object.fromEntries(
+      rows.flatMap((row) => {
+        if (!row.name) return [];
+        const raw = row.auth_status ?? "unknown";
+        const state =
+          raw === "not_logged_in"
+            ? "not-connected"
+            : raw === "unsupported"
+              ? "unsupported"
+              : /logged_in|authenticated|connected/i.test(raw)
+                ? "connected"
+                : "unknown";
+        return [[row.name, state]];
+      }),
+    );
+  } catch {
+    return {};
+  }
+}
+
 export async function handleMcpAuth() {
   const readNeeds = (dir: string): string[] => {
     const data = readJson(join(dir, "mcp-needs-auth-cache.json"));
     return data ? Object.keys(data) : [];
   };
   const countServers = (configPath: string): number => Object.keys(jsonMcpRead(configPath)).length;
-  const accounts = [] as Array<{ email: string; dir: string; isPrimary: boolean; definedServers: number; needsAuth: string[] }>;
+  const accounts = [] as Array<{
+    provider: "claude" | "codex";
+    email: string;
+    dir: string;
+    isPrimary: boolean;
+    definedServers: number;
+    needsAuth: string[];
+    authStatus: Record<string, "connected" | "not-connected" | "unsupported" | "unknown">;
+  }>;
   const primaryEmail = claudeAccountEmail(HOME);
   if (primaryEmail) {
+    const needsAuth = readNeeds(join(HOME, ".claude"));
     accounts.push({
+      provider: "claude",
       email: primaryEmail,
       dir: join(HOME, ".claude"),
       isPrimary: true,
       definedServers: countServers(join(HOME, ".claude.json")),
-      needsAuth: readNeeds(join(HOME, ".claude")),
+      needsAuth,
+      authStatus: Object.fromEntries(needsAuth.map((name) => [name, "not-connected" as const])),
     });
   }
   for (const slot of collectSlots()) {
     if (slot.provider !== "claude") continue;
+    const needsAuth = readNeeds(slot.dir);
     accounts.push({
+      provider: "claude",
       email: slot.email,
       dir: slot.dir,
       isPrimary: false,
       definedServers: countServers(join(slot.dir, ".claude.json")),
-      needsAuth: readNeeds(slot.dir),
+      needsAuth,
+      authStatus: Object.fromEntries(needsAuth.map((name) => [name, "not-connected" as const])),
+    });
+  }
+  const primaryCodexDir = join(HOME, ".codex");
+  const primaryCodexEmail = codexAccountEmail(primaryCodexDir);
+  if (primaryCodexEmail) {
+    accounts.push({
+      provider: "codex",
+      email: primaryCodexEmail,
+      dir: primaryCodexDir,
+      isPrimary: true,
+      definedServers: tomlMcpNames(join(primaryCodexDir, "config.toml")).length,
+      needsAuth: [],
+      authStatus: codexMcpAuth(primaryCodexDir),
+    });
+  }
+  for (const slot of collectSlots()) {
+    if (slot.provider !== "codex" || !slot.loggedIn) continue;
+    accounts.push({
+      provider: "codex",
+      // The destination is keyed by the slot name. The Agents tab separately
+      // flags a slot whose authenticated email does not match that name.
+      email: slot.email,
+      dir: slot.dir,
+      isPrimary: false,
+      definedServers: tomlMcpNames(join(slot.dir, "config.toml")).length,
+      needsAuth: [],
+      authStatus: codexMcpAuth(slot.dir),
     });
   }
   // Project-scoped servers live in a repo's .mcp.json — not managed here, but

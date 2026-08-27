@@ -126,6 +126,31 @@ export const accountUsage = defineRpc({
   output: z.object({ accounts: z.array(AccountUsageSchema) }),
 });
 
+export const CapacityWindowSchema = z.object({
+  label: z.string(),
+  usedPct: z.number(),
+  resetsAt: z.number().nullable(),
+});
+
+export const CapacityAccountSchema = z.object({
+  provider: z.enum(["claude", "codex"]),
+  email: z.string(),
+  isPrimary: z.boolean(),
+  poolKey: z.string(),
+  state: z.enum(["ready", "nearing", "parked", "held", "unknown"]),
+  detail: z.string(),
+  at: z.number(),
+  plan: z.string(),
+  windows: z.array(CapacityWindowSchema),
+});
+export type CapacityAccount = z.infer<typeof CapacityAccountSchema>;
+
+export const accountCapacity = defineRpc({
+  name: "agent-link.account-capacity",
+  input: z.object({}),
+  output: z.object({ accounts: z.array(CapacityAccountSchema) }),
+});
+
 export const providerHealth = defineRpc({
   name: "agent-link.provider-health",
   input: z.object({}),
@@ -201,11 +226,13 @@ export const mcpRemove = defineRpc({
 });
 
 export const McpAuthAccountSchema = z.object({
+  provider: z.enum(["claude", "codex"]),
   email: z.string(),
   dir: z.string(),
   isPrimary: z.boolean(),
   definedServers: z.number(),
   needsAuth: z.array(z.string()),
+  authStatus: z.record(z.string(), z.enum(["connected", "not-connected", "unsupported", "unknown"])),
 });
 export type McpAuthAccount = z.infer<typeof McpAuthAccountSchema>;
 

@@ -15,6 +15,7 @@ import {
   mcpSync,
   providerHealth,
   accountUsage,
+  accountCapacity,
   addAccount,
   routerLaunch,
   scan,
@@ -35,6 +36,7 @@ import {
   handleMcpSync,
   handleProviderHealth,
   handleAccountUsage,
+  handleAccountCapacity,
   handleAddAccount,
   handleRouterLaunch,
   handleScan,
@@ -84,6 +86,7 @@ export default function contribute(plugin: PluginContext) {
   plugin.handle(setCooldown, handleSetCooldown);
   plugin.handle(addAccount, handleAddAccount);
   plugin.handle(accountUsage, handleAccountUsage);
+  plugin.handle(accountCapacity, handleAccountCapacity);
   plugin.handle(diagnoseProvider, handleDiagnoseProvider);
   plugin.handle(providerHealth, handleProviderHealth);
   plugin.handle(mcpMatrix, handleMcpMatrix);

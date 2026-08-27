@@ -23,9 +23,9 @@ One card per provider connector — **Claude Code, Codex, Kimi Code, Grok** — 
 - the **primary** account (the login your plain `claude` / `codex` uses), shown by email
 - every **account slot** with live state: 🟢 logged in · 🟠 login needed · 🔴 wrong account (the slot folder says one email, the login inside is another)
 - a **pool summary** — "5 logged-in entries → 4 independent quota pools" — and a ⚠ badge on any two entries signed into the *same* account, since a rate limit belongs to an account, not to a slot
-- **7-day usage** — on request, reads each account's own transcripts and reports sessions, input/output tokens and which models that account actually ran. No costs and no quota percentages: neither CLI exposes remaining quota without the account's token, which this plugin never reads.
+- **Available capacity** — always shows each account's captured provider quota windows, percentage left, reset time, and whether it is ready, nearing its limit, held, or cooling down. No token material is read. **Activity details** remains an on-request transcript scan for sessions, input/output tokens, cache rate, and models actually used.
 - **Credit state** — when an account has hit a spend limit, its row says so (Claude records the reason in its own config), instead of you finding out when an agent dies.
-- **Rotation usage** — a bar and a count showing how many agents the router has handed each account and when it was last used, so you can see the rotation actually spreading. (This is launches routed by agent-link, not Anthropic/OpenAI quota: neither CLI exposes remaining quota per account without reading its token, which this plugin deliberately does not do. Paseo's own usage figure covers the primary accounts only.)
+- **Rotation usage** — a bar and a count showing how many agents the router has handed each account and when it was last used, so you can see the rotation actually spreading. This is launch distribution, separate from the provider quota shown in **Available capacity**.
 - **Memory guard** — one Paseo-owned TypeScript check runs at a time; under critical pressure it is paused, not killed, and continued after the machine recovers. Checks launched from Terminal are never touched.
 - **+ Add account** — creates the slot for a new account and hands you the one command to finish sign-in. The browser step itself stays in a terminal because both CLIs ask you to paste a code back; the row turns green once you have (and flags a mismatch if you signed in as someone else)
 - **Auto-router** — one click wires a single `Claude (Dynamic Agent Link)` / `Codex (Dynamic Agent Link)` provider that sends each new agent to the least-recently-used live account. Pick that one provider and your accounts get used automatically; a running agent is never re-routed.
@@ -102,7 +102,7 @@ No, for most of it. This panel reads the account directories and writes MCP conf
 
 ### Authentication by account
 
-MCP *definitions* sync between accounts; MCP *grants* do not — a server is authorized once per account, which is what "server X is not connected" actually means. The MCP tab lists every account with how many servers it defines and which still need signing in, plus the exact command:
+MCP *definitions* sync between accounts; MCP *grants* do not — a server is authorized once per account, which is what "server X is not connected" actually means. For an OAuth HTTP server, open it in the MCP tab and press **Connect OAuth** beside each Claude or Codex account. Agent Link starts that account's CLI login and opens the provider's browser sign-in; no token is pasted into the panel. A remote daemon also shows the exact fallback command:
 
 ```sh
 CLAUDE_CONFIG_DIR="~/.agent-link/accounts/claude/you@work.com" claude mcp login <server>
@@ -118,9 +118,10 @@ The MCP tab manages **user-level** (global) servers — each provider's own conf
 
 Paseo has no automatic provider failover: an agent that hits a usage limit stops with an error and keeps its workspace — it does not move itself to another account. Three things reduce the pain, and the tab exposes all of them:
 
-- **7-day usage** — on request, reads each account's own transcripts and reports sessions, input/output tokens and which models that account actually ran. No costs and no quota percentages: neither CLI exposes remaining quota without the account's token, which this plugin never reads.
+- **Available capacity** — provider quota percentage left and reset time per account, captured from that account's own CLI session state without reading its access token.
+- **Activity details** — an on-request transcript scan for sessions, tokens, cache rate, and models actually used.
 - **Credit state** — when an account has hit a spend limit, its row says so (Claude records the reason in its own config), instead of you finding out when an agent dies.
-- **Rotation usage** — a bar and a count showing how many agents the router has handed each account and when it was last used, so you can see the rotation actually spreading. (This is launches routed by agent-link, not Anthropic/OpenAI quota: neither CLI exposes remaining quota per account without reading its token, which this plugin deliberately does not do. Paseo's own usage figure covers the primary accounts only.)
+- **Rotation usage** — a bar and a count showing how many agents the router has handed each account and when it was last used, separate from provider quota.
 - **+ Add account** — creates the slot for a new account and hands you the one command to finish sign-in. The browser step itself stays in a terminal because both CLIs ask you to paste a code back; the row turns green once you have (and flags a mismatch if you signed in as someone else)
 - **Auto-router** — one provider that picks a live account per launch, so agents spread across accounts without you choosing
 - **Park / Resume** — take an exhausted account out of rotation; new agents skip it until it recovers
@@ -128,11 +129,11 @@ Paseo has no automatic provider failover: an agent that hits a usage limit stops
 
 A running agent still keeps the account it started on; nothing re-routes mid-task (that is what breaks sessions).
 
-Paseo's built-in usage figure reads the primary accounts only (`~/.claude`, `~/.codex`); it does not see per-account slots. Per-pool usage percentages would require reading each account's access token, which this plugin deliberately does not do.
+Paseo's built-in usage figure reads the primary accounts only (`~/.claude`, `~/.codex`). Agent Link's **Available capacity** also covers per-account slots by reading the small quota snapshots its session hooks already capture; it never reads access tokens.
 
-## What stays in the terminal
+## What may still use the terminal
 
-Per-server MCP authorization, and finishing an account sign-in in the browser. The panel can *start* an account login for you (**+ Add account**), but the sign-in itself happens in the browser, and MCP OAuth Those flows are owned by each CLI and are **provider-specific and per-account**: Claude Code authorizes an MCP server with `/mcp` inside a session on that account; other CLIs have their own flow. No panel can do them for you. What this panel does is show exactly which account or server needs authorizing, and hand you the command.
+Finishing a new CLI account login may require a code in a terminal. MCP OAuth can start directly from **Connect OAuth** in the panel when Paseo's daemon is on this Mac; for a remote daemon, the panel gives the provider- and account-specific command to run on that machine.
 
 ## Troubleshooting
 

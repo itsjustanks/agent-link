@@ -8,6 +8,7 @@ import { limitsResume, limitsSetAuto, limitsStatus, type LimitEvent } from "./li
 import { resourceSetEnabled, resourceStatus } from "./resources.shared";
 import {
   accountUsage,
+  accountCapacity,
   addAccount,
   diagnoseProvider,
   providerHealth,
@@ -17,6 +18,7 @@ import {
   wireAuto,
   wireProvider,
   type AccountUsage,
+  type CapacityAccount,
   type AutoRouter,
   type Slot,
 } from "./contracts.shared";
@@ -107,6 +109,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const callCooldown = useRpc(setCooldown);
   const callAddAccount = useRpc(addAccount);
   const callUsage = useRpc(accountUsage);
+  const callCapacity = useRpc(accountCapacity);
   const callLimitsStatus = useRpc(limitsStatus);
   const callLimitsSetAuto = useRpc(limitsSetAuto);
   const callLimitsResume = useRpc(limitsResume);
@@ -129,6 +132,13 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
     queryKey: ["agent-link", "account-usage"],
     queryFn: () => callUsage({ days: 7 }),
     enabled: false,
+  });
+  // Capacity is only a few tiny state files, so it can be the always-visible
+  // answer. Transcript activity remains opt-in because it is much heavier.
+  const capacityQuery = useQuery({
+    queryKey: ["agent-link", "account-capacity"],
+    queryFn: () => callCapacity({}),
+    refetchInterval: 30000,
   });
   const healthQuery = useQuery({
     queryKey: ["agent-link", "provider-health"],
@@ -265,6 +275,70 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   };
 
   // ------------------------------------------------------------------ routing
+
+  const capacityTone = (entry: CapacityAccount): Status => {
+    if (entry.state === "held") return "error";
+    if (entry.state === "parked" || entry.state === "nearing") return "attention";
+    if (entry.state === "ready") return "ok";
+    return "neutral";
+  };
+  const capacityLabel = (entry: CapacityAccount): string => {
+    if (entry.state === "held") return "unavailable";
+    if (entry.state === "parked") return "cooling down";
+    if (entry.state === "unknown") return "waiting for usage";
+    const left = Math.min(...entry.windows.map((window) => Math.max(0, 100 - Math.round(window.usedPct))));
+    return entry.state === "nearing" ? `${left}% left` : "ready";
+  };
+  const capacityCard = capacityQuery.data ? (
+    <Card padded={false}>
+      <View>
+        <View style={{ padding: pad, gap: t.space.xs }}>
+          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: t.space.sm }}>
+            <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
+              <Text style={t.text.heading}>Available capacity</Text>
+              <Text style={t.text.caption}>What can take new work now, how much is left, and when it resets.</Text>
+            </View>
+            <Button label="Refresh" variant="ghost" loading={capacityQuery.isFetching} onPress={() => void capacityQuery.refetch()} />
+          </View>
+        </View>
+        {capacityQuery.data.accounts.map((entry, index) => (
+          <Row
+            key={`${entry.provider}-${entry.poolKey}`}
+            first={index === 0}
+            tone={capacityTone(entry)}
+            title={entry.email}
+            subtitle={`${SHORT[entry.provider]} · ${entry.isPrimary ? "primary account" : "routed account"}${entry.plan ? ` · ${entry.plan}` : ""}`}
+            trailing={<StatusPill status={capacityTone(entry)} label={capacityLabel(entry)} />}
+            meta={
+              entry.windows.length > 0 ? (
+                <View style={{ gap: t.space.sm }}>
+                  {entry.windows.map((window) => {
+                    const left = Math.max(0, 100 - Math.round(window.usedPct));
+                    const reset = window.resetsAt
+                      ? ` · resets ${new Date(window.resetsAt * 1000).toLocaleString(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit" })}`
+                      : "";
+                    return (
+                      <Meter
+                        key={window.label}
+                        fraction={left / 100}
+                        tone={left <= 1 ? "error" : left <= 15 ? "attention" : "ok"}
+                        label={`${window.label === "week" ? "Weekly" : window.label} · ${left}% left${reset}`}
+                      />
+                    );
+                  })}
+                  {entry.at > 0 ? <Text style={t.text.caption}>Updated {agoLabel(entry.at)}</Text> : null}
+                </View>
+              ) : (
+                <Text style={t.text.caption}>
+                  {entry.detail || "No live meter yet. It appears after this account completes a session."}
+                </Text>
+              )
+            }
+          />
+        ))}
+      </View>
+    </Card>
+  ) : null;
 
   const pending = routers.filter((entry) => !entry.wiredProviderId && entry.launcherExists).map((entry) => entry.provider);
   const noLauncher = routers.filter((entry) => !entry.wiredProviderId && !entry.launcherExists);
@@ -874,7 +948,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
         actions={
           <>
             <Button
-              label={usageQuery.isFetching ? "Reading…" : "7-day usage"}
+              label={usageQuery.isFetching ? "Reading…" : "Activity details"}
               loading={usageQuery.isFetching}
               onPress={() => void usageQuery.refetch()}
             />
@@ -900,6 +974,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
         <>
           {updateCard}
           {cliCard}
+          {capacityCard}
           {routingCard}
           {providerCard("claude")}
           {providerCard("codex")}
