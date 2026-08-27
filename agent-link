@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.5.15"
+VERSION="0.5.16"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -516,7 +516,7 @@ EOF
 }
 
 # Wire the two signals Claude Code actually offers into the router, per config
-# dir: the statusline JSON (the only before-the-wall signal) and a StopFailure
+# dir: the statusline JSON plus cached /usage (the before-the-wall signals) and a StopFailure
 # hook on rate/billing errors (the instant hard-park). Slots only by default —
 # the primary is opt-in, because "your primary is never modified" is a promise.
 cmd_hooks() { # [install|remove|status] [--primary]
@@ -534,7 +534,10 @@ cmd_hooks() { # [install|remove|status] [--primary]
         hooks_wire_dir "$d" "$self_bin" || return 1
       done
       echo "hooks installed. New Claude sessions mark accounts nearing at 85%, park at 99% and on hard refusals."
-      [ -z "$with_primary" ] && echo "(slots only — add the primary with: agent-link hooks install --primary)"
+      if [ -z "$with_primary" ]; then
+        echo "(slots only — add the primary with: agent-link hooks install --primary)"
+      fi
+      return 0
       ;;
     remove)
       for d in $dirs; do hooks_unwire_dir "$d"; done
