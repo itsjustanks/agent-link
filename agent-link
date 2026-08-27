@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.5.16"
+VERSION="0.5.17"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -1786,6 +1786,7 @@ cmd_handoff() { # $1 provider, $2 session-id, $3 target email|primary
   src="$(session_dir "$p" "$owner")"
   [ "$src" = "$dest_dir" ] && { echo "already on $target"; return 0; }
   session_copy "$src" "$dest_dir" "$sid" || { echo "copying session '$sid' failed" >&2; return 1; }
+  record_route_decision "$p" "$target" "session ${sid%%-*} handed off from $owner" fallback
   echo "copied session $sid"
   echo "  from: $owner"
   echo "    to: $target"
@@ -1857,6 +1858,7 @@ cmd_resume_target() { # $1 provider, $2 session-id [--go]
     echo "$([ "$owner" = primary ] && echo primary || echo "$owner_dir")"; return 0
   fi
   date +%s > "$(pools_dir)/last-$p-$best"
+  record_route_decision "$p" "$best" "session ${sid%%-*} resumed from $owner" fallback
   echo "$(date '+%Y-%m-%d %H:%M')  moved session $sid $owner -> $best on resume (owner parked)" >> "$STATE/autopark.log"
   echo "$([ "$best" = primary ] && echo primary || echo "$dest_dir")"
 }

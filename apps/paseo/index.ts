@@ -14,6 +14,7 @@ import {
   mcpRemove,
   mcpSync,
   providerHealth,
+  providerHeartbeat,
   accountUsage,
   accountCapacity,
   addAccount,
@@ -37,6 +38,7 @@ import {
   handleMcpRemove,
   handleMcpSync,
   handleProviderHealth,
+  handleProviderHeartbeat,
   handleAccountUsage,
   handleAccountCapacity,
   handleAddAccount,
@@ -95,6 +97,7 @@ export default function contribute(plugin: PluginContext) {
   plugin.handle(accountCapacity, handleAccountCapacity);
   plugin.handle(diagnoseProvider, handleDiagnoseProvider);
   plugin.handle(providerHealth, handleProviderHealth);
+  plugin.handle(providerHeartbeat, handleProviderHeartbeat);
   plugin.handle(mcpMatrix, handleMcpMatrix);
   plugin.handle(mcpAdd, handleMcpAdd);
   plugin.handle(mcpApply, handleMcpApply);

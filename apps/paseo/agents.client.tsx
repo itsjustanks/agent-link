@@ -1,8 +1,8 @@
 import type { PluginSurfaceProps } from "@getpaseo/plugin";
 import { useRpc } from "@getpaseo/plugin";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import React, { useState } from "react";
-import { Text, View } from "react-native";
+import React, { useEffect, useState } from "react";
+import { ScrollView, Text, View } from "react-native";
 import { cliInstall, cliStatus, cliUpdateApply, cliUpdateCheck } from "./cli.shared";
 import { limitsResume, limitsSetAuto, limitsStatus, type LimitEvent } from "./limits.shared";
 import { resourceSetEnabled, resourceStatus } from "./resources.shared";
@@ -12,7 +12,7 @@ import {
   addAccount,
   removeAccount,
   diagnoseProvider,
-  providerHealth,
+  providerHeartbeat,
   scan,
   setCooldown,
   setPreference,
@@ -21,6 +21,7 @@ import {
   wireProvider,
   type AccountUsage,
   type CapacityAccount,
+  type ProviderHeartbeat,
   type AutoRouter,
   type Slot,
 } from "./contracts.shared";
@@ -65,11 +66,6 @@ type ProviderId = "claude" | "codex";
 const CARD_TITLE: Record<ProviderId, string> = { claude: "Claude Code", codex: "Codex" };
 const SHORT: Record<ProviderId, string> = { claude: "Claude", codex: "Codex" };
 
-const OTHERS = [
-  { id: "kimi", title: "Kimi Code" },
-  { id: "grok", title: "Grok" },
-];
-
 function agoLabel(epoch: number): string {
   const mins = Math.max(0, Math.round((Date.now() - epoch * 1000) / 60000));
   if (mins < 1) return "just now";
@@ -112,6 +108,15 @@ function countdownLabel(epoch: number): string {
   return `in ${days}d ${hours % 24}h`;
 }
 
+function deviceResetLabel(epoch: number): string {
+  return `${new Date(epoch * 1000).toLocaleString(undefined, {
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZoneName: "short",
+  })} on this device`;
+}
+
 function durationLabel(window: CapacityWindow): string {
   const minutes = window.durationMinutes;
   if (!minutes) return window.kind === "weekly" ? "7-day window" : window.kind === "session" ? "rolling session window" : "provider window";
@@ -151,11 +156,7 @@ function LimitWindow({ window }: { window: CapacityWindow }) {
   const available = 100 - used;
   const tone: Status = used >= 99 ? "error" : used >= 85 ? "attention" : "ok";
   const reset = window.resetsAt
-    ? `${countdownLabel(window.resetsAt)} · ${new Date(window.resetsAt * 1000).toLocaleString(undefined, {
-        weekday: "short",
-        hour: "2-digit",
-        minute: "2-digit",
-      })}`
+    ? `${countdownLabel(window.resetsAt)} · ${deviceResetLabel(window.resetsAt)}`
     : "reset time not reported";
   return (
     <View
@@ -312,7 +313,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const callUpdateApply = useRpc(cliUpdateApply);
   const callWire = useRpc(wireProvider);
   const callDiagnose = useRpc(diagnoseProvider);
-  const callHealth = useRpc(providerHealth);
+  const callHeartbeat = useRpc(providerHeartbeat);
   const callWireAuto = useRpc(wireAuto);
   const callRouterLaunch = useRpc(routerLaunch);
   const callCooldown = useRpc(setCooldown);
@@ -335,11 +336,14 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const [newEmail, setNewEmail] = useState("");
   const [routerTask, setRouterTask] = useState("");
   const [usageView, setUsageView] = useState<"limits" | "activity">("limits");
+  const [providerTab, setProviderTab] = useState("claude");
 
-  const scanQuery = useQuery({ queryKey: ["agent-link", "scan"], queryFn: () => callScan({}) });
-  // Health spawns a real process per provider — for the ACP providers that
-  // starts an agent session — and usage re-reads every transcript on disk.
-  // Both cost real work, so they run on request, never on mount.
+  const scanQuery = useQuery({
+    queryKey: ["agent-link", "scan"],
+    queryFn: () => callScan({}),
+    refetchInterval: 30000,
+  });
+  // Usage re-reads every transcript on disk, so it runs on request only.
   const usageQuery = useQuery({
     queryKey: ["agent-link", "account-usage"],
     queryFn: () => callUsage({ days: 7 }),
@@ -352,10 +356,13 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
     queryFn: () => callCapacity({}),
     refetchInterval: 30000,
   });
-  const healthQuery = useQuery({
-    queryKey: ["agent-link", "provider-health"],
-    queryFn: () => callHealth({}),
-    enabled: false,
+  // This is intentionally a registry heartbeat, not a provider diagnostic:
+  // it proves the daemon and provider registration are live without starting
+  // an ACP session or spending a model request.
+  const heartbeatQuery = useQuery({
+    queryKey: ["agent-link", "provider-heartbeat"],
+    queryFn: () => callHeartbeat({}),
+    refetchInterval: 30000,
   });
   const refresh = () => void queryClient.invalidateQueries({ queryKey: ["agent-link"] });
 
@@ -450,7 +457,8 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const routingSlots = slots.filter((slot) => slot.source === "agent-link");
   const primaryAccounts = scanQuery.data?.primaryAccounts;
   const routers = scanQuery.data?.autoRouters ?? [];
-  const healthById = new Map((healthQuery.data?.providers ?? []).map((provider) => [provider.id, provider]));
+  const heartbeatProviders = heartbeatQuery.data?.providers ?? [];
+  const heartbeatById = new Map(heartbeatProviders.map((provider) => [provider.id, provider]));
   const primaryInfo = (provider: ProviderId) => (scanQuery.data?.primaries ?? []).find((entry) => entry.provider === provider);
   const primaryEmail = (provider: ProviderId) => (provider === "claude" ? primaryAccounts?.claude : primaryAccounts?.codex) ?? "";
 
@@ -468,6 +476,12 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   for (const slot of routingSlots) countAccount(slot.provider, slot.actualEmail || slot.email);
   const isShared = (provider: string, email: string) => (accountUses.get(`${provider}:${email}`) ?? 0) > 1;
   const distinctPools = accountUses.size;
+
+  useEffect(() => {
+    if (heartbeatProviders.length > 0 && !heartbeatProviders.some((provider) => provider.id === providerTab)) {
+      setProviderTab(heartbeatProviders[0]!.id);
+    }
+  }, [heartbeatProviders, providerTab]);
   const totalEntries = [...accountUses.values()].reduce((sum, count) => sum + count, 0);
 
   const maxLaunches = Math.max(
@@ -932,7 +946,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
               key={w.label}
               fraction={w.pct / 100}
               tone={w.pct >= 99 ? "error" : w.pct >= 85 ? "attention" : "neutral"}
-              label={`${w.label} ${Math.round(w.pct)}%${w.resetsAt ? ` · resets ${new Date(w.resetsAt * 1000).toLocaleString(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit" })}` : ""}`}
+              label={`${w.label} ${Math.round(w.pct)}%${w.resetsAt ? ` · resets ${deviceResetLabel(w.resetsAt)}` : ""}`}
             />
           ))}
           <Text style={t.text.caption}>
@@ -1291,10 +1305,14 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
     );
   };
 
-  const providerCard = (provider: ProviderId) => {
-    const health = healthById.get(provider);
-    const status: Status = healthQuery.isFetching ? "busy" : !health ? "neutral" : health.ok ? "ok" : "error";
-    const label = healthQuery.isFetching ? "checking" : !health ? "not checked" : health.ok ? "healthy" : "failing";
+  const heartbeatStatus = (entry: ProviderHeartbeat | undefined): { status: Status; label: string } => {
+    if (heartbeatQuery.isLoading) return { status: "busy", label: "connecting" };
+    if (heartbeatQuery.error || !entry) return { status: "error", label: "unavailable" };
+    return { status: entry.available ? "ok" : "error", label: entry.available ? "registered" : "unavailable" };
+  };
+
+  const providerCard = (provider: ProviderId, heartbeat: ProviderHeartbeat | undefined) => {
+    const state = heartbeatStatus(heartbeat);
     return (
       <Card key={provider} padded={false}>
         <View>
@@ -1304,23 +1322,19 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                 <Text numberOfLines={1} style={t.text.heading}>
                   {CARD_TITLE[provider]}
                 </Text>
-                <StatusPill status={status} label={label} />
+                <StatusPill status={state.status} label={state.label} />
               </View>
               <Button
-                label="Diagnose"
+                label="Deep check"
                 variant="ghost"
                 loading={diagnosing === provider}
                 disabled={diagnosing !== null}
                 onPress={() => runDiagnose(provider, provider)}
               />
             </View>
-            {health ? (
-              health.ok ? (
-                <Text style={t.text.caption}>{health.summary}</Text>
-              ) : (
-                <ErrorText>{health.summary}</ErrorText>
-              )
-            ) : null}
+            <Text style={t.text.caption}>
+              {heartbeat?.summary ?? "Waiting for the Paseo provider registry."} Heartbeat is registry-only; Deep check starts the provider.
+            </Text>
             {diagnosis[provider] ? <CodeBlock>{diagnosis[provider]}</CodeBlock> : null}
           </View>
           {primaryRow(provider)}
@@ -1331,55 +1345,79 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
     );
   };
 
-  const othersCard = (
-    <Card padded={false}>
-      <View>
-        <View style={{ padding: pad, gap: t.space.xs }}>
-          <Text style={t.text.heading}>Other providers</Text>
-          <Text style={[t.text.body, { color: t.color.muted }]}>
-            One account each, held by their own CLI — Agent Link only checks that they answer.
-          </Text>
-        </View>
-        {OTHERS.map((entry) => {
-          const health = healthById.get(entry.id);
-          const status: Status = healthQuery.isFetching ? "busy" : !health ? "neutral" : health.ok ? "ok" : "error";
-          const label = healthQuery.isFetching ? "checking" : !health ? "not checked" : health.ok ? "healthy" : "failing";
-          return (
-            <Row
-              key={entry.id}
-              title={entry.title}
-              subtitle={health?.summary}
-              meta={<StatusPill status={status} label={label} />}
-              trailing={
-                <Button
-                  label="Diagnose"
-                  variant="ghost"
-                  loading={diagnosing === entry.id}
-                  disabled={diagnosing !== null}
-                  onPress={() => runDiagnose(entry.id, entry.id)}
-                />
-              }
-              expanded={diagnosis[entry.id] ? <CodeBlock>{diagnosis[entry.id]}</CodeBlock> : undefined}
+  const singleProviderCard = (entry: ProviderHeartbeat) => {
+    const state = heartbeatStatus(entry);
+    return (
+      <Card key={entry.id} padded={false}>
+        <View>
+          <View style={{ padding: pad, gap: t.space.md }}>
+            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: t.space.sm }}>
+              <View style={{ flex: 1, minWidth: 0, gap: t.space.xs }}>
+                <Text numberOfLines={1} style={t.text.heading}>{entry.label}</Text>
+                <StatusPill status={state.status} label={state.label} />
+              </View>
+              <Button
+                label="Deep check"
+                variant="ghost"
+                loading={diagnosing === entry.id}
+                disabled={diagnosing !== null}
+                onPress={() => runDiagnose(entry.id, entry.id)}
+              />
+            </View>
+            <Text style={t.text.caption}>{entry.summary} Heartbeat never starts a model turn.</Text>
+            <Facts
+              items={[
+                { value: "single provider login" },
+                { value: "no Agent Link account cycling", tone: "attention" },
+                { value: entry.quotaTelemetry ? "quota telemetry available" : "quota telemetry not exposed", tone: "attention" },
+              ]}
             />
-          );
-        })}
-      </View>
-    </Card>
+            {entry.aliases.length > 0 ? <Text style={t.text.caption}>{`Loaded aliases: ${entry.aliases.join(", ")}`}</Text> : null}
+            {diagnosis[entry.id] ? <CodeBlock>{diagnosis[entry.id]}</CodeBlock> : null}
+          </View>
+        </View>
+      </Card>
+    );
+  };
+
+  const providerOptions = heartbeatProviders.length > 0
+    ? heartbeatProviders.map((provider) => ({ value: provider.id, label: provider.label }))
+    : [
+        { value: "claude", label: "Claude" },
+        { value: "codex", label: "Codex" },
+      ];
+  const selectedHeartbeat = heartbeatById.get(providerTab);
+  const selectedProvider = providerTab === "claude" || providerTab === "codex"
+    ? providerCard(providerTab, selectedHeartbeat)
+    : selectedHeartbeat
+      ? singleProviderCard(selectedHeartbeat)
+      : null;
+
+  const providersSection = (
+    <Section
+      title="providers"
+      trailing={
+        <StatusPill
+          status={heartbeatQuery.error ? "error" : heartbeatQuery.isFetching ? "busy" : "ok"}
+          label={heartbeatQuery.data ? `heartbeat ${agoLabel(heartbeatQuery.data.checkedAt)}` : heartbeatQuery.error ? "heartbeat failed" : "connecting"}
+        />
+      }
+    >
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingBottom: t.space.xs }}>
+        <Segmented options={providerOptions} value={providerTab} onChange={setProviderTab} />
+      </ScrollView>
+      {heartbeatQuery.error ? <ErrorText>{`Provider heartbeat failed: ${String(heartbeatQuery.error)}`}</ErrorText> : null}
+      {selectedProvider}
+    </Section>
   );
 
   return (
     <Screen t={t}>
       <Toolbar
         title="Agent Link"
+        subtitle="Live provider and account registry every 30 seconds; model and auth checks stay manual."
         actions={
-          <>
-            <Button
-              label={healthQuery.isFetching ? "Checking…" : "Check health"}
-              loading={healthQuery.isFetching}
-              onPress={() => void healthQuery.refetch()}
-            />
-            <Button label="Refresh" variant="ghost" loading={scanQuery.isFetching} onPress={refresh} />
-          </>
+          <Button label="Refresh" variant="ghost" loading={scanQuery.isFetching || heartbeatQuery.isFetching} onPress={refresh} />
         }
       />
 
@@ -1397,9 +1435,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
           {cliCard}
           {capacityCard}
           {routingCard}
-          {providerCard("claude")}
-          {providerCard("codex")}
-          {othersCard}
+          {providersSection}
         </>
       ) : scanQuery.isLoading ? (
         <Loading label="Reading accounts…" />

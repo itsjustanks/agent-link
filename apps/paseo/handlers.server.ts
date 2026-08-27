@@ -1720,6 +1720,83 @@ export async function handleProviderHealth(_input: Record<string, never>, { pase
   return { providers };
 }
 
+function providerFamily(id: string, overrides: ProviderOverrides): string {
+  let current = id;
+  const seen = new Set<string>();
+  while (!seen.has(current)) {
+    seen.add(current);
+    const parent = overrides[current]?.extends;
+    if (!parent || parent === "acp") return current;
+    if (parent === "claude" || parent === "codex") return parent;
+    if (!overrides[parent]) return current;
+    current = parent;
+  }
+  return id;
+}
+
+function providerLabel(id: string, overrides: ProviderOverrides): string {
+  if (id === "claude") return "Claude";
+  if (id === "codex") return "Codex";
+  const configured = overrides[id]?.label;
+  if (configured) return configured;
+  return id
+    .split(/[-_]+/)
+    .filter(Boolean)
+    .map((part) => part[0]!.toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+export async function handleProviderHeartbeat(_input: Record<string, never>, { paseo }: PluginHandlerContext) {
+  // listAvailable is a registry lookup, not a diagnostic. That distinction is
+  // why this can poll without opening ACP sessions or consuming model quota.
+  const available = await paseo.providers.listAvailable();
+  const overrides = await providerOverrides(paseo);
+  const availableIds = new Set<string>();
+  const grouped = new Map<string, Set<string>>();
+  const add = (id: string) => {
+    const family = providerFamily(id, overrides);
+    const ids = grouped.get(family) ?? new Set<string>();
+    ids.add(id);
+    grouped.set(family, ids);
+  };
+  for (const entry of available.providers as Array<{ provider: string }>) {
+    const id = entry.provider;
+    if (overrides[id]?.enabled === false) continue;
+    availableIds.add(id);
+    add(id);
+  }
+  // Keep configured additions visible even when their CLI is currently
+  // missing. Vanishing a broken provider is precisely the wrong status UI.
+  for (const [id, override] of Object.entries(overrides)) {
+    if (override?.enabled === false) continue;
+    add(id);
+  }
+  const providers = [...grouped.entries()].map(([id, ids]) => {
+    const pooled = id === "claude" || id === "codex";
+    const aliases = [...ids].filter((candidate) => candidate !== id).sort();
+    const familyAvailable = [...ids].some((candidate) => availableIds.has(candidate));
+    const routeLoaded = availableIds.has(`${id}-auto`);
+    return {
+      id,
+      label: providerLabel(id, overrides),
+      available: familyAvailable,
+      kind: pooled ? ("pooled" as const) : ("single" as const),
+      quotaTelemetry: pooled,
+      aliases,
+      summary: !familyAvailable
+        ? "Configured, but unavailable to the daemon; check the provider CLI and PATH, then reload"
+        : pooled
+          ? routeLoaded
+            ? "Provider and dynamic account route are registered"
+            : "Provider is registered; dynamic account route is not loaded"
+          : "Provider is registered; auth and model response require a manual deep check",
+    };
+  });
+  const rank = (id: string) => (id === "claude" ? 0 : id === "codex" ? 1 : 2);
+  providers.sort((a, b) => rank(a.id) - rank(b.id) || a.label.localeCompare(b.label));
+  return { checkedAt: Math.floor(Date.now() / 1000), providers };
+}
+
 export async function handleMcpMatrix(_input: Record<string, never>, { paseo }: PluginHandlerContext) {
   const destinations = await buildDestinations(paseo);
   const nameSets = new Map<string, Set<string>>();

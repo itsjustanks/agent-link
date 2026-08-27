@@ -210,6 +210,32 @@ export const providerHealth = defineRpc({
   }),
 });
 
+export const ProviderHeartbeatSchema = z.object({
+  /** The provider family shown as one tab; account-pinned aliases roll up here. */
+  id: z.string(),
+  label: z.string(),
+  available: z.boolean(),
+  kind: z.enum(["pooled", "single"]),
+  quotaTelemetry: z.boolean(),
+  aliases: z.array(z.string()),
+  summary: z.string(),
+});
+export type ProviderHeartbeat = z.infer<typeof ProviderHeartbeatSchema>;
+
+/**
+ * Cheap liveness signal: daemon RPC + provider registry only. It deliberately
+ * never starts a provider process or model turn; providerHealth remains the
+ * explicit deep check.
+ */
+export const providerHeartbeat = defineRpc({
+  name: "agent-link.provider-heartbeat",
+  input: z.object({}),
+  output: z.object({
+    checkedAt: z.number(),
+    providers: z.array(ProviderHeartbeatSchema),
+  }),
+});
+
 // ---- universal MCP management -------------------------------------------------
 
 export const DestinationSchema = z.object({
