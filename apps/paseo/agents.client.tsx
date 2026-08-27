@@ -54,11 +54,9 @@ import {
 /**
  * Agent Link's account surface.
  *
- * The product is the router: one Paseo provider that hands each new agent to a
- * live account. So the router is the hero and holds the view's only primary
- * button; accounts are the evidence underneath it, and everything that repairs
- * a single account (its login command, its own pinned provider, its usage
- * detail) lives in that account's row rather than in a shared block of copy.
+ * Each provider tab is one complete operating view: health, usage, routing,
+ * then accounts. Account repairs stay on their row, while provider-wide facts
+ * stay in the selected provider tab instead of being repeated above it.
  */
 
 type ProviderId = "claude" | "codex";
@@ -475,15 +473,12 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   countAccount("codex", primaryAccounts?.codex ?? "");
   for (const slot of routingSlots) countAccount(slot.provider, slot.actualEmail || slot.email);
   const isShared = (provider: string, email: string) => (accountUses.get(`${provider}:${email}`) ?? 0) > 1;
-  const distinctPools = accountUses.size;
 
   useEffect(() => {
     if (heartbeatProviders.length > 0 && !heartbeatProviders.some((provider) => provider.id === providerTab)) {
       setProviderTab(heartbeatProviders[0]!.id);
     }
   }, [heartbeatProviders, providerTab]);
-  const totalEntries = [...accountUses.values()].reduce((sum, count) => sum + count, 0);
-
   const maxLaunches = Math.max(
     1,
     ...slots.map((slot) => slot.launches),
@@ -525,108 +520,111 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   // ------------------------------------------------------------------ routing
 
   const capacityAccounts = capacityQuery.data?.accounts ?? [];
-  const readyCapacity = capacityAccounts.filter((entry) => entry.state === "ready").length;
-  const constrainedCapacity = capacityAccounts.filter((entry) => entry.state === "nearing" || entry.state === "parked" || entry.state === "held").length;
-  const unknownCapacity = capacityAccounts.filter((entry) => entry.state === "unknown").length;
-  const capacityCard = (
-    <Card padded={false} tone={constrainedCapacity > 0 ? "attention" : undefined}>
-      <View>
-        <View style={{ padding: pad, gap: t.space.md }}>
-          <View
-            style={{
-              flexDirection: t.compact ? "column" : "row",
-              alignItems: t.compact ? "stretch" : "flex-start",
-              justifyContent: "space-between",
-              gap: t.space.md,
-            }}
-          >
-            <View style={{ flex: 1, minWidth: 0, gap: t.space.xs }}>
-              <Text style={t.text.heading}>Provider usage</Text>
-              <Text style={[t.text.body, { color: t.color.muted }]}>Live limit windows and observed activity for every routed account.</Text>
-              {usageView === "limits" && capacityAccounts.length > 0 ? (
-                <Facts
-                  items={[
-                    { value: plural(readyCapacity, "account available", "accounts available"), tone: readyCapacity > 0 ? "ok" : "attention" },
-                    constrainedCapacity > 0
-                      ? { value: plural(constrainedCapacity, "account constrained", "accounts constrained"), tone: "attention" }
-                      : null,
-                    unknownCapacity > 0
-                      ? { value: plural(unknownCapacity, "account awaiting telemetry", "accounts awaiting telemetry"), tone: "attention" }
-                      : null,
-                    { value: "refreshes every 30 seconds" },
+  const capacityCardFor = (provider: ProviderId) => {
+    const providerCapacity = capacityAccounts.filter((entry) => entry.provider === provider);
+    const providerActivity = (usageQuery.data?.accounts ?? []).filter((entry) => entry.provider === provider);
+    const ready = providerCapacity.filter((entry) => entry.state === "ready").length;
+    const constrained = providerCapacity.filter(
+      (entry) => entry.state === "nearing" || entry.state === "parked" || entry.state === "held",
+    ).length;
+    const unknown = providerCapacity.filter((entry) => entry.state === "unknown").length;
+    return (
+      <Card padded={false} tone={constrained > 0 ? "attention" : undefined}>
+        <View>
+          <View style={{ padding: pad, gap: t.space.md }}>
+            <View
+              style={{
+                flexDirection: t.compact ? "column" : "row",
+                alignItems: t.compact ? "stretch" : "flex-start",
+                justifyContent: "space-between",
+                gap: t.space.md,
+              }}
+            >
+              <View style={{ flex: 1, minWidth: 0, gap: t.space.xs }}>
+                <Text style={t.text.heading}>Usage & capacity</Text>
+                <Text style={[t.text.body, { color: t.color.muted }]}>Live limits and observed activity for this provider’s accounts.</Text>
+                {usageView === "limits" && providerCapacity.length > 0 ? (
+                  <Facts
+                    items={[
+                      { value: plural(ready, "account available", "accounts available"), tone: ready > 0 ? "ok" : "attention" },
+                      constrained > 0
+                        ? { value: plural(constrained, "account constrained", "accounts constrained"), tone: "attention" }
+                        : null,
+                      unknown > 0
+                        ? { value: plural(unknown, "account awaiting telemetry", "accounts awaiting telemetry"), tone: "attention" }
+                        : null,
+                      { value: "refreshes every 30 seconds" },
+                    ]}
+                  />
+                ) : null}
+              </View>
+              <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: t.space.sm }}>
+                <Segmented
+                  value={usageView}
+                  options={[
+                    { value: "limits", label: "Limits" },
+                    { value: "activity", label: "Activity · 7 days" },
                   ]}
+                  onChange={(value) => {
+                    setUsageView(value);
+                    if (value === "activity" && !usageQuery.data && !usageQuery.isFetching) void usageQuery.refetch();
+                  }}
                 />
-              ) : null}
+                <Button
+                  label="Refresh"
+                  variant="ghost"
+                  loading={usageView === "limits" ? capacityQuery.isFetching : usageQuery.isFetching}
+                  onPress={() => void (usageView === "limits" ? capacityQuery.refetch() : usageQuery.refetch())}
+                />
+              </View>
             </View>
-            <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: t.space.sm }}>
-              <Segmented
-                value={usageView}
-                options={[
-                  { value: "limits", label: "Limits" },
-                  { value: "activity", label: "Activity · 7 days" },
-                ]}
-                onChange={(value) => {
-                  setUsageView(value);
-                  if (value === "activity" && !usageQuery.data && !usageQuery.isFetching) void usageQuery.refetch();
-                }}
-              />
-              <Button
-                label="Refresh"
-                variant="ghost"
-                loading={usageView === "limits" ? capacityQuery.isFetching : usageQuery.isFetching}
-                onPress={() => void (usageView === "limits" ? capacityQuery.refetch() : usageQuery.refetch())}
-              />
-            </View>
+            {usageView === "limits" ? (
+              <Text style={t.text.caption}>
+                Providers report rolling account limits, not a separate balance per model. Model names identify the session that supplied the report.
+              </Text>
+            ) : (
+              <Text style={t.text.caption}>Models come from local session history; activity is not quota consumed.</Text>
+            )}
           </View>
+
           {usageView === "limits" ? (
-            <Text style={t.text.caption}>
-              Providers report rolling account limits, not a separate remaining balance for every model. Model names show which session supplied the report.
-            </Text>
+            capacityQuery.isLoading ? (
+              <Loading label={`Reading ${SHORT[provider]} limits…`} />
+            ) : capacityQuery.error ? (
+              <View style={{ padding: pad }}>
+                <ErrorText>{String(capacityQuery.error)}</ErrorText>
+              </View>
+            ) : providerCapacity.length === 0 ? (
+              <View style={{ padding: pad }}>
+                <Text style={t.text.caption}>{`No signed-in ${SHORT[provider]} accounts were found.`}</Text>
+              </View>
+            ) : (
+              providerCapacity.map((entry, index) => (
+                <CapacityAccountPanel key={`${entry.provider}-${entry.poolKey}`} entry={entry} first={index === 0} />
+              ))
+            )
+          ) : usageQuery.isFetching && !usageQuery.data ? (
+            <Loading label={`Reading 7 days of ${SHORT[provider]} activity…`} />
+          ) : usageQuery.error ? (
+            <View style={{ padding: pad }}>
+              <ErrorText>{String(usageQuery.error)}</ErrorText>
+            </View>
+          ) : providerActivity.length === 0 ? (
+            <View style={{ padding: pad }}>
+              <Text style={t.text.caption}>{`No ${SHORT[provider]} account activity was found in the last 7 days.`}</Text>
+            </View>
           ) : (
-            <Text style={t.text.caption}>Models below are observed from local session history; activity is not the same as quota consumed.</Text>
+            providerActivity.map((row, index) => (
+              <ActivityAccountPanel key={`${row.provider}-${row.email}`} row={row} first={index === 0} />
+            ))
           )}
         </View>
+      </Card>
+    );
+  };
 
-        {usageView === "limits" ? (
-          capacityQuery.isLoading ? (
-            <Loading label="Reading provider limits…" />
-          ) : capacityQuery.error ? (
-            <View style={{ padding: pad }}>
-              <ErrorText>{String(capacityQuery.error)}</ErrorText>
-            </View>
-          ) : capacityAccounts.length === 0 ? (
-            <View style={{ padding: pad }}>
-              <Text style={t.text.caption}>No signed-in Claude or Codex accounts were found.</Text>
-            </View>
-          ) : (
-            capacityAccounts.map((entry, index) => (
-              <CapacityAccountPanel key={`${entry.provider}-${entry.poolKey}`} entry={entry} first={index === 0} />
-            ))
-          )
-        ) : usageQuery.isFetching && !usageQuery.data ? (
-          <Loading label="Reading 7 days of local activity…" />
-        ) : usageQuery.error ? (
-          <View style={{ padding: pad }}>
-            <ErrorText>{String(usageQuery.error)}</ErrorText>
-          </View>
-        ) : (usageQuery.data?.accounts.length ?? 0) === 0 ? (
-          <View style={{ padding: pad }}>
-            <Text style={t.text.caption}>No account activity was found in the last 7 days.</Text>
-          </View>
-        ) : (
-          usageQuery.data?.accounts.map((row, index) => (
-            <ActivityAccountPanel key={`${row.provider}-${row.email}`} row={row} first={index === 0} />
-          ))
-        )}
-      </View>
-    </Card>
-  );
-
-  const pending = routers.filter((entry) => !entry.wiredProviderId && entry.launcherExists).map((entry) => entry.provider);
-  const noLauncher = routers.filter((entry) => !entry.wiredProviderId && !entry.launcherExists);
-  const wired = routers.filter((entry) => entry.wiredProviderId).length;
-  const routingStatus: Status = routers.length > 0 && wired === routers.length ? "ok" : "attention";
-  const routingLabel = wired === 0 ? "not installed" : wired === routers.length ? "installed" : "half installed";
+  const routerPending = (provider: ProviderId) =>
+    routers.some((entry) => entry.provider === provider && !entry.wiredProviderId && entry.launcherExists);
 
   const inRotation = (provider: ProviderId) => {
     const info = primaryInfo(provider);
@@ -853,68 +851,75 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
       </Card>
     ) : null;
 
-  const routingCard = (
-    <Card padded={false} tone={routingStatus}>
-      <View>
-        <View style={{ padding: pad, gap: t.space.md }}>
-          <View
-            style={{
-              flexDirection: t.compact ? "column" : "row",
-              alignItems: t.compact ? "stretch" : "flex-start",
-              justifyContent: "space-between",
-              gap: t.space.md,
-            }}
-          >
-            <View style={{ flex: 1, minWidth: 0, gap: t.space.xs }}>
-              <View style={{ flexDirection: "row", alignItems: "center", gap: t.space.sm }}>
-                <Text style={t.text.heading}>Routing</Text>
-                <StatusPill status={routingStatus} label={routingLabel} />
-              </View>
-              <Text style={[t.text.body, { color: t.color.muted }]}>
-                One launch route per provider: unhealthy targets are removed, priority groups are applied, then the
-                least-recently-used eligible account wins.
-              </Text>
-              <Facts
-                items={[
-                  { value: plural(totalEntries, "signed-in entry", "signed-in entries") },
-                  {
-                    value: plural(distinctPools, "quota pool", "quota pools"),
-                    tone: totalEntries > distinctPools ? "attention" : undefined,
-                  },
-                ]}
-              />
-            </View>
-            {pending.length > 0 ? (
-              <View style={{ flexShrink: 0 }}>
-                <Button
-                  label={pending.length > 1 ? "Install for both" : `Install for ${SHORT[pending[0]!]}`}
-                  variant="primary"
-                  loading={routerMutation.isPending}
-                  onPress={() => routerMutation.mutate(pending)}
+  const routingCardFor = (provider: ProviderId) => {
+    const entry = routers.find((candidate) => candidate.provider === provider);
+    const pending = Boolean(entry && !entry.wiredProviderId && entry.launcherExists);
+    const noLauncher = Boolean(entry && !entry.wiredProviderId && !entry.launcherExists);
+    const routingStatus: Status = entry?.wiredProviderId ? "ok" : "attention";
+    const routingLabel = entry?.wiredProviderId ? "installed" : "not installed";
+    const providerPools = [...accountUses.entries()].filter(([key]) => key.startsWith(`${provider}:`));
+    const totalEntries = providerPools.reduce((sum, [, count]) => sum + count, 0);
+    const distinctPools = providerPools.length;
+    return (
+      <Card padded={false} tone={routingStatus}>
+        <View>
+          <View style={{ padding: pad, gap: t.space.md }}>
+            <View
+              style={{
+                flexDirection: t.compact ? "column" : "row",
+                alignItems: t.compact ? "stretch" : "flex-start",
+                justifyContent: "space-between",
+                gap: t.space.md,
+              }}
+            >
+              <View style={{ flex: 1, minWidth: 0, gap: t.space.xs }}>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: t.space.sm }}>
+                  <Text style={t.text.heading}>Routing</Text>
+                  <StatusPill status={routingStatus} label={routingLabel} />
+                </View>
+                <Text style={[t.text.body, { color: t.color.muted }]}>
+                  Unhealthy accounts are removed, priority groups apply, then the least-recently-used eligible account wins.
+                </Text>
+                <Facts
+                  items={[
+                    { value: plural(totalEntries, "signed-in entry", "signed-in entries") },
+                    {
+                      value: plural(distinctPools, "quota pool", "quota pools"),
+                      tone: totalEntries > distinctPools ? "attention" : undefined,
+                    },
+                  ]}
                 />
               </View>
-            ) : null}
-          </View>
-          {totalEntries > distinctPools ? (
-            <Notice tone="attention">
-              An account below is signed in twice, so those entries draw on one rate limit — parking one does not free
-              the other.
-            </Notice>
-          ) : null}
-          {noLauncher.length > 0 ? (
-            <View style={{ gap: t.space.xs }}>
-              <Text style={t.text.caption}>
-                {`No launcher for ${noLauncher.map((entry) => SHORT[entry.provider]).join(" and ")} yet. Create it in a terminal:`}
-              </Text>
-              <CodeBlock tone="attention">agent-link auto</CodeBlock>
+              {pending ? (
+                <View style={{ flexShrink: 0 }}>
+                  <Button
+                    label={`Install for ${SHORT[provider]}`}
+                    variant="primary"
+                    loading={routerMutation.isPending}
+                    onPress={() => routerMutation.mutate([provider])}
+                  />
+                </View>
+              ) : null}
             </View>
-          ) : null}
-          {routerMutation.error ? <ErrorText>{String(routerMutation.error)}</ErrorText> : null}
+            {totalEntries > distinctPools ? (
+              <Notice tone="attention">
+                One account is signed in twice, so both entries draw on the same rate limit.
+              </Notice>
+            ) : null}
+            {noLauncher ? (
+              <View style={{ gap: t.space.xs }}>
+                <Text style={t.text.caption}>{`No ${SHORT[provider]} launcher yet. Create it in a terminal:`}</Text>
+                <CodeBlock tone="attention">agent-link auto</CodeBlock>
+              </View>
+            ) : null}
+            {!entry ? <Text style={t.text.caption}>Waiting for routing state.</Text> : null}
+            {routerMutation.error ? <ErrorText>{String(routerMutation.error)}</ErrorText> : null}
+          </View>
+          {entry ? routerRow(entry) : null}
         </View>
-        {routers.map(routerRow)}
-      </View>
-    </Card>
-  );
+      </Card>
+    );
+  };
 
   // ----------------------------------------------------------------- accounts
 
@@ -1286,11 +1291,11 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                 hint="Creates the slot and hands you the one command that finishes the browser sign-in — that step needs a terminal, because the CLI asks you to paste a code back."
               />
               <View style={{ flexDirection: "row", gap: t.space.sm }}>
-                {/* The router install is the view's primary action; when it is
-                    already done, finishing this account is what's left. */}
+                {/* The provider's router install is the primary action; once it
+                    is wired, finishing this account is what's left. */}
                 <Button
                   label="Create & sign in"
-                  variant={pending.length > 0 ? "secondary" : "primary"}
+                  variant={routerPending(provider) ? "secondary" : "primary"}
                   loading={addMutation.isPending}
                   disabled={newEmail.trim() === ""}
                   onPress={() => addMutation.mutate({ provider, email: newEmail.trim() })}
@@ -1314,34 +1319,40 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const providerCard = (provider: ProviderId, heartbeat: ProviderHeartbeat | undefined) => {
     const state = heartbeatStatus(heartbeat);
     return (
-      <Card key={provider} padded={false}>
-        <View>
-          <View style={{ padding: pad, gap: t.space.sm }}>
-            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: t.space.sm }}>
-              <View style={{ flex: 1, minWidth: 0, gap: t.space.xs }}>
-                <Text numberOfLines={1} style={t.text.heading}>
-                  {CARD_TITLE[provider]}
-                </Text>
-                <StatusPill status={state.status} label={state.label} />
-              </View>
-              <Button
-                label="Deep check"
-                variant="ghost"
-                loading={diagnosing === provider}
-                disabled={diagnosing !== null}
-                onPress={() => runDiagnose(provider, provider)}
-              />
+      <View key={provider} style={{ gap: t.space.lg }}>
+        <View style={{ gap: t.space.sm }}>
+          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: t.space.sm }}>
+            <View style={{ flex: 1, minWidth: 0, gap: t.space.xs }}>
+              <Text numberOfLines={1} style={t.text.heading}>{`${CARD_TITLE[provider]} health`}</Text>
+              <StatusPill status={state.status} label={state.label} />
             </View>
-            <Text style={t.text.caption}>
-              {heartbeat?.summary ?? "Waiting for the Paseo provider registry."} Heartbeat is registry-only; Deep check starts the provider.
-            </Text>
-            {diagnosis[provider] ? <CodeBlock>{diagnosis[provider]}</CodeBlock> : null}
+            <Button
+              label="Deep check"
+              variant="ghost"
+              loading={diagnosing === provider}
+              disabled={diagnosing !== null}
+              onPress={() => runDiagnose(provider, provider)}
+            />
           </View>
-          {primaryRow(provider)}
-          {slots.filter((slot) => slot.provider === provider).map(slotRow)}
-          {addRow(provider)}
+          <Text style={t.text.caption}>
+            {heartbeat?.summary ?? "Waiting for the Paseo provider registry."} Heartbeat is registry-only; Deep check starts the provider.
+          </Text>
+          {diagnosis[provider] ? <CodeBlock>{diagnosis[provider]}</CodeBlock> : null}
         </View>
-      </Card>
+        {capacityCardFor(provider)}
+        {routingCardFor(provider)}
+        <Card padded={false}>
+          <View>
+            <View style={{ padding: pad, gap: t.space.xs }}>
+              <Text style={t.text.heading}>Accounts</Text>
+              <Text style={t.text.caption}>Sign-in state, priority, cooldown, usage detail, and account actions.</Text>
+            </View>
+            {primaryRow(provider)}
+            {slots.filter((slot) => slot.provider === provider).map(slotRow)}
+            {addRow(provider)}
+          </View>
+        </Card>
+      </View>
     );
   };
 
@@ -1433,8 +1444,6 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
         <>
           {updateCard}
           {cliCard}
-          {capacityCard}
-          {routingCard}
           {providersSection}
         </>
       ) : scanQuery.isLoading ? (

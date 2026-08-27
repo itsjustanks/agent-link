@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.5.17"
+VERSION="0.5.18"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -1597,6 +1597,17 @@ for aa_a in "\$@"; do
   esac
   aa_prev="\$aa_a"
 done
+# Paseo starts Codex as an app-server, then sends the thread id over RPC. That
+# means it is absent from argv when this launcher has to choose an account.
+# Paseo does provide the persisted agent id, so recover the thread id from that
+# agent record before normal owner-or-healthiest resume routing runs below.
+if [ "$p" = codex ] && [ -z "\$aa_sid" ] && [ -n "\${PASEO_AGENT_ID:-}" ]; then
+  aa_paseo_home="\${PASEO_HOME:-\$HOME/.paseo}"
+  aa_agent_file="\$(find "\$aa_paseo_home/agents" -maxdepth 2 -type f -name "\${PASEO_AGENT_ID}.json" -print -quit 2>/dev/null || true)"
+  if [ -n "\$aa_agent_file" ]; then
+    aa_sid="\$(sed -n 's/.*"sessionId":[[:space:]]*"\([^"]*\)".*/\1/p' "\$aa_agent_file" | head -1)"
+  fi
+fi
 aa_pin=""
 # An explicitly inherited env var means the caller already chose the account —
 # compute nothing for it, or a mere launch would copy transcripts around.
