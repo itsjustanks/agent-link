@@ -86,6 +86,22 @@ export const addAccount = defineRpc({
   output: z.object({ ok: z.boolean(), message: z.string(), started: z.boolean() }),
 });
 
+export const removeAccount = defineRpc({
+  name: "agent-link.remove-account",
+  input: z.object({ provider: z.enum(["claude", "codex"]), email: z.string().min(1) }),
+  output: z.object({ ok: z.boolean(), message: z.string() }),
+});
+
+export const setPreference = defineRpc({
+  name: "agent-link.set-preference",
+  input: z.object({
+    provider: z.enum(["claude", "codex"]),
+    email: z.string().min(1),
+    preference: z.enum(["preferred", "standard", "reserve"]),
+  }),
+  output: z.object({ ok: z.boolean(), message: z.string() }),
+});
+
 export const setCooldown = defineRpc({
   name: "agent-link.set-cooldown",
   input: z.object({ provider: z.enum(["claude", "codex"]), email: z.string(), minutes: z.number() }),

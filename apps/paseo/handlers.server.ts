@@ -815,6 +815,7 @@ export async function handleScan(_input: Record<string, never>, { paseo }: Plugi
       lastUsed: poolNumber("last", slot.provider, slot.email),
     };
   });
+  const routingSlots = slots.filter((slot) => slot.source === "agent-link");
   const autoRouters = (["claude", "codex"] as const).map((provider) => ({
     provider,
     launcherPath: autoLauncherPath(provider),
@@ -836,13 +837,13 @@ export async function handleScan(_input: Record<string, never>, { paseo }: Plugi
         parkReason: parkReason(provider, "primary"),
         preference: routePreference(provider, "primary"),
         nearing: nearingLimit(provider, "primary"),
-        duplicated: slots.some((slot) => slot.provider === provider && (slot.actualEmail || slot.email) === email),
+        duplicated: routingSlots.some((slot) => slot.provider === provider && (slot.actualEmail || slot.email) === email),
       };
     }),
     nextUp: (["claude", "codex"] as const).map((provider) => {
       const primaryEmail = primaryEmails[provider];
       const candidates: Array<{ email: string; last: number; preference: RoutePreference; nearing: boolean }> = [];
-      const duplicated = slots.some((slot) => slot.provider === provider && (slot.actualEmail || slot.email) === primaryEmail);
+      const duplicated = routingSlots.some((slot) => slot.provider === provider && (slot.actualEmail || slot.email) === primaryEmail);
       if (primaryEmail && !duplicated && !primaryParked[provider] && primaryCooldowns[provider] === 0) {
         candidates.push({
           email: primaryEmail,
@@ -851,7 +852,7 @@ export async function handleScan(_input: Record<string, never>, { paseo }: Plugi
           nearing: nearingLimit(provider, "primary"),
         });
       }
-      for (const slot of slots) {
+      for (const slot of routingSlots) {
         if (slot.provider !== provider || !slot.loggedIn || slot.wrongAccount || slot.blocked || slot.cooldownUntil > 0) continue;
         candidates.push({ email: slot.email, last: slot.lastUsed, preference: slot.preference, nearing: slot.nearing });
       }
@@ -995,6 +996,115 @@ export async function handleAddAccount({ provider, email }: { provider: "claude"
           provider === "claude" ? `auth login --email ${email}` : "login"
         }`,
   };
+}
+
+function updateLineSet(path: string, key: string, present: boolean): void {
+  let values: string[] = [];
+  try {
+    values = readFileSync(path, "utf8").split(/\r?\n/).filter(Boolean);
+  } catch {
+    // A missing file is an empty set.
+  }
+  const next = values.filter((value) => value !== key);
+  if (present) next.push(key);
+  if (next.length === 0) rmSync(path, { force: true });
+  else writeTextAtomic(path, `${next.join("\n")}\n`);
+}
+
+export async function handleSetPreference({
+  provider,
+  email,
+  preference,
+}: {
+  provider: "claude" | "codex";
+  email: string;
+  preference: "preferred" | "standard" | "reserve";
+}) {
+  if (
+    email !== "primary" &&
+    !collectSlots().some((slot) => slot.source === "agent-link" && slot.provider === provider && slot.email === email)
+  ) {
+    return { ok: false, message: `no ${provider} target '${email}'` };
+  }
+  const state = join(AGENT_LINK_HOME_DIR, "state");
+  try {
+    mkdirSync(state, { recursive: true });
+    updateLineSet(join(state, `prefer-${provider}-first`), email, preference === "preferred");
+    updateLineSet(join(state, `prefer-${provider}-last`), email, preference === "reserve");
+    const label = preference === "preferred" ? "priority" : preference === "reserve" ? "reserve" : "default";
+    return { ok: true, message: `${provider} · ${email} moved to the ${label} routing group` };
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+export async function handleRemoveAccount(
+  { provider, email }: { provider: "claude" | "codex"; email: string },
+  { paseo }: PluginHandlerContext,
+) {
+  if (!/^[^/\\]+$/.test(email) || email === "." || email === "..") {
+    return { ok: false, message: "invalid account slot" };
+  }
+  const dir = join(AGENT_LINK_ROOT, provider, email);
+  const slot = collectSlots().find(
+    (candidate) => candidate.source === "agent-link" && candidate.provider === provider && candidate.email === email && candidate.dir === dir,
+  );
+  if (!slot) return { ok: false, message: `no managed ${provider} slot '${email}'` };
+
+  const pinned = providerIdForDir(await providerOverrides(paseo), provider, dir);
+  if (pinned) {
+    return { ok: false, message: `remove the pinned Paseo provider '${pinned}' before removing this slot` };
+  }
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const archiveRoot = join(AGENT_LINK_HOME_DIR, "removed");
+  const archived = join(archiveRoot, `${provider}-${email}-${stamp}`);
+  try {
+    mkdirSync(archiveRoot, { recursive: true });
+    renameSync(dir, archived);
+
+    const state = join(AGENT_LINK_HOME_DIR, "state");
+    updateLineSet(join(state, `order-${provider}`), email, false);
+    updateLineSet(join(state, `prefer-${provider}-first`), email, false);
+    updateLineSet(join(state, `prefer-${provider}-last`), email, false);
+    try {
+      if (readFileSync(join(state, `route-${provider}`), "utf8").trim() === email) {
+        writeTextAtomic(join(state, `route-${provider}`), "primary\n");
+      }
+    } catch {
+      // No fixed route pointed at this slot.
+    }
+    for (const name of [
+      `count-${provider}-${email}`,
+      `last-${provider}-${email}`,
+      `cooldown-${provider}-${email}`,
+      `reason-${provider}-${email}`,
+      `hold-${provider}-${email}`,
+      `holdcheck-${provider}-${email}`,
+      `nearing-${provider}-${email}`,
+      `quota-${provider}-${email}.json`,
+      `.quota-check-${provider}-${email}`,
+    ]) {
+      rmSync(join(poolsDir(), name), { force: true });
+    }
+
+    let shims = "";
+    const cli = searchPath().map((entry) => join(entry, "agent-link")).find((candidate) => existsSync(candidate));
+    if (cli) {
+      try {
+        execFileSync(cli, ["shims"], {
+          stdio: "ignore",
+          timeout: 10_000,
+          env: { ...process.env, AGENT_LINK_HOME: AGENT_LINK_HOME_DIR },
+        });
+      } catch {
+        shims = " Numbered launchers need a refresh: agent-link shims.";
+      }
+    }
+    return { ok: true, message: `${email} removed from routing and archived at ${archived}.${shims}` };
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 export async function handleSetCooldown({
@@ -1317,8 +1427,7 @@ type PoolQuota = {
   }>;
 };
 
-function readPoolQuota(provider: string, key: string): PoolQuota | null {
-  const raw = readJson(join(poolsDir(), `quota-${provider}-${key}.json`)) as Record<string, unknown> | null;
+function poolQuotaFromRaw(provider: string, raw: Record<string, unknown> | null): PoolQuota | null {
   if (!raw) return null;
   const windows: PoolQuota["windows"] = [];
   for (const [keyName, fallbackMinutes] of [
@@ -1347,13 +1456,34 @@ function readPoolQuota(provider: string, key: string): PoolQuota | null {
       });
     }
   }
+  const extraWindows = Array.isArray(raw.windows) ? raw.windows : [];
+  for (const candidate of extraWindows) {
+    if (!candidate || typeof candidate !== "object") continue;
+    const value = candidate as Record<string, unknown>;
+    if (typeof value.pct !== "number" || typeof value.label !== "string") continue;
+    const kind = value.kind === "session" || value.kind === "weekly" ? value.kind : "other";
+    const resetsAt = typeof value.resets_at === "number" ? value.resets_at : null;
+    if (windows.some((entry) => entry.label === value.label && entry.resetsAt === resetsAt)) continue;
+    windows.push({
+      label: value.label,
+      kind,
+      durationMinutes: typeof value.duration_minutes === "number" ? value.duration_minutes : null,
+      pct: value.pct,
+      resetsAt,
+    });
+  }
   if (windows.length === 0) return null;
   const credit = raw.credits as { has_credits?: boolean; unlimited?: boolean; balance?: string | number } | undefined;
   return {
     at: typeof raw.at === "number" ? raw.at : 0,
     model: typeof raw.model === "string" ? raw.model : "",
     plan: typeof raw.plan === "string" ? raw.plan : "",
-    source: provider === "claude" ? "Claude statusline" : "Codex rollout",
+    source:
+      typeof raw.source === "string" && raw.source !== ""
+        ? raw.source
+        : provider === "claude"
+          ? "Claude statusline"
+          : "Codex rollout",
     credits:
       credit && typeof credit.has_credits === "boolean"
         ? {
@@ -1366,6 +1496,80 @@ function readPoolQuota(provider: string, key: string): PoolQuota | null {
   };
 }
 
+function epochSeconds(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value > 10_000_000_000 ? Math.floor(value / 1000) : value;
+  if (typeof value !== "string" || value === "") return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : null;
+}
+
+/**
+ * Claude's interactive /usage view caches the same account limits in
+ * .claude.json. Paseo runs Claude in non-interactive mode, so its statusline
+ * never executes; this token-free cache is the only exact fallback available
+ * without reaching into OAuth credentials or scraping a private API.
+ */
+function readClaudeCachedQuota(configDir: string): PoolQuota | null {
+  const primaryDir = join(HOME, ".claude");
+  const path = configDir === HOME || configDir === primaryDir ? join(HOME, ".claude.json") : join(configDir, ".claude.json");
+  const config = readJson(path);
+  const cached = config?.cachedUsageUtilization as { fetchedAtMs?: unknown; utilization?: Record<string, unknown> } | undefined;
+  const utilization = cached?.utilization;
+  if (!utilization) return null;
+  const windows: PoolQuota["windows"] = [];
+  for (const [key, label, kind, durationMinutes] of [
+    ["five_hour", "Session limit", "session", 300],
+    ["seven_day", "Weekly limit", "weekly", 10_080],
+  ] as const) {
+    const value = utilization[key] as { utilization?: unknown; resets_at?: unknown } | undefined;
+    if (typeof value?.utilization !== "number") continue;
+    windows.push({
+      label,
+      kind,
+      durationMinutes,
+      pct: value.utilization,
+      resetsAt: epochSeconds(value.resets_at),
+    });
+  }
+  const limits = Array.isArray(utilization.limits) ? utilization.limits : [];
+  for (const candidate of limits) {
+    if (!candidate || typeof candidate !== "object") continue;
+    const value = candidate as {
+      kind?: unknown;
+      percent?: unknown;
+      resets_at?: unknown;
+      scope?: { model?: { display_name?: unknown } } | null;
+    };
+    const model = value.scope?.model?.display_name;
+    if (typeof model !== "string" || typeof value.percent !== "number") continue;
+    windows.push({
+      label: `${model} weekly limit`,
+      kind: "weekly",
+      durationMinutes: 10_080,
+      pct: value.percent,
+      resetsAt: epochSeconds(value.resets_at),
+    });
+  }
+  if (windows.length === 0) return null;
+  return {
+    at: epochSeconds(cached?.fetchedAtMs) ?? 0,
+    model: "",
+    plan: "",
+    source: "Claude /usage cache",
+    credits: null,
+    windows,
+  };
+}
+
+function readPoolQuota(provider: string, key: string, configDir?: string): PoolQuota | null {
+  const stored = poolQuotaFromRaw(provider, readJson(join(poolsDir(), `quota-${provider}-${key}.json`)));
+  if (provider !== "claude" || !configDir) return stored;
+  const cached = readClaudeCachedQuota(configDir);
+  if (!stored) return cached;
+  if (!cached) return stored;
+  return cached.at > stored.at ? cached : stored;
+}
+
 function readHeld(provider: string, key: string): string | null {
   try {
     return readFileSync(join(poolsDir(), `hold-${provider}-${key}`), "utf8").trim() || "held";
@@ -1375,8 +1579,8 @@ function readHeld(provider: string, key: string): string | null {
 }
 
 export async function handleAccountCapacity() {
-  const shape = (provider: "claude" | "codex", email: string, poolKey: string, isPrimary: boolean) => {
-    const quota = readPoolQuota(provider, poolKey);
+  const shape = (provider: "claude" | "codex", email: string, poolKey: string, isPrimary: boolean, dir: string) => {
+    const quota = readPoolQuota(provider, poolKey, dir);
     const held = readHeld(provider, poolKey);
     const cooling = cooldownUntil(provider, poolKey);
     const maxUsed = Math.max(0, ...(quota?.windows.map((entry) => entry.pct) ?? []));
@@ -1393,8 +1597,8 @@ export async function handleAccountCapacity() {
     const noTelemetry =
       provider === "claude"
         ? isPrimary
-          ? "No current session-limit report. Primary Claude monitoring is opt-in; enable it, then run one session."
-          : "No current session-limit report. Run one Claude session after Agent Link hooks are enabled."
+          ? "Paseo runs Claude non-interactively, so it cannot emit statusline quota. Open `claude`, send one message, then refresh."
+          : `Paseo runs Claude non-interactively, so it cannot emit statusline quota. Run \`agent-link run claude ${poolKey} claude\`, send one message, then refresh.`
         : "No current usage report. Run one Codex session on this account to refresh it.";
     return {
       provider,
@@ -1422,11 +1626,11 @@ export async function handleAccountCapacity() {
     claude: claudeAccountEmail(HOME),
     codex: codexAccountEmail(join(HOME, ".codex")),
   };
-  if (primary.claude) accounts.push(shape("claude", primary.claude, "primary", true));
-  if (primary.codex) accounts.push(shape("codex", primary.codex, "primary", true));
+  if (primary.claude) accounts.push(shape("claude", primary.claude, "primary", true, HOME));
+  if (primary.codex) accounts.push(shape("codex", primary.codex, "primary", true, join(HOME, ".codex")));
   for (const slot of collectSlots()) {
     if (!slot.loggedIn) continue;
-    accounts.push(shape(slot.provider, slot.actualEmail || slot.email, slot.email, false));
+    accounts.push(shape(slot.provider, slot.actualEmail || slot.email, slot.email, false, slot.dir));
   }
   return { accounts };
 }
@@ -1452,7 +1656,7 @@ export async function handleAccountUsage({ days }: { days: number }) {
       daily: t.daily,
       topProject: t.topProject,
       models: [...t.models].sort(),
-      quota: readPoolQuota(provider, poolKey),
+      quota: readPoolQuota(provider, poolKey, dir),
       held: readHeld(provider, poolKey),
     };
   };

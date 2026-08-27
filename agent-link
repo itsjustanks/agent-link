@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.5.14"
+VERSION="0.5.15"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -245,7 +245,9 @@ slot_available_primary() { # $1 provider
     autopark "$1" primary "$reset"
     return 1
   fi
-  if [ "$1" = codex ]; then
+  if [ "$1" = claude ]; then
+    claude_quota_scan primary "$HOME/.claude" || return 1
+  elif [ "$1" = codex ]; then
     codex_quota_scan primary "$HOME/.codex" || return 1
   fi
   return 0
@@ -445,7 +447,7 @@ except Exception:
     sys.exit(0)
 rl = data.get("rate_limits") or {}
 worst, resets = 0.0, None
-snap = {"at": now, "model": ((data.get("model") or {}).get("display_name") or "")}
+snap = {"at": now, "model": ((data.get("model") or {}).get("display_name") or ""), "source": "Claude statusline"}
 for w in ("five_hour", "seven_day"):
     win = rl.get(w) or {}
     u = win.get("used_percentage")
@@ -667,8 +669,102 @@ slot_available() { # $1 provider, $2 email
     autopark "$1" "$2" "$reset"
     return 1
   fi
-  if [ "$1" = codex ]; then
+  if [ "$1" = claude ]; then
+    claude_quota_scan "$2" "$(slot_dir "$1" "$2")" || return 1
+  elif [ "$1" = codex ]; then
     codex_quota_scan "$2" "$(slot_dir "$1" "$2")" || return 1
+  fi
+  return 0
+}
+
+# Claude's interactive /usage view also caches its exact windows in
+# .claude.json. Paseo launches Claude non-interactively, where a statusline is
+# never rendered, so use this token-free cache when it exists. Fresh generic
+# account windows participate in routing; model-scoped windows are display
+# evidence only because exhausting one model does not exhaust the account.
+claude_quota_scan() { # $1 key (email|primary), $2 config dir — 1 = just parked
+  local key="$1" dir="$2" state used resets fresh now
+  now="$(date +%s)"
+  state="$(python3 - "$dir" "$(pools_dir)" "$key" <<'PY2' 2>/dev/null
+import json, os, sys, time
+config_dir, pools, key = sys.argv[1:4]
+path = os.path.join(config_dir, ".claude.json")
+if os.path.basename(config_dir) == ".claude":
+    path = os.path.join(os.path.dirname(config_dir), ".claude.json")
+try:
+    config = json.load(open(path))
+    cached = config.get("cachedUsageUtilization") or {}
+    usage = cached.get("utilization") or {}
+except Exception:
+    sys.exit(0)
+fetched = cached.get("fetchedAtMs") or 0
+try:
+    fetched = int(fetched / 1000) if fetched > 10_000_000_000 else int(fetched)
+except Exception:
+    fetched = 0
+def epoch(value):
+    if isinstance(value, (int, float)):
+        return int(value / 1000) if value > 10_000_000_000 else int(value)
+    if isinstance(value, str) and value:
+        try:
+            from datetime import datetime
+            return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp())
+        except Exception:
+            return 0
+    return 0
+snap = {"at": fetched, "source": "Claude /usage cache", "windows": []}
+generic = []
+for name, label, kind, minutes in (
+    ("five_hour", "Session limit", "session", 300),
+    ("seven_day", "Weekly limit", "weekly", 10080),
+):
+    window = usage.get(name) or {}
+    pct = window.get("utilization")
+    if not isinstance(pct, (int, float)):
+        continue
+    reset = epoch(window.get("resets_at"))
+    snap[name] = {"pct": float(pct), "resets_at": reset}
+    snap["windows"].append({"label": label, "kind": kind, "duration_minutes": minutes,
+                            "pct": float(pct), "resets_at": reset})
+    generic.append((float(pct), reset))
+for limit in usage.get("limits") or []:
+    if not isinstance(limit, dict):
+        continue
+    model = (((limit.get("scope") or {}).get("model") or {}).get("display_name"))
+    pct = limit.get("percent")
+    if not model or not isinstance(pct, (int, float)):
+        continue
+    snap["windows"].append({"label": f"{model} weekly limit", "kind": "weekly", "duration_minutes": 10080,
+                            "pct": float(pct), "resets_at": epoch(limit.get("resets_at"))})
+if not generic:
+    sys.exit(0)
+try:
+    os.makedirs(pools, exist_ok=True)
+    open(os.path.join(pools, f"quota-claude-{key}.json"), "w").write(json.dumps(snap))
+except OSError:
+    pass
+worst = max(generic, key=lambda item: item[0])
+fresh = 1 if fetched and time.time() - fetched < 45 * 60 else 0
+print(f"{worst[0]:.1f} {worst[1]} {fresh}")
+PY2
+)"
+  [ -n "$state" ] || return 0
+  IFS=' ' read -r used resets fresh <<< "$state"
+  used="${used%%.*}"
+  mkdir -p "$(pools_dir)"
+  if [ "$fresh" = 1 ] && [ "$used" -ge 99 ] && [ "$resets" -gt "$now" ]; then
+    echo "$resets" > "$(pools_dir)/cooldown-claude-$key"
+    echo "auto: quota exhausted (Claude /usage cache)" > "$(pools_dir)/reason-claude-$key"
+    rm -f "$(pools_dir)/nearing-claude-$key"
+    echo "$(date '+%Y-%m-%d %H:%M')  parked claude/$key at ${used}% until its reset (/usage cache)" >> "$STATE/autopark.log"
+    return 1
+  fi
+  if [ "$fresh" = 1 ] && [ "$used" -ge 85 ]; then
+    [ -f "$(pools_dir)/nearing-claude-$key" ] || \
+      echo "$(date '+%Y-%m-%d %H:%M')  nearing mark on claude/$key at ${used}% (/usage cache)" >> "$STATE/autopark.log"
+    date +%s > "$(pools_dir)/nearing-claude-$key"
+  elif [ "$fresh" = 1 ] && [ "$used" -lt 75 ]; then
+    rm -f "$(pools_dir)/nearing-claude-$key"
   fi
   return 0
 }
@@ -978,7 +1074,7 @@ cmd_router() { # [install|status]
 }
 
 cmd_usage() {
-  local p e key f state pref
+  local p e key f state pref quota_dir
   for p in $PROVIDERS; do
     echo "$p"
     for key in primary $(slot_list "$p"); do
@@ -996,6 +1092,10 @@ cmd_usage() {
       fi
       pref="$(pref_rank "$p" "$key")"
       case "$pref" in 0) pref=" · prefer first" ;; 2) pref=" · prefer last" ;; *) pref="" ;; esac
+      if [ "$p" = claude ]; then
+        if [ "$key" = primary ]; then quota_dir="$HOME/.claude"; else quota_dir="$(slot_dir "$p" "$key")"; fi
+        claude_quota_scan "$key" "$quota_dir" >/dev/null 2>&1 || true
+      fi
       f="$(pools_dir)/quota-$p-$key.json"
       printf '  %-34s %-8s%s\n' "$e" "$state" "$pref"
       if [ -f "$f" ]; then
@@ -1012,14 +1112,22 @@ def when(ts):
     if not ts: return ""
     return time.strftime("resets %a %H:%M", time.localtime(ts))
 rows = []
-for fallback, k in (("5h", "five_hour"), ("7d", "seven_day"), ("limit", "primary"), ("limit", "secondary")):
-    w = q.get(k)
-    if not w: continue
-    minutes = w.get("window_minutes") or (q.get("window_minutes") if k == "primary" else 0)
-    if minutes and minutes <= 360: label = "session"
-    elif minutes and minutes >= 10080: label = "weekly"
-    else: label = fallback
-    rows.append(f"{label} [{bar(w['pct'])}] {w['pct']:.0f}%  {when(w.get('resets_at'))}")
+custom = q.get("windows") or []
+if custom:
+    for w in custom:
+        if not isinstance(w, dict) or not isinstance(w.get("pct"), (int, float)):
+            continue
+        label = w.get("label") or "limit"
+        rows.append(f"{label} [{bar(w['pct'])}] {w['pct']:.0f}%  {when(w.get('resets_at'))}")
+else:
+    for fallback, k in (("5h", "five_hour"), ("7d", "seven_day"), ("limit", "primary"), ("limit", "secondary")):
+        w = q.get(k)
+        if not w: continue
+        minutes = w.get("window_minutes") or (q.get("window_minutes") if k == "primary" else 0)
+        if minutes and minutes <= 360: label = "session"
+        elif minutes and minutes >= 10080: label = "weekly"
+        else: label = fallback
+        rows.append(f"{label} [{bar(w['pct'])}] {w['pct']:.0f}%  {when(w.get('resets_at'))}")
 model = q.get("model") or q.get("plan") or ""
 for r in rows:
     print(f"      {r}")
@@ -1027,7 +1135,15 @@ if model or stale:
     print(f"      {model}{stale}")
 PY3
       else
-        echo "      no telemetry yet — run one session on it (or: agent-link probe $p)"
+        if [ "$p" = claude ]; then
+          if [ "$key" = primary ]; then
+            echo "      no quota report — open 'claude', send one message, then check again"
+          else
+            echo "      no quota report — run: agent-link run claude $key claude  (then send one message)"
+          fi
+        else
+          echo "      no telemetry yet — run one Codex session on it"
+        fi
       fi
     done
   done
@@ -2430,17 +2546,19 @@ cmd_run() { # provider email [cmd...]
   env "$(prov_env_var "$p")=$dir" "$@"
 }
 
-cmd_remove() { # provider email — delete a slot (its credentials die with it)
+cmd_remove() { # provider email — archive a slot outside rotation
   prov_valid "${1:-}" || { echo "usage: agent-link remove <claude|codex> <email>" >&2; return 1; }
-  # Never let a path fragment through: this function deletes a directory.
+  # Never let a path fragment through: this function moves a directory.
   valid_account "${2:-}" || { echo "invalid account name: '${2:-}'" >&2; return 1; }
-  local p="$1" e="$2" dir a
+  local p="$1" e="$2" dir a archive
   dir="$(slot_dir "$p" "$e")"
   [ -d "$dir" ] || { echo "no $p slot '$e'" >&2; return 1; }
-  printf "Delete the %s slot for %s, INCLUDING its login? [y/N] " "$p" "$e"
+  printf "Remove the %s slot for %s from routing and archive its login/history? [y/N] " "$p" "$e"
   read -r a || return 1
   case "$a" in y|Y|yes|YES) ;; *) echo "aborted"; return 1;; esac
-  rm -rf "$dir"
+  mkdir -p "$ROOT/removed"
+  archive="$ROOT/removed/$p-$e-$(date '+%Y%m%d-%H%M%S')"
+  mv "$dir" "$archive"
   if [ -f "$(order_file "$p")" ]; then
     grep -vxF "$e" "$(order_file "$p")" > "$(order_file "$p").tmp" || true
     mv "$(order_file "$p").tmp" "$(order_file "$p")"
@@ -2449,6 +2567,18 @@ cmd_remove() { # provider email — delete a slot (its credentials die with it)
     echo primary > "$(route_file "$p")"
     echo "plain \`$p\` was routed to this slot — reset to primary"
   fi
+  for a in first last; do
+    if [ -f "$STATE/prefer-$p-$a" ]; then
+      grep -vxF "$e" "$STATE/prefer-$p-$a" > "$STATE/prefer-$p-$a.tmp" || true
+      if [ -s "$STATE/prefer-$p-$a.tmp" ]; then mv "$STATE/prefer-$p-$a.tmp" "$STATE/prefer-$p-$a"
+      else rm -f "$STATE/prefer-$p-$a" "$STATE/prefer-$p-$a.tmp"; fi
+    fi
+  done
+  rm -f "$(pools_dir)/count-$p-$e" "$(pools_dir)/last-$p-$e" \
+    "$(pools_dir)/cooldown-$p-$e" "$(pools_dir)/reason-$p-$e" \
+    "$(pools_dir)/hold-$p-$e" "$(pools_dir)/holdcheck-$p-$e" \
+    "$(pools_dir)/nearing-$p-$e" "$(pools_dir)/quota-$p-$e.json" \
+    "$(pools_dir)/.quota-check-$p-$e"
   # Numbering is positional, so every later slot shifts down. Rewrite the
   # numbered shims now rather than leaving one pointing at a deleted slot.
   if ls "$SHIM_BIN/$p"-[0-9]* >/dev/null 2>&1; then
@@ -2458,6 +2588,7 @@ cmd_remove() { # provider email — delete a slot (its credentials die with it)
   else
     echo "removed."
   fi
+  echo "archived for recovery at $archive"
 }
 
 cmd_sync() { # propagate MCP definitions + project trust from primaries into slots
@@ -2709,7 +2840,7 @@ usage:
   agent-link run <prov> <email> [cmd...]   run a command under a slot's account
   agent-link claude [args...]      run Claude Code on the next account in rotation
   agent-link codex  [args...]      same for Codex
-  agent-link remove <prov> <email> delete a slot and its login
+  agent-link remove <prov> <email> archive a slot outside routing
   agent-link sync                  copy MCP servers + project trust from primaries into slots
   agent-link app [list|install|remove] [id] [--link]  optional integrations (Paseo panel, editors)
   agent-link update                update the CLI and reinstall the apps you have

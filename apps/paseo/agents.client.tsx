@@ -10,10 +10,12 @@ import {
   accountUsage,
   accountCapacity,
   addAccount,
+  removeAccount,
   diagnoseProvider,
   providerHealth,
   scan,
   setCooldown,
+  setPreference,
   routerLaunch,
   wireAuto,
   wireProvider,
@@ -26,6 +28,7 @@ import {
   Button,
   Card,
   CodeBlock,
+  ConfirmButton,
   Disclosure,
   ErrorText,
   Facts,
@@ -314,6 +317,8 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const callRouterLaunch = useRpc(routerLaunch);
   const callCooldown = useRpc(setCooldown);
   const callAddAccount = useRpc(addAccount);
+  const callRemoveAccount = useRpc(removeAccount);
+  const callSetPreference = useRpc(setPreference);
   const callUsage = useRpc(accountUsage);
   const callCapacity = useRpc(accountCapacity);
   const callLimitsStatus = useRpc(limitsStatus);
@@ -425,8 +430,24 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
       refresh();
     },
   });
+  const preferenceMutation = useMutation({
+    mutationFn: (input: { provider: ProviderId; email: string; preference: "preferred" | "standard" | "reserve" }) =>
+      callSetPreference(input),
+    onSuccess: (result) => {
+      setNotice(result.message);
+      refresh();
+    },
+  });
+  const removeMutation = useMutation({
+    mutationFn: (input: { provider: ProviderId; email: string }) => callRemoveAccount(input),
+    onSuccess: (result) => {
+      setNotice(result.message);
+      refresh();
+    },
+  });
 
   const slots = scanQuery.data?.slots ?? [];
+  const routingSlots = slots.filter((slot) => slot.source === "agent-link");
   const primaryAccounts = scanQuery.data?.primaryAccounts;
   const routers = scanQuery.data?.autoRouters ?? [];
   const healthById = new Map((healthQuery.data?.providers ?? []).map((provider) => [provider.id, provider]));
@@ -444,7 +465,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   };
   countAccount("claude", primaryAccounts?.claude ?? "");
   countAccount("codex", primaryAccounts?.codex ?? "");
-  for (const slot of slots) countAccount(slot.provider, slot.actualEmail || slot.email);
+  for (const slot of routingSlots) countAccount(slot.provider, slot.actualEmail || slot.email);
   const isShared = (provider: string, email: string) => (accountUses.get(`${provider}:${email}`) ?? 0) > 1;
   const distinctPools = accountUses.size;
   const totalEntries = [...accountUses.values()].reduce((sum, count) => sum + count, 0);
@@ -462,7 +483,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
     if (!email) return "";
     const info = primaryInfo(provider);
     if (email === primaryEmail(provider) && info && !info.duplicated) return `primary-${provider}`;
-    const slot = slots.find(
+    const slot = routingSlots.find(
       (entry) =>
         entry.provider === provider &&
         entry.email === email &&
@@ -596,7 +617,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const inRotation = (provider: ProviderId) => {
     const info = primaryInfo(provider);
     const own = primaryEmail(provider) && info && !info.duplicated && !info.blocked && info.cooldownUntil === 0 ? 1 : 0;
-    return own + slots.filter((slot) => slot.provider === provider && slot.loggedIn && !slot.wrongAccount && !slot.blocked && slot.cooldownUntil === 0).length;
+    return own + routingSlots.filter((slot) => slot.provider === provider && slot.loggedIn && !slot.wrongAccount && !slot.blocked && slot.cooldownUntil === 0).length;
   };
 
   const routerRow = (entry: AutoRouter) => {
@@ -622,10 +643,11 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                     ? "draining"
                     : "available",
               detail: primary.parkReason,
+              slot: null as Slot | null,
             },
           ]
         : []),
-      ...slots
+      ...routingSlots
         .filter((slot) => slot.provider === entry.provider)
         .map((slot) => ({
           key: slot.dir,
@@ -645,10 +667,11 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                   ? "draining"
                   : "available",
           detail: slot.parkReason,
+          slot,
         })),
     ];
-    const recent = (scanQuery.data?.recentRoutes ?? []).find((route) => route.provider === entry.provider);
-    const recentEmail = recent?.email === "primary" ? primaryEmail(entry.provider) : recent?.email;
+    const routeHistory = (scanQuery.data?.recentRoutes ?? []).filter((route) => route.provider === entry.provider).slice(0, 5);
+    const recent = routeHistory[0];
     const groupLabel = (preference: "preferred" | "standard" | "reserve") =>
       preference === "preferred" ? "priority" : preference === "reserve" ? "reserve" : "default";
     const targetState = (target: (typeof targets)[number]): Status =>
@@ -712,15 +735,33 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                           ]}
                         />
                       }
-                      trailing={<StatusPill status={targetState(target)} label={target.state} />}
+                      trailing={
+                        <View style={{ flexDirection: "row", alignItems: "center", gap: t.space.sm, flexWrap: "wrap" }}>
+                          <StatusPill status={targetState(target)} label={target.state} />
+                          {target.slot?.source === "agent-link" ? (
+                            <ConfirmButton
+                              label="Remove"
+                              confirmLabel="Archive & remove"
+                              onConfirm={() =>
+                                removeMutation.mutate({ provider: target.slot!.provider, email: target.slot!.email })
+                              }
+                            />
+                          ) : null}
+                        </View>
+                      }
                     />
                   );
                 })}
               </View>
               {recent ? (
-                <Text style={t.text.caption}>
-                  {`Last decision ${agoLabel(recent.at)}: ${recentEmail || recent.email} · ${recent.group} · ${recent.decision}`}
-                </Text>
+                <View style={{ gap: t.space.xs }}>
+                  <Text style={t.text.bodyStrong}>Recent route decisions</Text>
+                  {routeHistory.map((route, index) => (
+                    <Text key={`${route.at}-${route.email}-${index}`} style={t.text.caption}>
+                      {`${agoLabel(route.at)} · ${route.email === "primary" ? primaryEmail(entry.provider) : route.email} · ${route.group} · ${route.decision}`}
+                    </Text>
+                  ))}
+                </View>
               ) : (
                 <Text style={t.text.caption}>Decision history appears after the next routed launch.</Text>
               )}
@@ -948,6 +989,25 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
     />
   );
 
+  const preferenceControl = (
+    provider: ProviderId,
+    email: string,
+    preference: "preferred" | "standard" | "reserve",
+  ) => (
+    <View style={{ gap: t.space.xs }}>
+      <Text style={t.text.caption}>Routing priority</Text>
+      <Segmented
+        value={preference}
+        options={[
+          { value: "preferred", label: "Priority", disabled: preferenceMutation.isPending },
+          { value: "standard", label: "Default", disabled: preferenceMutation.isPending },
+          { value: "reserve", label: "Reserve", disabled: preferenceMutation.isPending },
+        ]}
+        onChange={(value) => preferenceMutation.mutate({ provider, email, preference: value })}
+      />
+    </View>
+  );
+
   const slotDetail = (slot: Slot) => {
     const usage = usageFor(slot.actualEmail || slot.email);
     const pinning = pinMutation.variables?.dir === slot.dir;
@@ -974,6 +1034,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
               : null,
           ]}
         />
+        {slot.source === "agent-link" ? preferenceControl(slot.provider, slot.email, slot.preference) : null}
         <CodeBlock>{slot.dir}</CodeBlock>
         {usage ? usageDetail(slot.provider, usage) : null}
         {slot.wiredProviderId ? (
@@ -1003,6 +1064,19 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
         ) : null}
         {diagnosis[slot.dir] ? <CodeBlock>{diagnosis[slot.dir]}</CodeBlock> : null}
         {pinMutation.error && pinning ? <ErrorText>{String(pinMutation.error)}</ErrorText> : null}
+        {slot.source === "agent-link" ? (
+          <View style={{ gap: t.space.xs }}>
+            <Text style={t.text.caption}>
+              Only remove this slot when none of its agents are running. Its login and chat history are archived for recovery.
+            </Text>
+            <ConfirmButton
+              label="Remove slot"
+              confirmLabel="Archive & remove"
+              onConfirm={() => removeMutation.mutate({ provider: slot.provider, email: slot.email })}
+            />
+          </View>
+        ) : null}
+        {removeMutation.error ? <ErrorText>{String(removeMutation.error)}</ErrorText> : null}
       </View>
     );
   };
@@ -1160,6 +1234,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                 </View>
               )}
               <Facts items={[{ value: "managed by the CLI itself, not by a slot folder" }]} />
+              {info ? preferenceControl(provider, "primary", info.preference) : null}
               {usage ? usageDetail(provider, usage) : null}
             </View>
           ) : undefined

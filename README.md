@@ -174,6 +174,8 @@ This wires the two signals Claude Code actually emits, per account:
 - **The statusline JSON** (Pro/Max) carries live 5-hour and weekly `used_percentage` plus the reset time. A tiny wrapper tees it on every render: at **85%** the account is flagged *nearing* — new launches drain to other accounts while anything already running (and resumes of its own conversations) rides on; at **99%** it is parked until Claude's own reported reset. Your existing statusline keeps rendering unchanged (and if you had none, you get one showing the percentages).
 - **A `StopFailure` hook** on `rate_limit`/`billing_error` parks the account the instant a turn actually dies on a limit — no waiting for the next launch to notice.
 
+Claude exposes those quota fields only to an **interactive** statusline after its first response. Paseo runs Claude non-interactively, so Agent Link also reads Claude's token-free cached `/usage` result from `.claude.json` when available. If a routed Claude account still says “no report,” run `agent-link run claude <email> claude`, send one message, and refresh. Codex does not need this step because every rollout persists its quota windows.
+
 So the full lifecycle is hands-off: drain at 85% → park at 99% or on the refusal → dead chats continue on the next `--resume` → a *window* park expires at the real reset, while a **monthly spend limit becomes a HOLD** — no expiry, because time cannot prove it over; a passing `agent-link probe` or `agent-link cooldown <prov> <email> clear` releases it (and `cooldown <prov> <email> hold` parks by hand the same way).
 
 `agent-link usage` is `/usage` across every account: live 5-hour/weekly percentages with reset times, captured from each account's own sessions, plus park/hold state — the same meters render per account in the Paseo panel. And `agent-link prefer <prov> <email> first|last` biases routing toward or away from an account (health still wins: a preferred account that is parked or nearing loses to a healthy ordinary one). `agent-link pools` shows the *nearing limit* tier; `agent-link hooks remove` undoes everything.
@@ -286,7 +288,7 @@ agent-link route enable|disable|status   manage the plain-command shims
 agent-link shims                 numbered per-account shims (claude-1, …)
 agent-link env <prov> <email>    eval-able export for one account
 agent-link sync                  copy MCP servers + project trust into accounts
-agent-link remove <prov> <email> delete an account slot and its login
+agent-link remove <prov> <email> archive an account slot outside routing
 agent-link app [list|install|remove] [id] [--link]   optional integrations under apps/
 agent-link update                update the CLI, then reinstall the apps you have installed
 agent-link fix [model]           test accounts, rescue stuck chats, resync — one-shot cleanup

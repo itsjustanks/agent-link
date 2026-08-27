@@ -17,9 +17,11 @@ import {
   accountUsage,
   accountCapacity,
   addAccount,
+  removeAccount,
   routerLaunch,
   scan,
   setCooldown,
+  setPreference,
   wireAuto,
   wireProvider,
 } from "./contracts.shared";
@@ -38,9 +40,11 @@ import {
   handleAccountUsage,
   handleAccountCapacity,
   handleAddAccount,
+  handleRemoveAccount,
   handleRouterLaunch,
   handleScan,
   handleSetCooldown,
+  handleSetPreference,
   handleWireAuto,
   handleWireProvider,
 } from "./handlers.server";
@@ -85,6 +89,8 @@ export default function contribute(plugin: PluginContext) {
   plugin.handle(routerLaunch, handleRouterLaunch);
   plugin.handle(setCooldown, handleSetCooldown);
   plugin.handle(addAccount, handleAddAccount);
+  plugin.handle(removeAccount, handleRemoveAccount);
+  plugin.handle(setPreference, handleSetPreference);
   plugin.handle(accountUsage, handleAccountUsage);
   plugin.handle(accountCapacity, handleAccountCapacity);
   plugin.handle(diagnoseProvider, handleDiagnoseProvider);
