@@ -4,7 +4,7 @@ import { copyFileSync, createReadStream, existsSync, mkdirSync, readFileSync, re
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
-import type { Destination, Slot } from "./contracts.shared";
+import type { Destination, RouteEvent, Slot } from "./contracts.shared";
 import { onStart } from "./lifecycle.shared";
 import { ensureLimitSentry } from "./limits.server";
 import type { Dialect } from "./mcpjson.shared";
@@ -153,8 +153,8 @@ export function envVarFor(provider: "claude" | "codex"): string {
   return provider === "claude" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME";
 }
 
-function collectSlots(): Array<Omit<Slot, "wiredProviderId" | "cooldownUntil" | "launches" | "lastUsed" | "creditNote" | "blocked" | "parkReason" | "outputStyle" | "settingsDrift">> {
-  const slots: Array<Omit<Slot, "wiredProviderId" | "cooldownUntil" | "launches" | "lastUsed" | "creditNote" | "blocked" | "parkReason" | "outputStyle" | "settingsDrift">> = [];
+function collectSlots(): Array<Omit<Slot, "wiredProviderId" | "cooldownUntil" | "launches" | "lastUsed" | "preference" | "nearing" | "creditNote" | "blocked" | "parkReason" | "outputStyle" | "settingsDrift">> {
+  const slots: Array<Omit<Slot, "wiredProviderId" | "cooldownUntil" | "launches" | "lastUsed" | "preference" | "nearing" | "creditNote" | "blocked" | "parkReason" | "outputStyle" | "settingsDrift">> = [];
   const seen = new Set<string>();
   const add = (provider: "claude" | "codex", dir: string, source: "agent-link" | "external") => {
     if (seen.has(dir)) return;
@@ -680,6 +680,62 @@ function poolNumber(kind: "count" | "last", provider: string, email: string): nu
   }
 }
 
+type RoutePreference = "preferred" | "standard" | "reserve";
+
+function routePreference(provider: string, key: string): RoutePreference {
+  for (const [file, value] of [
+    [`prefer-${provider}-first`, "preferred"],
+    [`prefer-${provider}-last`, "reserve"],
+  ] as const) {
+    try {
+      if (readFileSync(join(AGENT_LINK_HOME_DIR, "state", file), "utf8").split(/\r?\n/).includes(key)) return value;
+    } catch {
+      // Missing preference file means the standard group.
+    }
+  }
+  return "standard";
+}
+
+function nearingLimit(provider: string, key: string): boolean {
+  try {
+    const markedAt = Number.parseInt(readFileSync(join(poolsDir(), `nearing-${provider}-${key}`), "utf8").trim(), 10);
+    return Number.isFinite(markedAt) && Date.now() / 1000 - markedAt <= 90 * 60;
+  } catch {
+    return false;
+  }
+}
+
+function heldReason(provider: string, key: string): string {
+  try {
+    return readFileSync(join(poolsDir(), `hold-${provider}-${key}`), "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+
+function activelyParked(provider: string, key: string): boolean {
+  return heldReason(provider, key) !== "" || cooldownUntil(provider, key) > 0;
+}
+
+function recentRouteEvents(): RouteEvent[] {
+  try {
+    return readFileSync(join(poolsDir(), "routes.log"), "utf8")
+      .trim()
+      .split(/\r?\n/)
+      .slice(-20)
+      .reverse()
+      .flatMap((line) => {
+        const [rawAt, provider, email, decision, group] = line.split("\t");
+        const at = Number.parseInt(rawAt ?? "", 10);
+        if (!Number.isFinite(at) || (provider !== "claude" && provider !== "codex") || !email) return [];
+        if (group !== "preferred" && group !== "standard" && group !== "reserve" && group !== "fallback") return [];
+        return [{ at, provider, email, decision: decision || "routed", group }];
+      });
+  } catch {
+    return [];
+  }
+}
+
 // Which preferences differ from the primary — an account out of step behaves
 // differently for no visible reason. The caller reads the primary settings once
 // and passes them in, so a scan does not re-read the same file per slot.
@@ -739,17 +795,20 @@ export async function handleScan(_input: Record<string, never>, { paseo }: Plugi
   // "Out of credits" is not reliable — a flagged account can still serve some
   // models — so parking (set by `agent-link probe --park`, or by hand) is what
   // actually blocks routing.
-  const primaryParked = { claude: parkReason("claude", "primary") !== "", codex: parkReason("codex", "primary") !== "" };
+  const primaryParked = { claude: activelyParked("claude", "primary"), codex: activelyParked("codex", "primary") };
   const slots = collectSlots().map((slot) => {
     const drift = settingsDrift(slot.provider, slot.dir, baseSettings);
     const parked = parkReason(slot.provider, slot.email);
+    const until = cooldownUntil(slot.provider, slot.email);
     return {
       ...slot,
       wiredProviderId: providerIdForDir(overrides, slot.provider, slot.dir),
-      cooldownUntil: cooldownUntil(slot.provider, slot.email),
+      cooldownUntil: until,
       launches: poolNumber("count", slot.provider, slot.email),
+      preference: routePreference(slot.provider, slot.email),
+      nearing: nearingLimit(slot.provider, slot.email),
       creditNote: creditNote(slot.provider, slot.dir),
-      blocked: parked !== "",
+      blocked: heldReason(slot.provider, slot.email) !== "" || until > 0,
       parkReason: parked,
       outputStyle: drift.style,
       settingsDrift: drift.drift,
@@ -774,23 +833,35 @@ export async function handleScan(_input: Record<string, never>, { paseo }: Plugi
         launches: poolNumber("count", provider, "primary"),
         cooldownUntil: primaryCooldowns[provider],
         blocked: primaryParked[provider],
+        parkReason: parkReason(provider, "primary"),
+        preference: routePreference(provider, "primary"),
+        nearing: nearingLimit(provider, "primary"),
         duplicated: slots.some((slot) => slot.provider === provider && (slot.actualEmail || slot.email) === email),
       };
     }),
     nextUp: (["claude", "codex"] as const).map((provider) => {
       const primaryEmail = primaryEmails[provider];
-      const candidates: Array<{ email: string; last: number }> = [];
+      const candidates: Array<{ email: string; last: number; preference: RoutePreference; nearing: boolean }> = [];
       const duplicated = slots.some((slot) => slot.provider === provider && (slot.actualEmail || slot.email) === primaryEmail);
       if (primaryEmail && !duplicated && !primaryParked[provider] && primaryCooldowns[provider] === 0) {
-        candidates.push({ email: primaryEmail, last: poolNumber("last", provider, "primary") });
+        candidates.push({
+          email: primaryEmail,
+          last: poolNumber("last", provider, "primary"),
+          preference: routePreference(provider, "primary"),
+          nearing: nearingLimit(provider, "primary"),
+        });
       }
       for (const slot of slots) {
-        if (slot.provider !== provider || !slot.loggedIn || slot.blocked || slot.cooldownUntil > 0) continue;
-        candidates.push({ email: slot.email, last: slot.lastUsed });
+        if (slot.provider !== provider || !slot.loggedIn || slot.wrongAccount || slot.blocked || slot.cooldownUntil > 0) continue;
+        candidates.push({ email: slot.email, last: slot.lastUsed, preference: slot.preference, nearing: slot.nearing });
       }
-      candidates.sort((a, b) => a.last - b.last);
-      return { provider, email: candidates[0]?.email ?? "" };
+      const preferenceRank = { preferred: 0, standard: 1, reserve: 2 } as const;
+      const healthy = candidates.filter((candidate) => !candidate.nearing);
+      const eligible = healthy.length > 0 ? healthy : candidates;
+      eligible.sort((a, b) => preferenceRank[a.preference] - preferenceRank[b.preference] || a.last - b.last);
+      return { provider, email: eligible[0]?.email ?? "" };
     }),
+    recentRoutes: recentRouteEvents(),
     autoRouters,
     agentAuthInstalled: agentLinkInstalled(),
     needsRestart,
@@ -812,7 +883,7 @@ export async function handleWireAuto({ provider }: { provider: "claude" | "codex
         [providerId]: {
           extends: provider,
           label: `${provider === "claude" ? "Claude" : "Codex"} (Dynamic Agent Link)`,
-          description: `Routes each new agent to a live ${provider} account (least-recently-used, skips cooled-down)`,
+          description: `Routes each new agent through health, priority groups and least-recently-used ${provider} targets`,
           command: [launcher],
         },
       },

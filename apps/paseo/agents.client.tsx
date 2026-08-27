@@ -463,7 +463,13 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
     const info = primaryInfo(provider);
     if (email === primaryEmail(provider) && info && !info.duplicated) return `primary-${provider}`;
     const slot = slots.find(
-      (entry) => entry.provider === provider && entry.email === email && entry.loggedIn && !entry.blocked && entry.cooldownUntil === 0,
+      (entry) =>
+        entry.provider === provider &&
+        entry.email === email &&
+        entry.loggedIn &&
+        !entry.wrongAccount &&
+        !entry.blocked &&
+        entry.cooldownUntil === 0,
     );
     return slot ? slot.dir : "";
   };
@@ -590,20 +596,75 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const inRotation = (provider: ProviderId) => {
     const info = primaryInfo(provider);
     const own = primaryEmail(provider) && info && !info.duplicated && !info.blocked && info.cooldownUntil === 0 ? 1 : 0;
-    return own + slots.filter((slot) => slot.provider === provider && slot.loggedIn && !slot.blocked && slot.cooldownUntil === 0).length;
+    return own + slots.filter((slot) => slot.provider === provider && slot.loggedIn && !slot.wrongAccount && !slot.blocked && slot.cooldownUntil === 0).length;
   };
 
   const routerRow = (entry: AutoRouter) => {
     const next = (scanQuery.data?.nextUp ?? []).find((item) => item.provider === entry.provider)?.email ?? "";
     const count = inRotation(entry.provider);
+    const primary = primaryInfo(entry.provider);
+    const targets = [
+      ...(primary && primary.email
+        ? [
+            {
+              key: `primary-${entry.provider}`,
+              email: primary.email,
+              preference: primary.preference,
+              launches: primary.launches,
+              lastUsed: 0,
+              ready: !primary.duplicated && !primary.blocked && primary.cooldownUntil === 0,
+              nearing: primary.nearing,
+              state: primary.duplicated
+                ? "duplicate skipped"
+                : primary.blocked || primary.cooldownUntil > 0
+                  ? "cooling down"
+                  : primary.nearing
+                    ? "draining"
+                    : "available",
+              detail: primary.parkReason,
+            },
+          ]
+        : []),
+      ...slots
+        .filter((slot) => slot.provider === entry.provider)
+        .map((slot) => ({
+          key: slot.dir,
+          email: slot.email,
+          preference: slot.preference,
+          launches: slot.launches,
+          lastUsed: slot.lastUsed,
+          ready: slot.loggedIn && !slot.wrongAccount && !slot.blocked && slot.cooldownUntil === 0,
+          nearing: slot.nearing,
+          state: !slot.loggedIn
+            ? "not signed in"
+            : slot.wrongAccount
+              ? "wrong account"
+              : slot.blocked || slot.cooldownUntil > 0
+                ? "cooling down"
+                : slot.nearing
+                  ? "draining"
+                  : "available",
+          detail: slot.parkReason,
+        })),
+    ];
+    const recent = (scanQuery.data?.recentRoutes ?? []).find((route) => route.provider === entry.provider);
+    const recentEmail = recent?.email === "primary" ? primaryEmail(entry.provider) : recent?.email;
+    const groupLabel = (preference: "preferred" | "standard" | "reserve") =>
+      preference === "preferred" ? "priority" : preference === "reserve" ? "reserve" : "default";
+    const targetState = (target: (typeof targets)[number]): Status =>
+      target.state === "wrong account"
+        ? "error"
+        : !target.ready || target.nearing
+          ? "attention"
+          : "ok";
     return (
       <Row
         key={`router-${entry.provider}`}
         tone={entry.wiredProviderId ? "ok" : "attention"}
-        title={CARD_TITLE[entry.provider]}
+        title={`${entry.provider}-auto → ${CARD_TITLE[entry.provider]}`}
         subtitle={
           entry.wiredProviderId
-            ? `pick "${SHORT[entry.provider]} (Dynamic Agent Link)" when you start an agent`
+            ? "health gate → priority group → least-recently-used target"
             : entry.launcherExists
               ? "not wired yet — new agents still go to one fixed account"
               : "no launcher on disk"
@@ -611,12 +672,61 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
         meta={
           <Facts
             items={[
-              { value: `${plural(count, "account", "accounts")} in rotation` },
+              { value: `${plural(count, "target", "targets")} in rotation` },
               next ? { value: `next: ${next}` } : { value: "no account available", tone: "attention" },
+              { value: "decision at launch" },
             ]}
           />
         }
         trailing={<StatusPill status={entry.wiredProviderId ? "ok" : "attention"} label={entry.wiredProviderId ? "routing" : "off"} />}
+        expanded={
+          targets.length > 0 ? (
+            <View style={{ gap: t.space.sm }}>
+              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: t.space.xs }}>
+                <Tag label="quota health" tone="ok" />
+                <Tag label="priority groups" />
+                <Tag label="LRU selector" />
+                <Tag label="cooldown filtering" tone="attention" />
+              </View>
+              <View style={{ borderRadius: t.radius.sm, backgroundColor: t.color.surface2, overflow: "hidden" }}>
+                {targets.map((target, index) => {
+                  const capacity = capacityAccounts.find(
+                    (account) => account.provider === entry.provider && account.email === target.email,
+                  );
+                  const used = capacity?.windows.length
+                    ? Math.max(...capacity.windows.map((window) => window.usedPct))
+                    : null;
+                  return (
+                    <Row
+                      key={target.key}
+                      first={index === 0}
+                      title={target.email}
+                      subtitle={target.detail || `${groupLabel(target.preference)} target`}
+                      meta={
+                        <Facts
+                          items={[
+                            { value: groupLabel(target.preference) },
+                            used === null ? { value: "quota unknown" } : { value: `${Math.max(0, 100 - Math.round(used))}% headroom` },
+                            { value: plural(target.launches, "launch", "launches") },
+                            target.lastUsed > 0 ? { value: `last ${agoLabel(target.lastUsed)}` } : null,
+                          ]}
+                        />
+                      }
+                      trailing={<StatusPill status={targetState(target)} label={target.state} />}
+                    />
+                  );
+                })}
+              </View>
+              {recent ? (
+                <Text style={t.text.caption}>
+                  {`Last decision ${agoLabel(recent.at)}: ${recentEmail || recent.email} · ${recent.group} · ${recent.decision}`}
+                </Text>
+              ) : (
+                <Text style={t.text.caption}>Decision history appears after the next routed launch.</Text>
+              )}
+            </View>
+          ) : undefined
+        }
       />
     );
   };
@@ -656,8 +766,8 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
       </Card>
     ) : null;
 
-  // One cheap GitHub call per panel session says whether main has moved past
-  // the sha stamped at install; the Update button just runs the CLI installer.
+  // One cheap GitHub check per panel session compares the installed ancestry
+  // with the latest release; the Update button runs the CLI installer.
   const update = useQuery({
     queryKey: ["agent-link", "update-check"],
     queryFn: () => callUpdateCheck({}),
@@ -706,8 +816,8 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                 <StatusPill status={routingStatus} label={routingLabel} />
               </View>
               <Text style={[t.text.body, { color: t.color.muted }]}>
-                One provider that hands each new agent to the least-recently-used healthy account, and skips any account
-                that is parked or out of credit.
+                One launch route per provider: unhealthy targets are removed, priority groups are applied, then the
+                least-recently-used eligible account wins.
               </Text>
               <Facts
                 items={[

@@ -67,6 +67,8 @@ export async function handleCliStatus(): Promise<CliStatus> {
 // release tag's commit, falling back to main only when no release resolves.
 const LATEST_RELEASE_URL = "https://api.github.com/repos/itsjustanks/agent-link/releases/latest";
 const COMMIT_SHA_URL = (ref: string) => `https://api.github.com/repos/itsjustanks/agent-link/commits/${encodeURIComponent(ref)}`;
+const COMPARE_URL = (base: string, head: string) =>
+  `https://api.github.com/repos/itsjustanks/agent-link/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`;
 
 // The plugin cannot ask Paseo where it is installed, so it looks in the places
 // the daemon actually uses. ponytail: fixed candidate list — extend it if a
@@ -129,6 +131,23 @@ export async function handleCliUpdateCheck(): Promise<{
       updateReady: true,
       note: "This install predates the version stamp, so one update from here brings it current and stamps it.",
     };
+  }
+  if (installedSha === latestSha) {
+    return { installedSha, latestSha, updateReady: false, note: "" };
+  }
+  // A developer/local install can be newer than the latest published release.
+  // Equality alone called that an update and offered to downgrade it. Ask GitHub
+  // for ancestry: base=release, head=installed means `ahead` is already newer.
+  try {
+    const comparison = await fetch(COMPARE_URL(latestSha, installedSha), { signal: AbortSignal.timeout(8_000) });
+    if (comparison.ok) {
+      const status = ((await comparison.json()) as { status?: string }).status;
+      if (status === "ahead" || status === "identical") {
+        return { installedSha, latestSha, updateReady: false, note: "Installed build is newer than the latest release." };
+      }
+    }
+  } catch {
+    // Fall through to the conservative mismatch check below.
   }
   return {
     installedSha,

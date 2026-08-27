@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.5.13"
+VERSION="0.5.14"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -197,8 +197,9 @@ slot_list() { # $1 provider
 # Paseo/editor provider spreads new agents across accounts. It must resolve to a
 # real slot path: Claude keys credentials to the literal config-dir path, so a
 # symlink that swings between slots reports logged-out (verified).
-# Selection is least-recently-used among slots that are logged in and not in
-# cooldown. A running process keeps whatever it started with, always.
+# Selection filters health first, applies preferred/default/reserve groups,
+# then picks the least-recently-used target. A running process keeps whatever
+# it started with, always.
 
 pools_dir() { echo "$STATE/pools"; }
 
@@ -654,8 +655,10 @@ autopark() { # $1 provider, $2 key (email or "primary"), $3 until-epoch or "hold
 }
 
 slot_available() { # $1 provider, $2 email
-  local until now reset
+  local until now reset actual
   prov_logged_in "$1" "$(slot_dir "$1" "$2")" || return 1
+  actual="$(prov_email "$1" "$(slot_dir "$1" "$2")")"
+  [ -n "$actual" ] && [ "$actual" != "$2" ] && return 1
   [ -f "$(pools_dir)/hold-$1-$2" ] && return 1
   until="$(cat "$(pools_dir)/cooldown-$1-$2" 2>/dev/null || echo 0)"
   now="$(date +%s)"
@@ -1053,9 +1056,20 @@ cmd_prefer() { # $1 provider [$2 email|primary] [first|last|clear]
   esac
 }
 
+record_route_decision() { # provider target decision group
+  local route_log route_lines
+  mkdir -p "$(pools_dir)"
+  route_log="$(pools_dir)/routes.log"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$(date +%s)" "$1" "$2" "$3" "$4" >> "$route_log"
+  route_lines="$(wc -l < "$route_log" 2>/dev/null | tr -d ' ' || echo 0)"
+  if [ "${route_lines:-0}" -gt 240 ]; then
+    tail -n 200 "$route_log" > "$route_log.tmp" && mv "$route_log.tmp" "$route_log"
+  fi
+}
+
 # Print the slot to use next ("primary" or an email), and stamp it as used.
 pick_slot() { # $1 provider
-  local best="" best_ts="" e ts pemail covered pass
+  local best="" best_ts="" e ts pemail covered pass decision="" rank_label="standard"
   maybe_revalidate "$1"
   mkdir -p "$(pools_dir)"
   # The primary counts as a candidate unless a slot already holds that account.
@@ -1085,22 +1099,17 @@ pick_slot() { # $1 provider
         best="$e"; best_ts="$ts"; best_rank="$rank"
       fi
     done
-    [ -n "$best" ] && break
-  done
-  # Everyone parked: hand out the account whose bench ends soonest instead of
-  # silently dumping every launch on the primary (which may itself be parked).
-  if [ -z "$best" ]; then
-    local u best_u=""
-    if [ -n "$pemail" ] && prov_logged_in "$1" "$(primary_dir "$1")"; then
-      best="primary"; best_u="$(cat "$(pools_dir)/cooldown-$1-primary" 2>/dev/null || echo 0)"
+    if [ -n "$best" ]; then
+      [ "$pass" = fresh ] && decision="healthy" || decision="nearing fallback"
+      break
     fi
-    for e in $(slot_list "$1"); do
-      prov_logged_in "$1" "$(slot_dir "$1" "$e")" || continue
-      u="$(cat "$(pools_dir)/cooldown-$1-$e" 2>/dev/null || echo 0)"
-      if [ -z "$best_u" ] || [ "$u" -lt "$best_u" ]; then best="$e"; best_u="$u"; fi
-    done
-    [ -n "$best" ] || return 1
-    echo "$(date '+%Y-%m-%d %H:%M')  all $1 accounts parked — using $best (earliest reset)" >> "$STATE/autopark.log"
+  done
+  # Plexus-style health filtering is fail-closed: handing out a known parked
+  # target only creates another doomed process and can start a restart loop.
+  if [ -z "$best" ]; then
+    [ "${2:-}" = dry ] || record_route_decision "$1" "-" "blocked · no healthy targets" fallback
+    echo "$(date '+%Y-%m-%d %H:%M')  all $1 accounts parked — launch blocked" >> "$STATE/autopark.log"
+    return 1
   fi
   [ "${2:-}" = dry ] && { echo "$best"; return 0; }
   date +%s > "$(pools_dir)/last-$1-$best"
@@ -1108,6 +1117,9 @@ pick_slot() { # $1 provider
   local n
   n="$(cat "$(pools_dir)/count-$1-$best" 2>/dev/null || echo 0)"
   echo $(( n + 1 )) > "$(pools_dir)/count-$1-$best"
+  case "$best_rank" in 0) rank_label="preferred" ;; 2) rank_label="reserve" ;; 9) rank_label="fallback" ;; esac
+  # Plexus-inspired decision trace: real launches only, never dry previews.
+  record_route_decision "$1" "$best" "$decision" "$rank_label"
   echo "$best"
 }
 
@@ -1505,7 +1517,10 @@ if [ -z "\${$env_var:-}" ] && [ "\$aa_pin" != primary ]; then
     export $env_var="\$aa_pin"
   elif [ -x "$self" ]; then
     slot="\$("$self" pick $p 2>/dev/null || true)"
-    if [ -n "\$slot" ] && [ "\$slot" != primary ]; then
+    if [ -z "\$slot" ]; then
+      echo "agent-link: no healthy $p account is available; wait for a cooldown or release an account" >&2
+      exit 75
+    elif [ "\$slot" != primary ]; then
       export $env_var="\$aa_root/accounts/$p/\$slot"
     fi
   fi
@@ -1523,7 +1538,7 @@ cmd_auto() { # write auto launchers and print the provider snippet
   cat <<EOF
 
 Point ONE provider at each launcher and it spreads new agents across your
-accounts automatically (least-recently-used, skipping cooled-down ones).
+accounts automatically (health gate, priority groups, then least-recently-used).
 
 Paseo — ~/.paseo/config.json under agents.providers (restart the daemon after):
 
@@ -1547,8 +1562,8 @@ EOF
 # Run a provider's real CLI with dynamic routing applied:
 #   agent-link claude          -> Claude Code on the next account in rotation
 #   agent-link codex -m ...    -> args pass straight through
-# An inherited CLAUDE_CONFIG_DIR/CODEX_HOME still wins, and if no account is
-# available it simply runs your primary login.
+# An inherited CLAUDE_CONFIG_DIR/CODEX_HOME still wins. With no healthy account
+# the launcher refuses cleanly instead of silently falling onto the primary.
 cmd_exec_auto() { # $1 provider, rest = args for the real CLI
   local p="$1" env_var real d slot
   shift
@@ -1564,7 +1579,10 @@ cmd_exec_auto() { # $1 provider, rest = args for the real CLI
   [ -n "$real" ] || { prov_binary_check "$p"; return 127; }
   if [ -z "$(eval "printf '%s' \"\${$env_var:-}\"")" ]; then
     slot="$(pick_slot "$p" 2>/dev/null || true)"
-    if [ -n "$slot" ] && [ "$slot" != primary ]; then
+    if [ -z "$slot" ]; then
+      echo "agent-link: no healthy $p account is available; wait for a cooldown or release an account" >&2
+      return 75
+    elif [ "$slot" != primary ]; then
       export "$env_var=$(slot_dir "$p" "$slot")"
     fi
   fi
@@ -2197,7 +2215,7 @@ install_paseo_plugin() { # $1 source dir, $2 plugin id, $3 "link" to run from so
     mkdir -p "$dest" || return 1
     # Copy the source only: node_modules is rebuilt in place and .git is noise.
     ( cd "$src" && tar --exclude=node_modules --exclude=.git -cf - . ) | ( cd "$dest" && tar -xf - ) || return 1
-    # Stamp what was installed, so the panel can tell whether main has moved on.
+    # Stamp what was installed, so the panel can compare it with the release.
     local sha; sha="$(git -C "$src" rev-parse HEAD 2>/dev/null || true)"
     [ -n "$sha" ] && printf '{ "sha": "%s", "builtAt": "%s" }\n' "$sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$dest/build.json"
   fi

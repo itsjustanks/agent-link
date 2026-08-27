@@ -13,8 +13,10 @@ export const SlotSchema = z.object({
   cooldownUntil: z.number(), // epoch seconds; 0 = available
   launches: z.number(), // agents this account has been handed by the router
   lastUsed: z.number(), // epoch seconds; 0 = never
+  preference: z.enum(["preferred", "standard", "reserve"]),
+  nearing: z.boolean(), // healthy enough to serve, but new work drains elsewhere
   creditNote: z.string(), // "" when fine, else e.g. "out of credits"
-  blocked: z.boolean(), // spend limit reached — routing skips it
+  blocked: z.boolean(), // active hold/cooldown — routing skips it
   parkReason: z.string(), // why it is parked, "" when not parked
   outputStyle: z.string(), // active output style, "" when unset
   settingsDrift: z.array(z.string()), // preference keys that differ from the primary
@@ -28,6 +30,15 @@ export const AutoRouterSchema = z.object({
   wiredProviderId: z.string().nullable(),
 });
 export type AutoRouter = z.infer<typeof AutoRouterSchema>;
+
+export const RouteEventSchema = z.object({
+  at: z.number(),
+  provider: z.enum(["claude", "codex"]),
+  email: z.string(),
+  decision: z.string(),
+  group: z.enum(["preferred", "standard", "reserve", "fallback"]),
+});
+export type RouteEvent = z.infer<typeof RouteEventSchema>;
 
 export const scan = defineRpc({
   name: "agent-link.scan",
@@ -43,10 +54,14 @@ export const scan = defineRpc({
         launches: z.number(),
         cooldownUntil: z.number(),
         blocked: z.boolean(),
+        parkReason: z.string(),
+        preference: z.enum(["preferred", "standard", "reserve"]),
+        nearing: z.boolean(),
         duplicated: z.boolean(), // an account slot already holds this account
       }),
     ),
     nextUp: z.array(z.object({ provider: z.enum(["claude", "codex"]), email: z.string() })),
+    recentRoutes: z.array(RouteEventSchema),
     autoRouters: z.array(AutoRouterSchema),
     agentAuthInstalled: z.boolean(),
     needsRestart: z.boolean(),

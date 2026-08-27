@@ -29,7 +29,7 @@ One card per provider connector — **Claude Code, Codex, Kimi Code, Grok** — 
 - **Rotation usage** — a bar and a count showing how many agents the router has handed each account and when it was last used, so you can see the rotation actually spreading. This is launch distribution, separate from the provider quota shown in **Available capacity**.
 - **Memory guard** — one Paseo-owned TypeScript check runs at a time; under critical pressure it is paused, not killed, and continued after the machine recovers. Checks launched from Terminal are never touched.
 - **+ Add account** — creates the slot for a new account and hands you the one command to finish sign-in. The browser step itself stays in a terminal because both CLIs ask you to paste a code back; the row turns green once you have (and flags a mismatch if you signed in as someone else)
-- **Auto-router** — one click wires a single `Claude (Dynamic Agent Link)` / `Codex (Dynamic Agent Link)` provider that sends each new agent to the least-recently-used live account. Pick that one provider and your accounts get used automatically; a running agent is never re-routed.
+- **Auto-router control plane** — one click wires a single `Claude (Dynamic Agent Link)` / `Codex (Dynamic Agent Link)` provider. Each route shows its healthy/priority/reserve target groups, quota headroom, cooldown state, exact next target, and recent launch decisions. Selection is deterministic: health gate → priority group → least-recently-used target. The model is inspired by [Plexus](https://github.com/mcowger/plexus) (MIT), adapted to process launches; a running agent is never re-routed, and an all-parked pool blocks cleanly instead of launching a known-dead primary.
 - **Park 3h / Resume** — take an account that hit its limit out of rotation and put it back
 - **Wire into Paseo** — one click adds that account as a Paseo custom provider (`extends` the native integration, pointing `CLAUDE_CONFIG_DIR` / `CODEX_HOME` at the slot). Each wired account is an independent quota pool: five agents across three Claude accounts genuinely run on three separate rate limits. A banner reminds you Paseo loads new providers at the next daemon restart.
 
@@ -83,7 +83,7 @@ git clone https://github.com/itsjustanks/agent-link
 
 No `npm install` step: the plugin imports only modules Paseo provides at runtime, and Paseo compiles it on install. The same screen has **Reload**, **Disable**, **Remove** and **Logs** per plugin — Logs is the first place to look if a tab misbehaves. Removing a plugin deletes its configuration, never your source directory.
 
-**Updates come to you.** The Agent Link tab checks GitHub once per session and shows an **Update now** card when `main` has moved past the installed build; one press runs the installer, and a Reload in Settings → Plugins finishes it if the panel doesn't pick it up on its own.
+**Updates come to you.** The Agent Link tab checks the latest GitHub release once per session and shows an **Update now** card only when that release is newer than the installed build. A local build ahead of the release is never offered a downgrade. One press runs the installer, and a Reload in Settings → Plugins finishes it if the panel doesn't pick it up on its own.
 
 **Working on it?** `agent-link app install paseo --link` registers your checkout in place instead of copying, so `paseo plugin reload agent-link` picks up an edit.
 

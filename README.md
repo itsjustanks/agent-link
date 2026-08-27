@@ -71,7 +71,9 @@ agent-link update
 
 Every Claude and Codex account on the machine, with a dedicated **Provider usage** dashboard. Its **Limits** tab names each rolling session/weekly window, shows used and available capacity, exact reset countdowns, telemetry freshness, plan/model context, credits, and routing pressure. **Activity · 7 days** shows sessions, input/output/reasoning tokens, cache rate, context window, projects, and models used. Credit state and **park/resume** remain beside the account that needs them.
 
-One click installs a **Dynamic Agent Link** provider. Pick that single provider and every new agent is routed to the least-recently-used healthy account automatically — no command, no choosing. A running agent is never re-routed: its account is fixed when the process starts, and nothing swaps underneath a live session.
+One click installs a **Dynamic Agent Link** provider. Pick that single provider and every new agent passes through a deterministic route: quota/health gate → priority target group → least-recently-used account. The panel shows every target, its quota headroom and cooldown state, the next decision, and a bounded history of real launches. A running agent is never re-routed: its account is fixed when the process starts, and nothing swaps underneath a live session.
+
+The control-plane vocabulary is inspired by [Plexus](https://github.com/mcowger/plexus) (MIT): healthy targets, ordered groups, selectors, cooldowns, and decision evidence. Agent Link applies those ideas to CLI process launches rather than API requests, so failover means the next launch/resume moves to a healthy account; it never claims to switch an in-flight agent. If every target is parked, the launch stops cleanly instead of silently falling onto a known-exhausted primary.
 
 ### 🔌 MCP
 
@@ -119,7 +121,7 @@ No `npm install` is needed — the plugin imports only modules Paseo already pro
 
 | You want | Use | Behaviour |
 | --- | --- | --- |
-| Spread work across all accounts | `agent-link claude` · or point a provider at `~/.agent-link/bin/claude-auto` | Each launch takes the least-recently-used healthy account |
+| Spread work across all accounts | `agent-link claude` · or point a provider at `~/.agent-link/bin/claude-auto` | Health gate, then priority group, then least-recently-used account |
 | One specific account | `agent-link run claude you@work.com claude` · or the `claude-1`, `claude-2` shims | Always that account |
 | Change what plain `claude` uses | `agent-link use claude you@work.com` | A pointer file; affects new processes only |
 
