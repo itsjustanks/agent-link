@@ -45,6 +45,8 @@ import {
 import { runShutdown, runStart } from "./lifecycle.shared";
 import { limitsResume, limitsSetAuto, limitsStatus } from "./limits.shared";
 import { handleLimitsResume, handleLimitsSetAuto, handleLimitsStatus } from "./limits.server";
+import { resourceSetEnabled, resourceStatus } from "./resources.shared";
+import { handleResourceSetEnabled, handleResourceStatus } from "./resources.server";
 import { McpSurface } from "./mcp.client";
 import {
   mcpExport,
@@ -110,6 +112,8 @@ export default function contribute(plugin: PluginContext) {
   plugin.handle(limitsStatus, handleLimitsStatus);
   plugin.handle(limitsSetAuto, handleLimitsSetAuto);
   plugin.handle(limitsResume, handleLimitsResume);
+  plugin.handle(resourceStatus, handleResourceStatus);
+  plugin.handle(resourceSetEnabled, handleResourceSetEnabled);
 
   plugin.addSurface("agent-sync", AgentSyncSurface);
   plugin.addSurface("mcp", McpSurface);

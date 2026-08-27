@@ -5,6 +5,7 @@ import React, { useState } from "react";
 import { Text, View } from "react-native";
 import { cliInstall, cliStatus, cliUpdateApply, cliUpdateCheck } from "./cli.shared";
 import { limitsResume, limitsSetAuto, limitsStatus, type LimitEvent } from "./limits.shared";
+import { resourceSetEnabled, resourceStatus } from "./resources.shared";
 import {
   accountUsage,
   addAccount,
@@ -109,6 +110,8 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const callLimitsStatus = useRpc(limitsStatus);
   const callLimitsSetAuto = useRpc(limitsSetAuto);
   const callLimitsResume = useRpc(limitsResume);
+  const callResourceStatus = useRpc(resourceStatus);
+  const callResourceSetEnabled = useRpc(resourceSetEnabled);
 
   const [diagnosis, setDiagnosis] = useState<Record<string, string>>({});
   const [diagnosing, setDiagnosing] = useState<string | null>(null);
@@ -144,6 +147,15 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const limitsAutoMutation = useMutation({
     mutationFn: (auto: boolean) => callLimitsSetAuto({ auto }),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["agent-link", "limits"] }),
+  });
+  const resourceQuery = useQuery({
+    queryKey: ["agent-link", "resources"],
+    queryFn: () => callResourceStatus({}),
+    refetchInterval: 10000,
+  });
+  const resourceMutation = useMutation({
+    mutationFn: (enabled: boolean) => callResourceSetEnabled({ enabled }),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["agent-link", "resources"] }),
   });
   const routerLaunchMutation = useMutation({
     mutationFn: (prompt: string) => callRouterLaunch({ prompt }),
@@ -952,6 +964,60 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
             {limitsQuery.data.events.length === 0 ? (
               <Text style={t.text.caption}>No agent has died on a limit since the daemon started.</Text>
             ) : null}
+          </Card>
+        </Section>
+      ) : null}
+
+      {resourceQuery.data ? (
+        <Section
+          title="memory guard"
+          trailing={
+            <StatusPill
+              status={resourceQuery.data.paused.length > 0 ? "attention" : resourceQuery.data.enabled ? "ok" : "neutral"}
+              label={
+                resourceQuery.data.paused.length > 0
+                  ? `${resourceQuery.data.paused.length} paused`
+                  : resourceQuery.data.enabled
+                    ? "guarding"
+                    : "off"
+              }
+            />
+          }
+        >
+          <Card>
+            <Row
+              first
+              title="Keep heavy Paseo type-checks in one lane"
+              subtitle="Runs one TypeScript check at a time. At critical memory pressure it pauses the check, without killing it, then continues when macOS recovers. Terminal jobs are never touched."
+              meta={
+                <Facts
+                  items={[
+                    resourceQuery.data.freePercent === null
+                      ? { value: "memory signal unavailable" }
+                      : { value: `${resourceQuery.data.freePercent}% memory available` },
+                    { value: `${resourceQuery.data.activeTypechecks} running` },
+                  ]}
+                />
+              }
+              trailing={
+                <Segmented
+                  options={[
+                    { value: "on", label: "On" },
+                    { value: "off", label: "Off" },
+                  ]}
+                  value={resourceQuery.data.enabled ? "on" : "off"}
+                  onChange={(value) => resourceMutation.mutate(value === "on")}
+                />
+              }
+            />
+            {resourceQuery.data.paused.map((entry) => (
+              <Row
+                key={entry.pid}
+                title={entry.label}
+                subtitle={`PID ${entry.pid} · ${entry.rssMb >= 1024 ? `${(entry.rssMb / 1024).toFixed(1)} GB` : `${entry.rssMb} MB`} when paused`}
+                trailing={<StatusPill status="attention" label="cooling down" />}
+              />
+            ))}
           </Card>
         </Section>
       ) : null}

@@ -180,6 +180,8 @@ So the full lifecycle is hands-off: drain at 85% → park at 99% or on the refus
 
 **Running agents in [Paseo](https://paseo.dev) resume themselves.** The panel's *limit sentry* watches the daemon's agent stream: when an agent errors out and its timeline shows a genuine limit/billing failure (not a conversation about limits), it appears in the Agent Link tab with a one-click **Resume** — and with **Auto** switched on, the sentry nudges the agent immediately. Either way the relaunch goes through the account router, so the conversation continues on a healthy account with nobody watching. And when [Paseo's built-in MCP tools](https://paseo.sh/docs/mcp) are injected into agents (`daemon.mcp.injectIntoAgents`), the synced output style teaches orchestrator agents to revive their own dead subagents with `send_agent_prompt` — recovery that works even before the panel has ever been opened.
 
+**Heavy type-checks cool down instead of taking the Mac with them.** The Paseo panel's memory guard permits one TypeScript check at a time across Paseo agents. If macOS reports 15% memory available or less, a check already using at least 512 MB is temporarily suspended with `SIGSTOP`; it continues with `SIGCONT` at 25%. Nothing is killed, provider sessions keep their account, and type-checks started outside Paseo are out of scope. The Agent Link tab shows the live state and has an off switch. Thresholds can be overridden with `AGENT_LINK_TYPECHECK_CONCURRENCY`, `AGENT_LINK_MEMORY_PAUSE_PERCENT`, `AGENT_LINK_MEMORY_RESUME_PERCENT`, and `AGENT_LINK_RESOURCE_POLL_SECONDS`.
+
 To sweep up in bulk, or move a chat somewhere specific by hand:
 
 ```sh
