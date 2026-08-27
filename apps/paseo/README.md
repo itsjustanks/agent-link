@@ -23,7 +23,8 @@ One card per provider connector — **Claude Code, Codex, Kimi Code, Grok** — 
 - the **primary** account (the login your plain `claude` / `codex` uses), shown by email
 - every **account slot** with live state: 🟢 logged in · 🟠 login needed · 🔴 wrong account (the slot folder says one email, the login inside is another)
 - a **pool summary** — "5 logged-in entries → 4 independent quota pools" — and a ⚠ badge on any two entries signed into the *same* account, since a rate limit belongs to an account, not to a slot
-- **Available capacity** — always shows each account's captured provider quota windows, percentage left, reset time, and whether it is ready, nearing its limit, held, or cooling down. No token material is read. **Activity details** remains an on-request transcript scan for sessions, input/output tokens, cache rate, and models actually used.
+- **Provider usage / Limits** — names the rolling session and weekly windows for every account, with used and available capacity, exact reset countdowns, freshness, plan/model context, extra credits, and whether routing considers it available, nearing, held, or cooling down. No token material is read.
+- **Provider usage / Activity · 7 days** — an on-request Claude and Codex transcript scan for sessions, input/output/reasoning tokens, cache rate, context window, projects, and models actually used.
 - **Credit state** — when an account has hit a spend limit, its row says so (Claude records the reason in its own config), instead of you finding out when an agent dies.
 - **Rotation usage** — a bar and a count showing how many agents the router has handed each account and when it was last used, so you can see the rotation actually spreading. This is launch distribution, separate from the provider quota shown in **Available capacity**.
 - **Memory guard** — one Paseo-owned TypeScript check runs at a time; under critical pressure it is paused, not killed, and continued after the machine recovers. Checks launched from Terminal are never touched.
@@ -118,8 +119,8 @@ The MCP tab manages **user-level** (global) servers — each provider's own conf
 
 Paseo has no automatic provider failover: an agent that hits a usage limit stops with an error and keeps its workspace — it does not move itself to another account. Three things reduce the pain, and the tab exposes all of them:
 
-- **Available capacity** — provider quota percentage left and reset time per account, captured from that account's own CLI session state without reading its access token.
-- **Activity details** — an on-request transcript scan for sessions, tokens, cache rate, and models actually used.
+- **Limits** — provider quota percentage used and available, named window, reset countdown, freshness, credits, and routing state per account, captured from that account's own CLI session state without reading its access token.
+- **Activity · 7 days** — an on-request Claude and Codex transcript scan for sessions, tokens, cache rate, context window, projects, and models actually used.
 - **Credit state** — when an account has hit a spend limit, its row says so (Claude records the reason in its own config), instead of you finding out when an agent dies.
 - **Rotation usage** — a bar and a count showing how many agents the router has handed each account and when it was last used, separate from provider quota.
 - **+ Add account** — creates the slot for a new account and hands you the one command to finish sign-in. The browser step itself stays in a terminal because both CLIs ask you to paste a code back; the row turns green once you have (and flags a mismatch if you signed in as someone else)

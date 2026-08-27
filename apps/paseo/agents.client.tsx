@@ -41,6 +41,8 @@ import {
   StatusPill,
   Tag,
   Toolbar,
+  statusColor,
+  useTokens,
   useUi,
   type Status,
 } from "./ui.client";
@@ -85,12 +87,216 @@ function formatTokens(value: number): string {
 
 // Cache reads are input the account did not pay full price for.
 function cachePercent(row: AccountUsage): number {
-  const total = row.inputTokens + row.cacheReadTokens + row.cacheCreationTokens;
+  // Codex reports cached input as a subset of input_tokens; Claude reports it
+  // beside input_tokens. Use each provider's own accounting shape.
+  const total = row.provider === "codex" ? row.inputTokens : row.inputTokens + row.cacheReadTokens + row.cacheCreationTokens;
   return total > 0 ? Math.round((row.cacheReadTokens / total) * 100) : 0;
 }
 
 function plural(count: number, one: string, many: string): string {
   return `${count} ${count === 1 ? one : many}`;
+}
+
+type CapacityWindow = CapacityAccount["windows"][number];
+
+function countdownLabel(epoch: number): string {
+  const minutes = Math.floor((epoch * 1000 - Date.now()) / 60_000);
+  if (minutes <= 0) return "reset due";
+  if (minutes < 60) return `in ${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `in ${hours}h ${minutes % 60}m`;
+  const days = Math.floor(hours / 24);
+  return `in ${days}d ${hours % 24}h`;
+}
+
+function durationLabel(window: CapacityWindow): string {
+  const minutes = window.durationMinutes;
+  if (!minutes) return window.kind === "weekly" ? "7-day window" : window.kind === "session" ? "rolling session window" : "provider window";
+  if (minutes === 10_080) return "7-day rolling window";
+  if (minutes % 10_080 === 0) return `${minutes / 10_080}-week rolling window`;
+  if (minutes % 1_440 === 0) return `${minutes / 1_440}-day rolling window`;
+  if (minutes % 60 === 0) return `${minutes / 60}-hour rolling window`;
+  return `${minutes}-minute rolling window`;
+}
+
+function capacityTone(entry: CapacityAccount): Status {
+  if (entry.state === "held") return "error";
+  if (entry.state === "parked" || entry.state === "nearing") return "attention";
+  if (entry.state === "ready") return "ok";
+  return "neutral";
+}
+
+function capacityStateLabel(entry: CapacityAccount): string {
+  if (entry.state === "held") return "held";
+  if (entry.state === "parked") return "cooling down";
+  if (entry.state === "nearing") return "routing away";
+  if (entry.state === "ready") return "available";
+  return entry.windows.length > 0 ? "report is stale" : "no report yet";
+}
+
+function creditLabel(entry: CapacityAccount): string | null {
+  if (!entry.credits) return null;
+  if (entry.credits.unlimited) return "unlimited extra credits";
+  if (!entry.credits.hasCredits) return "no extra credits";
+  const balance = Number(entry.credits.balance);
+  return Number.isFinite(balance) ? `extra credit balance ${balance.toFixed(2)}` : "extra credits available";
+}
+
+function LimitWindow({ window }: { window: CapacityWindow }) {
+  const t = useTokens();
+  const used = Math.max(0, Math.min(100, Math.round(window.usedPct)));
+  const available = 100 - used;
+  const tone: Status = used >= 99 ? "error" : used >= 85 ? "attention" : "ok";
+  const reset = window.resetsAt
+    ? `${countdownLabel(window.resetsAt)} · ${new Date(window.resetsAt * 1000).toLocaleString(undefined, {
+        weekday: "short",
+        hour: "2-digit",
+        minute: "2-digit",
+      })}`
+    : "reset time not reported";
+  return (
+    <View
+      style={{
+        flexGrow: 1,
+        flexBasis: t.compact ? "100%" : 250,
+        minWidth: 0,
+        gap: t.space.sm,
+        padding: t.space.md,
+        borderRadius: t.radius.sm,
+        backgroundColor: t.color.surface2,
+      }}
+    >
+      <View style={{ gap: 1 }}>
+        <Text style={t.text.bodyStrong}>{window.label}</Text>
+        <Text style={t.text.caption}>{durationLabel(window)}</Text>
+      </View>
+      <View style={{ flexDirection: "row", alignItems: "baseline", gap: 5 }}>
+        <Text style={[t.text.display, { color: statusColor(t, tone) }]}>{available}%</Text>
+        <Text style={t.text.caption}>available</Text>
+      </View>
+      <Meter fraction={used / 100} tone={tone} label={`${used}% used · ${available}% remaining`} />
+      <Text style={t.text.caption}>{reset}</Text>
+    </View>
+  );
+}
+
+function CapacityAccountPanel({ entry, first }: { entry: CapacityAccount; first: boolean }) {
+  const t = useTokens();
+  const tone = capacityTone(entry);
+  const credit = creditLabel(entry);
+  const freshest = entry.at > 0 ? `updated ${agoLabel(entry.at)}` : "not reported yet";
+  return (
+    <View
+      style={{
+        padding: t.compact ? t.space.md : t.space.lg,
+        gap: t.space.md,
+        borderTopWidth: first ? 0 : 1,
+        borderTopColor: t.color.borderSubtle,
+      }}
+    >
+      <View
+        style={{
+          flexDirection: t.compact ? "column" : "row",
+          alignItems: t.compact ? "stretch" : "flex-start",
+          justifyContent: "space-between",
+          gap: t.space.sm,
+        }}
+      >
+        <View style={{ flex: 1, minWidth: 0, gap: t.space.xs }}>
+          <Text style={t.text.heading} numberOfLines={1}>
+            {entry.email}
+          </Text>
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: t.space.xs }}>
+            <Tag label={entry.provider === "claude" ? "Claude" : "Codex"} />
+            <Tag label={entry.isPrimary ? "Primary account" : "Routed account"} />
+            {entry.plan ? <Tag label={`${entry.plan} plan`} tone="busy" /> : null}
+            {entry.model ? <Tag label={entry.model} /> : null}
+          </View>
+        </View>
+        <StatusPill status={tone} label={capacityStateLabel(entry)} />
+      </View>
+
+      {entry.windows.length > 0 ? (
+        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: t.space.sm }}>
+          {entry.windows.map((window, index) => (
+            <LimitWindow key={`${window.label}-${window.durationMinutes ?? index}`} window={window} />
+          ))}
+        </View>
+      ) : (
+        <View style={{ padding: t.space.md, borderRadius: t.radius.sm, backgroundColor: t.color.surface2, gap: t.space.xs }}>
+          <Text style={t.text.bodyStrong}>No quota telemetry yet</Text>
+          <Text style={t.text.caption}>{entry.detail}</Text>
+        </View>
+      )}
+
+      <Facts
+        items={[
+          entry.detail ? { value: entry.detail, tone: entry.state === "ready" ? undefined : tone } : null,
+          { value: entry.source ? `${freshest} from ${entry.source}` : freshest, tone: entry.state === "unknown" ? "attention" : undefined },
+          credit ? { value: credit, tone: entry.credits?.hasCredits ? "ok" : "neutral" } : null,
+        ]}
+      />
+    </View>
+  );
+}
+
+function ActivityAccountPanel({ row, first }: { row: AccountUsage; first: boolean }) {
+  const t = useTokens();
+  const active = row.lastActive > 0;
+  return (
+    <View
+      style={{
+        padding: t.compact ? t.space.md : t.space.lg,
+        gap: t.space.sm,
+        borderTopWidth: first ? 0 : 1,
+        borderTopColor: t.color.borderSubtle,
+      }}
+    >
+      <View style={{ flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: t.space.sm }}>
+        <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
+          <Text style={t.text.heading} numberOfLines={1}>
+            {row.email}
+          </Text>
+          <Text style={t.text.caption}>{row.provider === "claude" ? "Claude" : "Codex"} · last 7 days</Text>
+        </View>
+        <StatusPill status={row.limitHits > 0 ? "attention" : active ? "ok" : "neutral"} label={active ? `active ${agoLabel(row.lastActive)}` : "no activity"} />
+      </View>
+      {row.sessions > 0 ? (
+        <>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: t.space.md }}>
+            <Spark values={row.daily} tone={row.limitHits > 0 ? "attention" : "busy"} />
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <Facts
+                items={[
+                  { value: plural(row.sessions, "session", "sessions") },
+                  { value: `${formatTokens(row.inputTokens)} input` },
+                  { value: `${formatTokens(row.outputTokens)} output` },
+                  { value: `${cachePercent(row)}% cached` },
+                ]}
+              />
+            </View>
+          </View>
+          {row.models.length > 0 ? (
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: t.space.xs }}>
+              {row.models.map((model) => (
+                <Tag key={model} label={model.replace("claude-", "")} />
+              ))}
+            </View>
+          ) : null}
+          <Facts
+            items={[
+              row.reasoningTokens > 0 ? { value: `${formatTokens(row.reasoningTokens)} reasoning tokens` } : null,
+              row.contextWindow > 0 ? { value: `${formatTokens(row.contextWindow)} context window` } : null,
+              row.topProject ? { value: `mostly ${row.topProject}` } : null,
+              row.limitHits > 0 ? { value: plural(row.limitHits, "limit refusal", "limit refusals"), tone: "error" } : null,
+            ]}
+          />
+        </>
+      ) : (
+        <Text style={t.text.caption}>No sessions recorded for this account in the last 7 days.</Text>
+      )}
+    </View>
+  );
 }
 
 export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
@@ -123,6 +329,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const [addingFor, setAddingFor] = useState<ProviderId | null>(null);
   const [newEmail, setNewEmail] = useState("");
   const [routerTask, setRouterTask] = useState("");
+  const [usageView, setUsageView] = useState<"limits" | "activity">("limits");
 
   const scanQuery = useQuery({ queryKey: ["agent-link", "scan"], queryFn: () => callScan({}) });
   // Health spawns a real process per provider — for the ACP providers that
@@ -276,69 +483,103 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
 
   // ------------------------------------------------------------------ routing
 
-  const capacityTone = (entry: CapacityAccount): Status => {
-    if (entry.state === "held") return "error";
-    if (entry.state === "parked" || entry.state === "nearing") return "attention";
-    if (entry.state === "ready") return "ok";
-    return "neutral";
-  };
-  const capacityLabel = (entry: CapacityAccount): string => {
-    if (entry.state === "held") return "unavailable";
-    if (entry.state === "parked") return "cooling down";
-    if (entry.state === "unknown") return "waiting for usage";
-    const left = Math.min(...entry.windows.map((window) => Math.max(0, 100 - Math.round(window.usedPct))));
-    return entry.state === "nearing" ? `${left}% left` : "ready";
-  };
-  const capacityCard = capacityQuery.data ? (
-    <Card padded={false}>
+  const capacityAccounts = capacityQuery.data?.accounts ?? [];
+  const readyCapacity = capacityAccounts.filter((entry) => entry.state === "ready").length;
+  const constrainedCapacity = capacityAccounts.filter((entry) => entry.state === "nearing" || entry.state === "parked" || entry.state === "held").length;
+  const unknownCapacity = capacityAccounts.filter((entry) => entry.state === "unknown").length;
+  const capacityCard = (
+    <Card padded={false} tone={constrainedCapacity > 0 ? "attention" : undefined}>
       <View>
-        <View style={{ padding: pad, gap: t.space.xs }}>
-          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: t.space.sm }}>
-            <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
-              <Text style={t.text.heading}>Available capacity</Text>
-              <Text style={t.text.caption}>What can take new work now, how much is left, and when it resets.</Text>
+        <View style={{ padding: pad, gap: t.space.md }}>
+          <View
+            style={{
+              flexDirection: t.compact ? "column" : "row",
+              alignItems: t.compact ? "stretch" : "flex-start",
+              justifyContent: "space-between",
+              gap: t.space.md,
+            }}
+          >
+            <View style={{ flex: 1, minWidth: 0, gap: t.space.xs }}>
+              <Text style={t.text.heading}>Provider usage</Text>
+              <Text style={[t.text.body, { color: t.color.muted }]}>Live limit windows and observed activity for every routed account.</Text>
+              {usageView === "limits" && capacityAccounts.length > 0 ? (
+                <Facts
+                  items={[
+                    { value: plural(readyCapacity, "account available", "accounts available"), tone: readyCapacity > 0 ? "ok" : "attention" },
+                    constrainedCapacity > 0
+                      ? { value: plural(constrainedCapacity, "account constrained", "accounts constrained"), tone: "attention" }
+                      : null,
+                    unknownCapacity > 0
+                      ? { value: plural(unknownCapacity, "account awaiting telemetry", "accounts awaiting telemetry"), tone: "attention" }
+                      : null,
+                    { value: "refreshes every 30 seconds" },
+                  ]}
+                />
+              ) : null}
             </View>
-            <Button label="Refresh" variant="ghost" loading={capacityQuery.isFetching} onPress={() => void capacityQuery.refetch()} />
+            <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: t.space.sm }}>
+              <Segmented
+                value={usageView}
+                options={[
+                  { value: "limits", label: "Limits" },
+                  { value: "activity", label: "Activity · 7 days" },
+                ]}
+                onChange={(value) => {
+                  setUsageView(value);
+                  if (value === "activity" && !usageQuery.data && !usageQuery.isFetching) void usageQuery.refetch();
+                }}
+              />
+              <Button
+                label="Refresh"
+                variant="ghost"
+                loading={usageView === "limits" ? capacityQuery.isFetching : usageQuery.isFetching}
+                onPress={() => void (usageView === "limits" ? capacityQuery.refetch() : usageQuery.refetch())}
+              />
+            </View>
           </View>
+          {usageView === "limits" ? (
+            <Text style={t.text.caption}>
+              Providers report rolling account limits, not a separate remaining balance for every model. Model names show which session supplied the report.
+            </Text>
+          ) : (
+            <Text style={t.text.caption}>Models below are observed from local session history; activity is not the same as quota consumed.</Text>
+          )}
         </View>
-        {capacityQuery.data.accounts.map((entry, index) => (
-          <Row
-            key={`${entry.provider}-${entry.poolKey}`}
-            first={index === 0}
-            tone={capacityTone(entry)}
-            title={entry.email}
-            subtitle={`${SHORT[entry.provider]} · ${entry.isPrimary ? "primary account" : "routed account"}${entry.plan ? ` · ${entry.plan}` : ""}`}
-            trailing={<StatusPill status={capacityTone(entry)} label={capacityLabel(entry)} />}
-            meta={
-              entry.windows.length > 0 ? (
-                <View style={{ gap: t.space.sm }}>
-                  {entry.windows.map((window) => {
-                    const left = Math.max(0, 100 - Math.round(window.usedPct));
-                    const reset = window.resetsAt
-                      ? ` · resets ${new Date(window.resetsAt * 1000).toLocaleString(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit" })}`
-                      : "";
-                    return (
-                      <Meter
-                        key={window.label}
-                        fraction={left / 100}
-                        tone={left <= 1 ? "error" : left <= 15 ? "attention" : "ok"}
-                        label={`${window.label === "week" ? "Weekly" : window.label} · ${left}% left${reset}`}
-                      />
-                    );
-                  })}
-                  {entry.at > 0 ? <Text style={t.text.caption}>Updated {agoLabel(entry.at)}</Text> : null}
-                </View>
-              ) : (
-                <Text style={t.text.caption}>
-                  {entry.detail || "No live meter yet. It appears after this account completes a session."}
-                </Text>
-              )
-            }
-          />
-        ))}
+
+        {usageView === "limits" ? (
+          capacityQuery.isLoading ? (
+            <Loading label="Reading provider limits…" />
+          ) : capacityQuery.error ? (
+            <View style={{ padding: pad }}>
+              <ErrorText>{String(capacityQuery.error)}</ErrorText>
+            </View>
+          ) : capacityAccounts.length === 0 ? (
+            <View style={{ padding: pad }}>
+              <Text style={t.text.caption}>No signed-in Claude or Codex accounts were found.</Text>
+            </View>
+          ) : (
+            capacityAccounts.map((entry, index) => (
+              <CapacityAccountPanel key={`${entry.provider}-${entry.poolKey}`} entry={entry} first={index === 0} />
+            ))
+          )
+        ) : usageQuery.isFetching && !usageQuery.data ? (
+          <Loading label="Reading 7 days of local activity…" />
+        ) : usageQuery.error ? (
+          <View style={{ padding: pad }}>
+            <ErrorText>{String(usageQuery.error)}</ErrorText>
+          </View>
+        ) : (usageQuery.data?.accounts.length ?? 0) === 0 ? (
+          <View style={{ padding: pad }}>
+            <Text style={t.text.caption}>No account activity was found in the last 7 days.</Text>
+          </View>
+        ) : (
+          usageQuery.data?.accounts.map((row, index) => (
+            <ActivityAccountPanel key={`${row.provider}-${row.email}`} row={row} first={index === 0} />
+          ))
+        )}
       </View>
     </Card>
-  ) : null;
+  );
 
   const pending = routers.filter((entry) => !entry.wiredProviderId && entry.launcherExists).map((entry) => entry.provider);
   const noLauncher = routers.filter((entry) => !entry.wiredProviderId && !entry.launcherExists);
@@ -947,11 +1188,6 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
         title="Agent Link"
         actions={
           <>
-            <Button
-              label={usageQuery.isFetching ? "Reading…" : "Activity details"}
-              loading={usageQuery.isFetching}
-              onPress={() => void usageQuery.refetch()}
-            />
             <Button
               label={healthQuery.isFetching ? "Checking…" : "Check health"}
               loading={healthQuery.isFetching}

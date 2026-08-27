@@ -988,9 +988,8 @@ export async function handleDiagnoseProvider({ providerId }: { providerId: strin
   }
 }
 
-// Real per-account usage, read from each account's own transcripts. Anthropic
-// does not expose remaining quota without the account token, so this reports
-// what the account actually did: sessions, tokens and models used in a window.
+// Real per-account activity, read from each account's own transcripts. Quota
+// windows are handled separately below; this answers what each account did.
 async function usageForClaudeDir(dir: string, sinceMs: number, days: number) {
   const totals = {
     sessions: 0,
@@ -998,6 +997,8 @@ async function usageForClaudeDir(dir: string, sinceMs: number, days: number) {
     outputTokens: 0,
     cacheReadTokens: 0,
     cacheCreationTokens: 0,
+    reasoningTokens: 0,
+    contextWindow: 0,
     lastActive: 0,
     limitHits: 0,
     limitLast: 0,
@@ -1072,6 +1073,7 @@ async function usageForClaudeDir(dir: string, sinceMs: number, days: number) {
           totals.outputTokens += out;
           totals.cacheReadTokens += Number(usage.cache_read_input_tokens ?? 0);
           totals.cacheCreationTokens += Number(usage.cache_creation_input_tokens ?? 0);
+          totals.reasoningTokens += Number(usage.reasoning_output_tokens ?? 0);
           const bucket = dayOf(Number.isFinite(stamp) ? stamp : mtime);
           if (bucket >= 0) totals.daily[bucket] += out;
           const model = entry.message?.model;
@@ -1086,30 +1088,209 @@ async function usageForClaudeDir(dir: string, sinceMs: number, days: number) {
   return totals;
 }
 
+/**
+ * Codex stores one rollout JSONL per session. Its token-count events are
+ * cumulative, so only the last total in each file is counted; summing every
+ * event would multiply usage by the number of turns in the conversation.
+ */
+async function usageForCodexDir(dir: string, sinceMs: number, days: number) {
+  const totals = {
+    sessions: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+    reasoningTokens: 0,
+    contextWindow: 0,
+    lastActive: 0,
+    limitHits: 0,
+    limitLast: 0,
+    models: new Set<string>(),
+    daily: new Array<number>(days).fill(0),
+    topProject: "",
+  };
+  const perProject = new Map<string, number>();
+  const files = listDirs(join(dir, "sessions"))
+    .flatMap((year) => listDirs(year))
+    .flatMap((month) => listDirs(month))
+    .flatMap((day) => {
+      try {
+        return readdirSync(day)
+          .filter((name) => name.endsWith(".jsonl"))
+          .map((name) => join(day, name));
+      } catch {
+        return [];
+      }
+    });
+  const dayOf = (ms: number) => {
+    const index = days - 1 - Math.floor((Date.now() - ms) / 86_400_000);
+    return index >= 0 && index < days ? index : -1;
+  };
+  for (const file of files) {
+    let mtime = 0;
+    let size = 0;
+    try {
+      const info = statSync(file);
+      mtime = info.mtimeMs;
+      size = info.size;
+    } catch {
+      continue;
+    }
+    if (mtime < sinceMs) continue;
+    let floor = 0;
+    try {
+      floor = Number(readFileSync(`${file}.al-moved`, "utf8").trim()) || 0;
+    } catch {
+      // A native session starts at byte zero.
+    }
+    if (size <= floor) continue;
+    totals.sessions += 1;
+    totals.lastActive = Math.max(totals.lastActive, Math.floor(mtime / 1000));
+    let cwd = "";
+    let model = "";
+    let reached = false;
+    let latest = {
+      input_tokens: 0,
+      cached_input_tokens: 0,
+      cache_write_input_tokens: 0,
+      output_tokens: 0,
+      reasoning_output_tokens: 0,
+    };
+    try {
+      // Session metadata is at the head; read only that small prefix for the
+      // project name when the cumulative-usage tail will not include it.
+      if (floor === 0 && size > 512_000) {
+        const head = createInterface({
+          input: createReadStream(file, { encoding: "utf8", start: 0, end: Math.min(size - 1, 64_000) }),
+          crlfDelay: Infinity,
+        });
+        for await (const line of head) {
+          if (!line.includes('"session_meta"')) continue;
+          try {
+            const entry = JSON.parse(line) as { type?: string; payload?: { cwd?: string } };
+            if (entry.type === "session_meta" && entry.payload?.cwd) cwd = entry.payload.cwd;
+          } catch {
+            // Keep looking until the metadata line parses.
+          }
+          if (cwd) break;
+        }
+      }
+      // Codex token counts are cumulative. The final 512 KB gives the latest
+      // total without rereading gigabytes of conversations for a dashboard.
+      const start = Math.max(floor, size - 512_000);
+      const lines = createInterface({ input: createReadStream(file, { encoding: "utf8", start }), crlfDelay: Infinity });
+      for await (const line of lines) {
+        if (!line || (!line.includes('"session_meta"') && !line.includes('"turn_context"') && !line.includes('"token_count"'))) {
+          continue;
+        }
+        let entry: {
+          type?: string;
+          payload?: {
+            type?: string;
+            cwd?: string;
+            model?: string;
+            info?: {
+              total_token_usage?: Partial<typeof latest>;
+              model_context_window?: number;
+            };
+            rate_limits?: { rate_limit_reached_type?: unknown };
+          };
+        };
+        try {
+          entry = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (entry.type === "session_meta" && entry.payload?.cwd) cwd = entry.payload.cwd;
+        if (entry.type === "turn_context" && entry.payload?.model) model = entry.payload.model;
+        if (entry.type !== "event_msg" || entry.payload?.type !== "token_count") continue;
+        const usage = entry.payload.info?.total_token_usage;
+        if (usage) latest = { ...latest, ...usage };
+        totals.contextWindow = Math.max(totals.contextWindow, Number(entry.payload.info?.model_context_window ?? 0));
+        if (entry.payload.rate_limits?.rate_limit_reached_type) reached = true;
+      }
+    } catch {
+      continue;
+    }
+    totals.inputTokens += Number(latest.input_tokens ?? 0);
+    totals.outputTokens += Number(latest.output_tokens ?? 0);
+    totals.cacheReadTokens += Number(latest.cached_input_tokens ?? 0);
+    totals.cacheCreationTokens += Number(latest.cache_write_input_tokens ?? 0);
+    totals.reasoningTokens += Number(latest.reasoning_output_tokens ?? 0);
+    const bucket = dayOf(mtime);
+    if (bucket >= 0) totals.daily[bucket] += Number(latest.output_tokens ?? 0);
+    if (model) totals.models.add(model);
+    if (reached) {
+      totals.limitHits += 1;
+      totals.limitLast = Math.max(totals.limitLast, Math.floor(mtime / 1000));
+    }
+    const project = cwd ? basename(cwd) : "";
+    if (project) perProject.set(project, (perProject.get(project) ?? 0) + 1);
+  }
+  totals.topProject = [...perProject.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "";
+  return totals;
+}
+
 type PoolQuota = {
   at: number;
   model: string;
-  windows: Array<{ label: string; pct: number; resetsAt: number | null }>;
+  plan: string;
+  source: string;
+  credits: { hasCredits: boolean; unlimited: boolean; balance: string } | null;
+  windows: Array<{
+    label: string;
+    kind: "session" | "weekly" | "other";
+    durationMinutes: number | null;
+    pct: number;
+    resetsAt: number | null;
+  }>;
 };
 
 function readPoolQuota(provider: string, key: string): PoolQuota | null {
   const raw = readJson(join(poolsDir(), `quota-${provider}-${key}.json`)) as Record<string, unknown> | null;
   if (!raw) return null;
   const windows: PoolQuota["windows"] = [];
-  for (const [label, k] of [
-    ["5h", "five_hour"],
-    ["7d", "seven_day"],
-    ["week", "primary"],
+  for (const [keyName, fallbackMinutes] of [
+    ["five_hour", 300],
+    ["seven_day", 10_080],
+    ["primary", null],
+    ["secondary", null],
   ] as const) {
-    const value = raw[k] as { pct?: number; resets_at?: number } | undefined;
+    const value = raw[keyName] as { pct?: number; resets_at?: number; window_minutes?: number } | undefined;
     if (value && typeof value.pct === "number") {
-      windows.push({ label, pct: value.pct, resetsAt: typeof value.resets_at === "number" ? value.resets_at : null });
+      const legacyMinutes = keyName === "primary" && typeof raw.window_minutes === "number" ? raw.window_minutes : null;
+      const durationMinutes = typeof value.window_minutes === "number" ? value.window_minutes : legacyMinutes ?? fallbackMinutes;
+      const kind =
+        durationMinutes !== null && durationMinutes <= 360
+          ? "session"
+          : durationMinutes !== null && durationMinutes >= 10_080
+            ? "weekly"
+            : "other";
+      const label = kind === "session" ? "Session limit" : kind === "weekly" ? "Weekly limit" : "Usage limit";
+      windows.push({
+        label,
+        kind,
+        durationMinutes,
+        pct: value.pct,
+        resetsAt: typeof value.resets_at === "number" ? value.resets_at : null,
+      });
     }
   }
   if (windows.length === 0) return null;
+  const credit = raw.credits as { has_credits?: boolean; unlimited?: boolean; balance?: string | number } | undefined;
   return {
     at: typeof raw.at === "number" ? raw.at : 0,
-    model: typeof raw.model === "string" ? raw.model : typeof raw.plan === "string" ? raw.plan : "",
+    model: typeof raw.model === "string" ? raw.model : "",
+    plan: typeof raw.plan === "string" ? raw.plan : "",
+    source: provider === "claude" ? "Claude statusline" : "Codex rollout",
+    credits:
+      credit && typeof credit.has_credits === "boolean"
+        ? {
+            hasCredits: credit.has_credits,
+            unlimited: Boolean(credit.unlimited),
+            balance: credit.balance === undefined || credit.balance === null ? "" : String(credit.balance),
+          }
+        : null,
     windows,
   };
 }
@@ -1128,17 +1309,41 @@ export async function handleAccountCapacity() {
     const held = readHeld(provider, poolKey);
     const cooling = cooldownUntil(provider, poolKey);
     const maxUsed = Math.max(0, ...(quota?.windows.map((entry) => entry.pct) ?? []));
-    const state = held ? "held" : cooling > 0 ? "parked" : maxUsed >= 85 ? "nearing" : quota ? "ready" : "unknown";
+    const stale = quota ? quota.at <= 0 || Date.now() / 1000 - quota.at > 45 * 60 : false;
+    const state = held
+      ? "held"
+      : cooling > 0
+        ? "parked"
+        : !quota || stale
+          ? "unknown"
+          : maxUsed >= 85
+            ? "nearing"
+            : "ready";
+    const noTelemetry =
+      provider === "claude"
+        ? isPrimary
+          ? "No current session-limit report. Primary Claude monitoring is opt-in; enable it, then run one session."
+          : "No current session-limit report. Run one Claude session after Agent Link hooks are enabled."
+        : "No current usage report. Run one Codex session on this account to refresh it.";
     return {
       provider,
       email,
       isPrimary,
       poolKey,
       state: state as "ready" | "nearing" | "parked" | "held" | "unknown",
-      detail: held ?? (cooling > 0 ? parkReason(provider, poolKey) : ""),
+      detail: held ?? (cooling > 0 ? parkReason(provider, poolKey) : stale ? "Last report is over 45 minutes old." : quota ? "" : noTelemetry),
       at: quota?.at ?? 0,
-      plan: quota?.model ?? "",
-      windows: (quota?.windows ?? []).map((entry) => ({ label: entry.label, usedPct: entry.pct, resetsAt: entry.resetsAt })),
+      plan: quota?.plan ?? "",
+      model: quota?.model ?? "",
+      source: quota?.source ?? "",
+      credits: quota?.credits ?? null,
+      windows: (quota?.windows ?? []).map((entry) => ({
+        label: entry.label,
+        kind: entry.kind,
+        durationMinutes: entry.durationMinutes,
+        usedPct: entry.pct,
+        resetsAt: entry.resetsAt,
+      })),
     };
   };
   const accounts = [];
@@ -1159,7 +1364,7 @@ export async function handleAccountUsage({ days }: { days: number }) {
   const window = Math.max(1, Math.min(30, days));
   const sinceMs = Date.now() - window * 86_400_000;
   const shape = async (provider: "claude" | "codex", email: string, dir: string, poolKey: string) => {
-    const t = await usageForClaudeDir(dir, sinceMs, window);
+    const t = provider === "claude" ? await usageForClaudeDir(dir, sinceMs, window) : await usageForCodexDir(dir, sinceMs, window);
     return {
       provider,
       email,
@@ -1168,6 +1373,8 @@ export async function handleAccountUsage({ days }: { days: number }) {
       outputTokens: t.outputTokens,
       cacheReadTokens: t.cacheReadTokens,
       cacheCreationTokens: t.cacheCreationTokens,
+      reasoningTokens: t.reasoningTokens,
+      contextWindow: t.contextWindow,
       lastActive: t.lastActive,
       limitHits: t.limitHits,
       limitLast: t.limitLast,
@@ -1178,14 +1385,22 @@ export async function handleAccountUsage({ days }: { days: number }) {
       held: readHeld(provider, poolKey),
     };
   };
-  const pending = [];
-  const primaryEmail = claudeAccountEmail(HOME);
-  if (primaryEmail) pending.push(shape("claude", primaryEmail, join(HOME, ".claude"), "primary"));
+  const pending: Array<{ provider: "claude" | "codex"; email: string; dir: string; poolKey: string }> = [];
+  const primaryClaude = claudeAccountEmail(HOME);
+  const primaryCodexDir = join(HOME, ".codex");
+  const primaryCodex = codexAccountEmail(primaryCodexDir);
+  if (primaryClaude) pending.push({ provider: "claude", email: primaryClaude, dir: join(HOME, ".claude"), poolKey: "primary" });
+  if (primaryCodex) pending.push({ provider: "codex", email: primaryCodex, dir: primaryCodexDir, poolKey: "primary" });
   for (const slot of collectSlots()) {
-    if (slot.provider !== "claude") continue;
-    pending.push(shape("claude", slot.email, slot.dir, slot.email));
+    if (!slot.loggedIn) continue;
+    pending.push({ provider: slot.provider, email: slot.actualEmail || slot.email, dir: slot.dir, poolKey: slot.email });
   }
-  return { accounts: await Promise.all(pending) };
+  // Transcript scans are deliberately sequential: Activity is on-demand and
+  // can take a little longer, while parallel multi-account reads recreate the
+  // memory and disk-pressure problem this plugin is meant to prevent.
+  const accounts = [];
+  for (const account of pending) accounts.push(await shape(account.provider, account.email, account.dir, account.poolKey));
+  return { accounts };
 }
 
 export async function handleProviderHealth(_input: Record<string, never>, { paseo }: PluginHandlerContext) {

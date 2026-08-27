@@ -100,6 +100,8 @@ export const AccountUsageSchema = z.object({
   inputTokens: z.number(),
   outputTokens: z.number(),
   cacheReadTokens: z.number(),
+  reasoningTokens: z.number(),
+  contextWindow: z.number(),
   lastActive: z.number(), // epoch seconds, 0 = none in window
   models: z.array(z.string()),
   cacheCreationTokens: z.number(),
@@ -128,6 +130,8 @@ export const accountUsage = defineRpc({
 
 export const CapacityWindowSchema = z.object({
   label: z.string(),
+  kind: z.enum(["session", "weekly", "other"]),
+  durationMinutes: z.number().nullable(),
   usedPct: z.number(),
   resetsAt: z.number().nullable(),
 });
@@ -141,6 +145,15 @@ export const CapacityAccountSchema = z.object({
   detail: z.string(),
   at: z.number(),
   plan: z.string(),
+  model: z.string(),
+  source: z.string(),
+  credits: z
+    .object({
+      hasCredits: z.boolean(),
+      unlimited: z.boolean(),
+      balance: z.string(),
+    })
+    .nullable(),
   windows: z.array(CapacityWindowSchema),
 });
 export type CapacityAccount = z.infer<typeof CapacityAccountSchema>;

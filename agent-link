@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.5.12"
+VERSION="0.5.13"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -705,18 +705,30 @@ for line in reversed(tail.splitlines()):
     except Exception:
         continue
     prim = rl.get("primary") or {}
-    used = prim.get("used_percent")
-    if used is None:
+    sec = rl.get("secondary") or {}
+    available = [w for w in (prim, sec) if w.get("used_percent") is not None]
+    if not available:
         continue
-    resets = prim.get("resets_at") or 0
+    worst = max(available, key=lambda w: float(w.get("used_percent") or 0))
+    used = worst.get("used_percent")
+    resets = worst.get("resets_at") or 0
     reached = 1 if rl.get("rate_limit_reached_type") else 0
     fresh = 1 if time.time() - os.stat(path).st_mtime < 45 * 60 else 0
     try:
         pools = sys.argv[2] if len(sys.argv) > 2 else ""
         key = sys.argv[3] if len(sys.argv) > 3 else ""
         if pools and key:
-            snap = {"at": int(os.stat(path).st_mtime), "window_minutes": prim.get("window_minutes"),
-                    "primary": {"pct": float(used), "resets_at": int(resets)}, "plan": rl.get("plan_type")}
+            snap = {"at": int(os.stat(path).st_mtime), "plan": rl.get("plan_type")}
+            for name, window in (("primary", prim), ("secondary", sec)):
+                pct = window.get("used_percent")
+                if pct is not None:
+                    snap[name] = {"pct": float(pct), "resets_at": int(window.get("resets_at") or 0),
+                                  "window_minutes": window.get("window_minutes")}
+            credits = rl.get("credits") or {}
+            if isinstance(credits.get("has_credits"), bool):
+                snap["credits"] = {"has_credits": credits.get("has_credits"),
+                                   "unlimited": bool(credits.get("unlimited")),
+                                   "balance": str(credits.get("balance") or "")}
             open(os.path.join(pools, f"quota-codex-{key}.json"), "w").write(json.dumps(snap))
     except OSError:
         pass
@@ -997,9 +1009,13 @@ def when(ts):
     if not ts: return ""
     return time.strftime("resets %a %H:%M", time.localtime(ts))
 rows = []
-for label, k in (("5h", "five_hour"), ("7d", "seven_day"), ("wk", "primary")):
+for fallback, k in (("5h", "five_hour"), ("7d", "seven_day"), ("limit", "primary"), ("limit", "secondary")):
     w = q.get(k)
     if not w: continue
+    minutes = w.get("window_minutes") or (q.get("window_minutes") if k == "primary" else 0)
+    if minutes and minutes <= 360: label = "session"
+    elif minutes and minutes >= 10080: label = "weekly"
+    else: label = fallback
     rows.append(f"{label} [{bar(w['pct'])}] {w['pct']:.0f}%  {when(w.get('resets_at'))}")
 model = q.get("model") or q.get("plan") or ""
 for r in rows:
