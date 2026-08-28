@@ -18,7 +18,7 @@ Two sidebar tabs:
 
 ## 👥 Agent Link
 
-The surface has top-level tabs for **Accounts, Limit sentry, Memory guard, AgentRouter, and FAQs**. Provider tabs — **Claude Code, Codex, Kimi Code, Grok, and custom additions** — live only inside Accounts. A cheap 30-second heartbeat refreshes registry, account, route, recovery, and capacity state without starting an agent or spending quota; **Deep check** is the explicit provider-starting diagnostic. Claude/Codex account-pinned aliases roll into their family tab. Inside each pooled provider:
+The surface has top-level tabs for **Accounts, Limit sentry, Memory guard, AgentRouter, and FAQs**. Provider tabs — **Claude Code, Codex, Kimi Code, Grok, and custom additions** — live only inside Accounts. A cheap 30-second heartbeat refreshes registry, account, route, recovery, and capacity state without starting an agent or spending quota; **Deep check** is the explicit provider-starting diagnostic. The host watchdog separately scans recent stopped agents from every provider once a minute. Claude/Codex account-pinned aliases roll into their family tab. Inside each pooled provider:
 
 - the **primary** account (the login your plain `claude` / `codex` uses), shown by email
 - every **account slot** with live state: 🟢 logged in · 🟠 login needed · 🔴 wrong account (the slot folder says one email, the login inside is another)
@@ -124,7 +124,7 @@ The sidebar MCP surface manages **user-level** servers available across projects
 
 ## About rate limits and failover
 
-Paseo alone has no automatic account failover. Agent Link adds restart-based recovery for routed agents: the failed turn ends, the exact account/model refusal is recorded, and the same conversation is relaunched through the next eligible account. Claude's durable hook can hand this to a host watchdog before the panel has opened; the panel's limit sentry is the fallback path.
+Paseo alone has no automatic account failover. Agent Link adds restart-based recovery for routed agents: the failed turn ends, the exact account/model refusal is recorded, and the same conversation is relaunched through the next eligible account. Claude's durable hook and the watchdog's every-provider scan work before the panel has opened; the panel's live sentry is the second path. Codex and AgentRouter recover automatically when a recorded route has a healthy alternate. Direct, Kimi, Grok and other single-account providers are reported as blocked for an explicit retry or handoff because silently creating a different-provider conversation would lose continuity.
 
 - **Limits** — provider quota percentage used and available, named window, reset countdown, freshness, credits, and routing state per account, captured from that account's own CLI session state without reading its access token.
 - **Activity · 7 days** — an on-request Claude and Codex transcript scan for sessions, tokens, cache rate, context window, projects, and models actually used.

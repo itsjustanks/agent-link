@@ -68,7 +68,26 @@ printf '%s\n' '#!/usr/bin/env bash' \
   'esac' > "$provider_bin/paseo"
 chmod +x "$provider_bin/paseo"
 HOME="$fixture_root" PATH="$provider_bin:$PATH" AGENT_LINK_HOME="$fixture_root" \
-  AGENT_LINK_TEST_SEND_LOG="$send_log" "$repo_root/agent-link" recover
+  AGENT_LINK_TEST_SEND_LOG="$send_log" "$repo_root/agent-link" recover >/dev/null
+test ! -e "$send_log"
+test "$(find "$fixture_root/state/paseo-recovery/pending" -type f -name '*.json' | wc -l | tr -d ' ')" -eq 1
+grep -q 'waiting for a healthy alternate account' "$fixture_root/state/paseo-recovery/pending/"*.json
+
+# A queued retry waits instead of hammering the exhausted account, then runs
+# once a genuinely healthy alternate joins the pool.
+healthy_account="healthy@example.com"
+mkdir -p "$fixture_root/accounts/claude/$healthy_account"
+printf '%s\n' '{"oauthAccount":{"emailAddress":"healthy@example.com"}}' \
+  > "$fixture_root/accounts/claude/$healthy_account/.claude.json"
+python3 - "$fixture_root/state/paseo-recovery/pending" <<'PY'
+import glob, json, os, sys
+path = glob.glob(os.path.join(sys.argv[1], "*.json"))[0]
+request = json.load(open(path))
+request["notBefore"] = 0
+json.dump(request, open(path, "w"))
+PY
+HOME="$fixture_root" PATH="$provider_bin:$PATH" AGENT_LINK_HOME="$fixture_root" \
+  AGENT_LINK_TEST_SEND_LOG="$send_log" "$repo_root/agent-link" recover >/dev/null
 test "$(wc -l < "$send_log" | tr -d ' ')" -eq 1
 grep -q 'test@example.com hit fable-5 limit on claude-fable-5' "$send_log"
 test "$(find "$fixture_root/state/paseo-recovery/pending" -type f -name '*.json' | wc -l | tr -d ' ')" -eq 0

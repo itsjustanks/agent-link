@@ -20,9 +20,19 @@ export const LimitEventSchema = z.object({
 });
 export type LimitEvent = z.infer<typeof LimitEventSchema>;
 
+export const LimitScannerSchema = z.object({
+  active: z.boolean(),
+  lastScanAt: z.string().nullable(),
+  checked: z.number().int().nonnegative(),
+  detected: z.number().int().nonnegative(),
+  providers: z.array(z.string()),
+  error: z.string().nullable(),
+});
+
 export const LimitsStatusSchema = z.object({
   watching: z.boolean(),
   auto: z.boolean(),
+  scanner: LimitScannerSchema,
   events: z.array(LimitEventSchema),
 });
 export type LimitsStatus = z.infer<typeof LimitsStatusSchema>;

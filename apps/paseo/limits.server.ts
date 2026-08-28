@@ -34,12 +34,12 @@ const STATE_PATH = (() => {
 })();
 const ROUTES_PATH = join(dirname(STATE_PATH), "pools", "routes.log");
 const RECOVERY_ROOT = join(dirname(STATE_PATH), "paseo-recovery");
+const SCANNER_PATH = join(RECOVERY_ROOT, "scanner.json");
 
 const LIMIT_ERROR = /usage limit|rate limit|spend limit|limit reached|billing|out of credits|quota exceeded|you(?:'|’)ve\s+(?:hit|reached)\s+[^.!\n]{0,80}\blimit\b/i;
 // Every provider's limit-death is worth SHOWING; only providers with an
 // account pool behind them are worth auto-nudging — for the rest a retry just
 // hammers the same exhausted account, so the human picks the moment.
-const ROUTED_PROVIDERS = /^(claude|codex)/;
 const EVENT_KEEP = 20;
 const DEBOUNCE_MS = 5 * 60 * 1000;
 const NON_LIMIT_GUARD_MS = 20 * 1000;
@@ -66,7 +66,7 @@ type PaseoLike = {
 };
 
 type Persisted = { auto: boolean; events: LimitEvent[] };
-type AgentRoute = { account: string; model: string; at: number };
+type AgentRoute = { provider: "claude" | "codex"; account: string; model: string; at: number };
 
 let armed = false;
 let unsubscribe: (() => void) | null = null;
@@ -76,10 +76,10 @@ const lastSeen = new Map<string, number>();
 function routeForAgent(agentId: string): AgentRoute | null {
   try {
     for (const line of readFileSync(ROUTES_PATH, "utf8").trim().split(/\r?\n/).reverse()) {
-      const [rawAt, , account = "", , , routedAgentId = "", , model = ""] = line.split("\t");
+      const [rawAt, provider = "", account = "", , , routedAgentId = "", , model = ""] = line.split("\t");
       if (routedAgentId !== agentId || !account || account === "-") continue;
       const at = Number.parseInt(rawAt ?? "", 10);
-      if (Number.isFinite(at)) return { account, model, at };
+      if (Number.isFinite(at) && (provider === "claude" || provider === "codex")) return { provider, account, model, at };
     }
   } catch {
     // The route log is optional for non-AgentLink providers.
@@ -127,6 +127,34 @@ function loadState(): Persisted {
   } catch {
     return { auto: true, events: [] };
   }
+}
+
+function scannerStatus(): LimitsStatus["scanner"] {
+  try {
+    const raw = JSON.parse(readFileSync(SCANNER_PATH, "utf8")) as {
+      lastScanAt?: string;
+      checked?: number;
+      detected?: number;
+      providers?: string[];
+      error?: string;
+    };
+    const at = typeof raw.lastScanAt === "string" ? Date.parse(raw.lastScanAt) : NaN;
+    return {
+      active: Number.isFinite(at) && Date.now() - at < 3 * 60 * 1000,
+      lastScanAt: Number.isFinite(at) ? raw.lastScanAt ?? null : null,
+      checked: Number.isFinite(raw.checked) ? Math.max(0, Math.floor(raw.checked ?? 0)) : 0,
+      detected: Number.isFinite(raw.detected) ? Math.max(0, Math.floor(raw.detected ?? 0)) : 0,
+      providers: Array.isArray(raw.providers) ? raw.providers.filter((entry): entry is string => typeof entry === "string") : [],
+      error: typeof raw.error === "string" ? raw.error : null,
+    };
+  } catch {
+    return { active: false, lastScanAt: null, checked: 0, detected: 0, providers: [], error: null };
+  }
+}
+
+function statusResponse(): LimitsStatus {
+  const state = loadState();
+  return { watching: armed, auto: state.auto, scanner: scannerStatus(), events: state.events };
 }
 
 function saveState(state: Persisted): void {
@@ -310,13 +338,20 @@ async function actOnLimitDeath(
   };
   const model = route?.model || snap.model || "";
   const detail = `${route?.account ? `${route.account} · ` : ""}${model ? `${model} · ` : ""}${matched}`;
-  const routed = ROUTED_PROVIDERS.test(snap.provider ?? "");
+  // The provider name alone is not proof of routing: a direct native Claude
+  // or Codex agent cannot switch accounts. A launch trace is the authority.
+  const routed = route !== null;
   if (!loadState().auto || !routed) {
+    const directPooled = /^(claude|codex)$/.test(snap.provider ?? "");
     record({
       ...base,
       ...evidence,
       action: "needs-resume",
-      detail: routed ? detail : `${detail} — no account pool for this provider; resume when its limit resets`,
+      detail: routed
+        ? detail
+        : directPooled
+          ? `${detail} — direct provider has no AgentLink launch trace; use its Dynamic Agent Link provider for automatic failover`
+          : `${detail} — no alternate account pool for this provider; retry after its limit resets or hand off through AgentRouter`,
     });
     return;
   }
@@ -426,8 +461,7 @@ type HandlerContext = { paseo: unknown };
 
 export async function handleLimitsStatus(_input: Record<string, never>, { paseo }: HandlerContext): Promise<LimitsStatus> {
   ensureLimitSentry(paseo);
-  const state = loadState();
-  return { watching: armed, auto: state.auto, events: state.events };
+  return statusResponse();
 }
 
 export async function handleLimitsSetAuto({ auto }: { auto: boolean }, { paseo }: HandlerContext): Promise<LimitsStatus> {
@@ -435,7 +469,7 @@ export async function handleLimitsSetAuto({ auto }: { auto: boolean }, { paseo }
   const state = loadState();
   state.auto = auto;
   saveState(state);
-  return { watching: armed, auto, events: state.events };
+  return statusResponse();
 }
 
 export async function handleLimitsResume({ agentId }: { agentId: string }, { paseo }: HandlerContext): Promise<{ ok: boolean; error: string | null }> {

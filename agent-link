@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.5.28"
+VERSION="0.5.29"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -424,10 +424,17 @@ write_recovery_helper() {
   cat > "$SHIM_BIN/paseo-recover" <<'PY2'
 #!/usr/bin/env python3
 import fcntl, glob, json, os, re, signal, subprocess, sys, time
+from datetime import datetime, timezone
 
 root, routes_path, paseo = sys.argv[1:4]
+self_bin = os.environ.get("AGENT_LINK_SELF", "")
+account_root = os.environ.get("AGENT_LINK_ACCOUNT_ROOT", "")
+scan_enabled = os.environ.get("AGENT_LINK_RECOVERY_SCAN") == "1"
 pending = os.path.join(root, "pending")
 done = os.path.join(root, "done")
+sentry_path = os.path.join(os.path.dirname(root), "paseo-limit-sentry.json")
+scanner_path = os.path.join(root, "scanner.json")
+seen_path = os.path.join(root, "seen.json")
 os.makedirs(pending, exist_ok=True)
 os.makedirs(done, exist_ok=True)
 lock = open(os.path.join(root, ".lock"), "a+")
@@ -437,9 +444,9 @@ except BlockingIOError:
     print("Paseo recovery: already running")
     sys.exit(0)
 
-def run(args, timeout=30):
+def run(args, timeout=30, env=None):
     try:
-        p = subprocess.run(args, capture_output=True, text=True, timeout=timeout, start_new_session=True)
+        p = subprocess.run(args, capture_output=True, text=True, timeout=timeout, start_new_session=True, env=env)
         return p.returncode, p.stdout, p.stderr
     except subprocess.TimeoutExpired:
         return -1, "", "timed out"
@@ -458,7 +465,12 @@ def latest_route(agent_id):
         if len(parts) < 6 or parts[5] != agent_id or parts[2] in {"", "-"}: continue
         try: at = float(parts[0])
         except ValueError: continue
-        return {"at": at, "account": parts[2], "model": parts[7] if len(parts) > 7 else ""}
+        return {
+            "at": at,
+            "provider": parts[1],
+            "account": parts[2],
+            "model": parts[7] if len(parts) > 7 else "",
+        }
     return None
 
 def session_id_for(agent_id):
@@ -498,12 +510,236 @@ def write(path, data):
     with open(tmp, "w") as f: json.dump(data, f)
     os.replace(tmp, path)
 
+def iso_now():
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+def parse_iso(value):
+    try: return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except Exception: return 0
+
+def agent_record(agent_id):
+    paseo_home = os.environ.get("PASEO_HOME") or os.path.join(os.path.expanduser("~"), ".paseo")
+    for path in glob.glob(os.path.join(paseo_home, "agents", "*", f"{agent_id}.json")):
+        try: return json.load(open(path))
+        except Exception: pass
+    return {}
+
+def sentry_state():
+    try:
+        state = json.load(open(sentry_path))
+        return {
+            "auto": state.get("auto") is not False,
+            "events": state.get("events") if isinstance(state.get("events"), list) else [],
+        }
+    except Exception:
+        return {"auto": True, "events": []}
+
+def record_sentry(event):
+    state = sentry_state()
+    events = [event] + [item for item in state["events"] if item.get("agentId") != event.get("agentId")]
+    state["events"] = events[:20]
+    os.makedirs(os.path.dirname(sentry_path), exist_ok=True)
+    write(sentry_path, state)
+
+def update_sentry_outcome(request, outcome):
+    if not request.get("agentId"): return
+    state = sentry_state()
+    prior = next((item for item in state["events"] if item.get("agentId") == request["agentId"]), None)
+    if not prior and not request.get("title") and not request.get("workspaceId"): return
+    if outcome == "continuation-accepted" or outcome.startswith("already-routed"):
+        action, suffix = "auto-resumed", "retry accepted by Paseo"
+    elif outcome.endswith("3-times") or outcome in {"expired-or-invalid", "invalid-request"}:
+        action, suffix = "resume-failed", outcome.replace("-", " ")
+    else:
+        action, suffix = "needs-resume", outcome.replace("-", " ")
+    base = prior or {
+        "agentId": request["agentId"],
+        "workspaceId": request.get("workspaceId"),
+        "title": request.get("title"),
+        "provider": request.get("provider") or "unknown",
+        "at": iso_now(),
+        "account": request.get("account"),
+        "model": request.get("model"),
+        "limit": request.get("limit"),
+    }
+    base.update(action=action, detail=f"{request.get('detail') or base.get('detail') or 'provider limit'} — {suffix}")
+    record_sentry(base)
+
+def limit_phrase(log_text, status):
+    assistant = re.compile(
+        r"you(?:'|’)?(?:ve| have)\s+(?:hit|reached)\s+[^.!\n]{0,100}\blimit\b|"
+        r"usage limit reached|monthly spend limit|spend limit reached|rate limit exceeded|"
+        r"quota exceeded|out of credits|insufficient[_ ]quota|credit balance(?: is)? too low",
+        re.I,
+    )
+    errored = re.compile(
+        r"usage limit|rate limit|spend limit|quota exceeded|out of credits|"
+        r"insufficient[_ ]quota|resource exhausted|credit balance|(?:http\s*)?429\b|too many requests",
+        re.I,
+    )
+    for raw in reversed(log_text.splitlines()):
+        line = raw.strip()
+        if not line or re.match(r"^\[(User|Shell|Tool|Task Notification)\]", line, re.I):
+            continue
+        if line.lower().startswith("[assistant]"):
+            match = assistant.search(line)
+        elif status == "error" or re.match(r"^\[(System Error|Error|Provider Error)\]", line, re.I):
+            match = errored.search(line)
+        else:
+            match = None
+        if match:
+            return re.sub(r"\s+", " ", match.group(0)).strip()[:160]
+    return None
+
+def annotate_request(agent_id, metadata):
+    paths = sorted(glob.glob(os.path.join(pending, f"{agent_id}-*.json")), key=os.path.getmtime, reverse=True)
+    if not paths: return None
+    try:
+        request = json.load(open(paths[0]))
+        request.update(metadata)
+        write(paths[0], request)
+        return request
+    except Exception:
+        return None
+
+def park_and_queue(agent, route, phrase, record):
+    family = route.get("provider") or ""
+    if family not in {"claude", "codex"} or not self_bin:
+        return None
+    env = dict(os.environ)
+    env.update({
+        "PASEO_AGENT_ID": agent["id"],
+        "PASEO_AGENT_CWD": str(record.get("cwd") or agent.get("cwd") or ""),
+        "AGENT_LINK_ROUTE_MODEL": route.get("model") or agent.get("model") or "",
+        "AGENT_LINK_REFUSAL_LIMIT": phrase,
+        "AGENT_LINK_SKIP_RECOVERY_KICKSTART": "1",
+    })
+    if family == "codex":
+        # Codex quota windows are account-scoped and the CLI has no StopFailure
+        # hook. Keep the exhausted account out until telemetry/probe proves it.
+        env["AGENT_LINK_REFUSAL_HOLD"] = "hold:unknown"
+    env_var = "CLAUDE_CONFIG_DIR" if family == "claude" else "CODEX_HOME"
+    account = route.get("account") or "primary"
+    if account == "primary": env.pop(env_var, None)
+    elif account_root: env[env_var] = os.path.join(account_root, "accounts", family, account)
+    rc, _, _ = run([self_bin, "refused", family], 20, env=env)
+    if rc != 0: return None
+    return annotate_request(agent["id"], {
+        "title": agent.get("title"),
+        "workspaceId": record.get("workspaceId"),
+        "detail": f"{account} · {route.get('model') or agent.get('model') or 'unknown model'} · {phrase}",
+    })
+
+def park_direct_family(provider, model, phrase):
+    if provider not in {"claude", "codex"} or not self_bin: return
+    env = dict(os.environ)
+    env.update({
+        "AGENT_LINK_ROUTE_MODEL": model or "",
+        "AGENT_LINK_REFUSAL_LIMIT": phrase,
+        "AGENT_LINK_SKIP_RECOVERY_KICKSTART": "1",
+    })
+    if provider == "codex": env["AGENT_LINK_REFUSAL_HOLD"] = "hold:unknown"
+    env.pop("PASEO_AGENT_ID", None)
+    env.pop("CLAUDE_CONFIG_DIR" if provider == "claude" else "CODEX_HOME", None)
+    run([self_bin, "refused", provider], 20, env=env)
+
+def scan_recent_limits():
+    rc, output, _ = run([paseo, "ls", "--global", "--json"], 20)
+    listing = load_json(output) if rc == 0 else None
+    if not isinstance(listing, list):
+        write(scanner_path, {"lastScanAt": iso_now(), "checked": 0, "detected": 0, "providers": [], "error": "agent list unavailable"})
+        return
+    try: seen = json.load(open(seen_path))
+    except Exception: seen = {}
+    if not isinstance(seen, dict): seen = {}
+    now = time.time()
+    checked = detected = 0
+    providers = set()
+    auto = sentry_state()["auto"]
+    priority = {"error": 0, "idle": 1, "closed": 2}
+    ordered = sorted(
+        listing,
+        key=lambda item: priority.get(str(item.get("status") or "").lower(), 9) if isinstance(item, dict) else 9,
+    )
+    for raw in ordered:
+        if not isinstance(raw, dict): continue
+        agent_id = str(raw.get("id") or "")
+        status = str(raw.get("status") or "").lower()
+        if not agent_id or status not in {"error", "idle", "closed"}: continue
+        record = agent_record(agent_id)
+        last_activity = str(record.get("lastActivityAt") or record.get("updatedAt") or "")
+        age = now - parse_iso(last_activity)
+        max_age = 30 * 60 if status == "error" else 5 * 60
+        if age < 0 or age > max_age: continue
+        fingerprint = f"{agent_id}:{last_activity}:{status}"
+        if fingerprint in seen: continue
+        if checked >= 12: break
+        checked += 1
+        rc, logs, _ = run([paseo, "logs", agent_id, "--tail", "16"], 15)
+        phrase = limit_phrase(logs if rc == 0 else "", status)
+        seen[fingerprint] = {"at": now, "limit": phrase or ""}
+        if not phrase: continue
+        detected += 1
+        raw_provider = str(raw.get("provider") or record.get("provider") or "unknown")
+        provider, _, listed_model = raw_provider.partition("/")
+        persistence = record.get("persistence")
+        metadata = persistence.get("metadata") if isinstance(persistence, dict) else {}
+        if not isinstance(metadata, dict): metadata = {}
+        model = str(metadata.get("model") or listed_model or "")
+        route = latest_route(agent_id)
+        account = route.get("account") if route else None
+        route_model = route.get("model") if route else model
+        providers.add(provider)
+        base = {
+            "agentId": agent_id,
+            "workspaceId": record.get("workspaceId"),
+            "title": raw.get("name") or record.get("title"),
+            "provider": provider,
+            "at": iso_now(),
+            "detail": f"{account + ' · ' if account else ''}{route_model or 'unknown model'} · {phrase}",
+            "account": account,
+            "model": route_model or None,
+            "limit": phrase,
+        }
+        if auto and route and route.get("provider") in {"claude", "codex"}:
+            request = park_and_queue({"id": agent_id, "title": base["title"], "cwd": raw.get("cwd"), "model": model}, route, phrase, record)
+            if request:
+                base["action"] = "recovery-queued"
+                base["detail"] += " — watchdog queued one routed retry"
+            else:
+                base["action"] = "resume-failed"
+                base["detail"] += " — could not queue recovery"
+        else:
+            park_direct_family(provider, model, phrase)
+            base["action"] = "needs-resume"
+            if route and not auto:
+                base["detail"] += " — automatic recovery is off"
+            elif provider in {"claude", "codex"}:
+                base["detail"] += " — this agent used the direct provider; use its Dynamic Agent Link provider for automatic account failover"
+            else:
+                base["detail"] += " — no alternate authenticated account route; retry after reset or hand off through AgentRouter"
+        # Zod optional fields cannot receive JSON null from this Python state.
+        base = {key: value for key, value in base.items() if value is not None}
+        record_sentry(base)
+    seen = {key: value for key, value in seen.items() if now - float(value.get("at", 0)) < 24 * 60 * 60}
+    write(seen_path, seen)
+    write(scanner_path, {
+        "lastScanAt": iso_now(),
+        "checked": checked,
+        "detected": detected,
+        "providers": sorted(providers),
+    })
+
 def finish(path, request, outcome):
     request["completedAt"] = time.time()
     request["outcome"] = outcome
     write(os.path.join(done, os.path.basename(path)), request)
     try: os.remove(path)
     except OSError: pass
+    update_sentry_outcome(request, outcome)
+
+if scan_enabled:
+    scan_recent_limits()
 
 accepted = deferred = failed = 0
 for path in sorted(glob.glob(os.path.join(pending, "*.json")))[:8]:
@@ -514,7 +750,7 @@ for path in sorted(glob.glob(os.path.join(pending, "*.json")))[:8]:
         continue
     agent_id = str(request.get("agentId") or "")
     created = float(request.get("createdAt", 0))
-    if not agent_id or not created or time.time() - created > 15 * 60:
+    if not agent_id or not created or time.time() - created > 6 * 60 * 60:
         finish(path, request, "expired-or-invalid")
         failed += 1
         continue
@@ -528,6 +764,30 @@ for path in sorted(glob.glob(os.path.join(pending, "*.json")))[:8]:
         finish(path, request, f"already-routed-to-{route.get('account')}")
         accepted += 1
         continue
+    family = str(request.get("provider") or "")
+    if self_bin and family in {"claude", "codex"}:
+        rc, target, _ = run([self_bin, "pick", family, "dry", str(request.get("model") or "")], 30)
+        target = target.strip().splitlines()[-1] if rc == 0 and target.strip() else ""
+        if not target or target == request.get("account"):
+            request["notBefore"] = time.time() + 5 * 60
+            waiting = "waiting for a healthy alternate account"
+            if waiting not in str(request.get("detail") or ""):
+                request["detail"] = (request.get("detail") or "provider limit") + f" — {waiting}"
+            write(path, request)
+            record_sentry({
+                "agentId": agent_id,
+                "workspaceId": request.get("workspaceId"),
+                "title": request.get("title"),
+                "provider": family,
+                "at": iso_now(),
+                "action": "recovery-queued",
+                "detail": request["detail"],
+                **({"account": request["account"]} if request.get("account") else {}),
+                **({"model": request["model"]} if request.get("model") else {}),
+                **({"limit": request["limit"]} if request.get("limit") else {}),
+            })
+            deferred += 1
+            continue
     rc, output, error = run([paseo, "inspect", agent_id, "--json"], 15)
     detail = load_json(output) if rc == 0 else None
     if not isinstance(detail, dict):
@@ -588,14 +848,17 @@ PY2
 }
 
 cmd_recover() {
-  local paseo_bin
+  local paseo_bin self_bin scan=0
+  [ "${1:-}" = "--scan" ] && scan=1
   # Always rewrite it: the helper is managed code and must upgrade with the
   # CLI, even on machines that already generated an older copy.
   write_recovery_helper
   paseo_bin="$(command -v paseo 2>/dev/null || true)"
   [ -n "$paseo_bin" ] || paseo_bin="$HOME/.local/bin/paseo"
   [ -x "$paseo_bin" ] || { echo "paseo CLI not found — recovery requests remain queued" >&2; return 1; }
-  "$SHIM_BIN/paseo-recover" "$(recovery_queue_dir)" "$(pools_dir)/routes.log" "$paseo_bin"
+  self_bin="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+  AGENT_LINK_SELF="$self_bin" AGENT_LINK_ACCOUNT_ROOT="$ROOT" AGENT_LINK_RECOVERY_SCAN="$scan" \
+    "$SHIM_BIN/paseo-recover" "$(recovery_queue_dir)" "$(pools_dir)/routes.log" "$paseo_bin"
 }
 
 cmd_refused() { # $1 provider
@@ -610,14 +873,18 @@ cmd_refused() { # $1 provider
     done
     [ -n "$key" ] || key="$(basename "$d")"
   fi
-  until="$(recently_refused "$p" "$d" 2>/dev/null || true)"
+  until="${AGENT_LINK_REFUSAL_HOLD:-$(recently_refused "$p" "$d" 2>/dev/null || true)}"
   autopark "$p" "$key" "${until:-}"
   model="${AGENT_LINK_ROUTE_MODEL:-}"
-  case "${until:-}" in
-    hold:spend) limit="monthly spend limit" ;;
-    hold:model:*) limit="${until#hold:model:} limit" ;;
-    *) limit="usage limit" ;;
-  esac
+  if [ -n "${AGENT_LINK_REFUSAL_LIMIT:-}" ]; then
+    limit="$AGENT_LINK_REFUSAL_LIMIT"
+  else
+    case "${until:-}" in
+      hold:spend) limit="monthly spend limit" ;;
+      hold:model:*) limit="${until#hold:model:} limit" ;;
+      *) limit="usage limit" ;;
+    esac
+  fi
   enqueue_paseo_recovery "${PASEO_AGENT_ID:-}" "$p" "$key" "$model" "$limit"
   rm -f "$(pools_dir)/nearing-$p-$key"
   echo "$p · $key: parked (limit hit)"
@@ -3454,7 +3721,7 @@ usage:
   agent-link style [install|status] install/check the concise contract across Claude/Codex accounts
   agent-link app [list|install|remove] [id] [--link]  optional integrations (Paseo panel, editors)
   agent-link update                update the CLI and reinstall the apps you have
-  agent-link recover               process queued Paseo limit continuations once
+  agent-link recover [--scan]      detect provider limits and process queued Paseo continuations
   agent-link fix [model]           test accounts, rescue stuck chats, resync — the one-shot cleanup
   agent-link doctor                sanity checks
 
@@ -3494,7 +3761,7 @@ main() {
     update)  cmd_update ;;
     insights) shift; cmd_insights "$@" ;;
     rescue)  shift; cmd_rescue "$@" ;;
-    recover) cmd_recover ;;
+    recover) shift; cmd_recover "$@" ;;
     probe)   shift; cmd_probe "$@" ;;
     next)    shift; prov_valid "${1:-claude}" && pick_slot "${1:-claude}" dry ;;
     cooldown) shift; cmd_cooldown "$@" ;;

@@ -1277,16 +1277,36 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
             <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: t.space.sm }}>
               <Text style={t.text.heading}>Limit sentry</Text>
               <StatusPill
-                status={limitsQuery.data.watching ? "ok" : "neutral"}
-                label={limitsQuery.data.watching ? "watching" : "arming\u2026"}
+                status={
+                  limitsQuery.data.scanner.error
+                    ? "attention"
+                    : limitsQuery.data.scanner.active || limitsQuery.data.watching
+                      ? "ok"
+                      : "neutral"
+                }
+                label={
+                  limitsQuery.data.scanner.error
+                    ? "watchdog issue"
+                    : limitsQuery.data.scanner.active
+                    ? "host watchdog"
+                    : limitsQuery.data.watching
+                      ? "panel watcher"
+                      : "arming\u2026"
+                }
               />
             </View>
-            <Text style={t.text.caption}>Resume limit-stopped agents through the healthiest eligible account.</Text>
+            <Text style={t.text.caption}>
+              {limitsQuery.data.scanner.error
+                ? `Every-provider scan failed: ${limitsQuery.data.scanner.error}`
+                : limitsQuery.data.scanner.active
+                ? `Every-provider scan active · last checked ${agoLabel(Math.floor(new Date(limitsQuery.data.scanner.lastScanAt ?? 0).getTime() / 1000))}`
+                : "Open-panel detection is active; install the host watchdog for unattended every-provider scans."}
+            </Text>
           </View>
             <Row
               first
-              title="Auto-resume agents that die on a limit"
-              subtitle="A dead agent gets one nudge to continue; the relaunch routes to a healthy account. Kimi, Grok and other single-account providers are listed for manual resume instead."
+              title="Recover only when continuity is provable"
+              subtitle="Routed Claude, Codex and AgentRouter chats keep their transcript and get one retry on a healthy account. Direct, Kimi, Grok and other single-account providers are detected and held for an explicit retry or handoff—never hammered."
               trailing={
                 <Segmented
                   options={[
@@ -1320,7 +1340,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                     <StatusPill status="error" label="resume failed" />
                   ) : (
                     <Button
-                      label="Resume"
+                      label="Retry now"
                       loading={limitsResumeMutation.isPending}
                       onPress={() => limitsResumeMutation.mutate(event.agentId)}
                     />
