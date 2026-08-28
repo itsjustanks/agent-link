@@ -93,6 +93,12 @@ declare module "@getpaseo/plugin" {
 
   export interface PluginSurfaceProps extends PluginHostProps {}
 
+  export interface PluginIconProps {
+    name: string;
+    size?: number;
+    color?: string;
+  }
+
   export interface PluginWorkspaceSnapshot {
     readonly id: string;
     readonly projectId: string;
@@ -139,6 +145,31 @@ declare module "@getpaseo/plugin" {
     agentId: string;
   }
 
+  export interface PluginComposerPillProps extends PluginHostProps {
+    workspaceId: string;
+    agentId: string;
+  }
+
+  export interface PluginComposerPillContribution {
+    id: string;
+    title: string;
+    workspaceId: string;
+    agentId: string;
+    Component: ComponentType<PluginComposerPillProps>;
+    onPress(): void | Promise<void>;
+  }
+
+  export type PluginPanelLocation = "workspace" | "explorer";
+
+  export interface PluginOpenPanelOptions {
+    location?: PluginPanelLocation;
+  }
+
+  export interface PluginClientOpenPanelOptions extends PluginOpenPanelOptions {
+    workspaceId: string;
+    agentId?: string;
+  }
+
   export type PluginWorkspacePanelContribution =
     | { id: string; title: string; icon: string; context: "workspace"; Component: ComponentType<PluginWorkspacePanelProps> }
     | { id: string; title: string; icon: string; context: "agent"; Component: ComponentType<PluginAgentPanelProps> };
@@ -171,15 +202,22 @@ declare module "@getpaseo/plugin" {
   export interface PluginWorkspaceCommandContext extends PluginCommandCapabilities {
     context: "workspace";
     workspace: PluginWorkspaceSnapshot;
-    openPanel(id: string): void;
+    openPanel(id: string, options?: PluginOpenPanelOptions): void;
   }
 
   export interface PluginAgentCommandContext extends PluginCommandCapabilities {
     context: "agent";
     workspace: PluginWorkspaceSnapshot;
     agent: PluginAgentSnapshot;
-    openPanel(id: string): void;
+    openPanel(id: string, options?: PluginOpenPanelOptions): void;
   }
+
+  export interface PluginClientContext extends PluginCommandCapabilities {
+    addComposerPill(contribution: PluginComposerPillContribution): PluginCleanup;
+    openPanel(id: string, options: PluginClientOpenPanelOptions): void;
+  }
+
+  export type PluginClientContribution = (client: PluginClientContext) => PluginCleanup;
 
   export type PluginCommandCenterItemContribution =
     | { id: string; title: string; icon: string; keywords?: readonly string[]; context: "global"; onSelect(context: PluginGlobalCommandContext): void | Promise<void> }
@@ -198,6 +236,7 @@ declare module "@getpaseo/plugin" {
     addSidebarItem(contribution: PluginSidebarContribution): void;
     addWorkspacePanel(contribution: PluginWorkspacePanelContribution): void;
     addCommandCenterItem(contribution: PluginCommandCenterItemContribution): void;
+    addClientSide(contribution: PluginClientContribution): void;
     addAttachmentSource(contribution: PluginAttachmentSourceContribution): void;
   }
 
@@ -207,6 +246,8 @@ declare module "@getpaseo/plugin" {
   export function useRpc<InputSchema extends ZodType, OutputSchema extends ZodType>(
     contract: PluginRpcContract<InputSchema, OutputSchema>,
   ): (input: ZodInput<InputSchema>) => Promise<ZodOutput<OutputSchema>>;
+
+  export const Icon: ComponentType<PluginIconProps>;
 
   export function usePaseo(): PaseoApi;
 

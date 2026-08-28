@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.5.24"
+VERSION="0.5.25"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -971,7 +971,8 @@ message you must resolve and run one concrete Paseo provider/model target.
 4. Before launch, call Paseo `inspect_provider` for the target and select a mode
    ID it actually reports. Then delegate only with the Paseo MCP `create_agent`
    tool in THIS workspace. Pass the exact `provider/model`, compatible mode in
-   `settings`, full task context, and a title beginning `AgentRouter ·`. NEVER
+   `settings`, full task context, and a title beginning
+   `AgentRouter · <exact provider/model> ·`. NEVER
    use Claude's built-in Agent/Task subagent tool: Paseo cannot expose that
    subagent's actual model, routing, or account evidence.
 5. Wait for the Paseo child and relay its result. On a real auth/quota/provider
@@ -2725,6 +2726,148 @@ cmd_remove() { # provider email — archive a slot outside rotation
   echo "archived for recovery at $archive"
 }
 
+cmd_style() { # install|status — one concise response contract across every managed account
+  local action="${1:-status}"
+  case "$action" in
+    install)
+      python3 - "$ACCOUNTS" <<'PY'
+import glob, json, os, shutil, sys, tempfile
+
+accounts = sys.argv[1]
+home = os.path.expanduser("~")
+claude_style = '''---
+name: Concise
+description: Short, structured answers with no preamble or filler
+---
+
+Answer in as few words as the question honestly allows.
+
+For a substantial task update or completed task, use only the useful lines below:
+
+- Asked: the original request.
+- Working on: the current action.
+- Decision: the important choice and reason.
+- Outcome: what changed or will change.
+- Goal: the intended end state.
+
+Use at most five bullets and one short sentence per bullet. Omit redundant or irrelevant lines. For a simple question, answer in one short paragraph instead.
+
+- Lead with the result. No preamble, restatement, routine tool narration, apology, or closing filler.
+- Prefer plain English. Keep exact model names, commands, paths, errors, and unresolved caveats precise.
+- State failures or uncertainty once, plainly. Never turn an inference into a finding.
+- Runtime model identity comes from AgentLink's Paseo UI; never guess or self-report it in prose.
+- When finishing work, name the verification result in one short line.
+
+Completeness still wins over brevity: never drop a caveat, a failure, or a needed instruction just to be short.
+'''
+codex_agents = '''# Response style
+
+Answer in as few words as the question honestly allows.
+
+For a substantial task update or completed task, use only the useful lines below:
+
+- Asked: the original request.
+- Working on: the current action.
+- Decision: the important choice and reason.
+- Outcome: what changed or will change.
+- Goal: the intended end state.
+
+Use at most five bullets and one short sentence per bullet. Omit redundant or irrelevant lines. For a simple question, answer in one short paragraph instead.
+
+- Lead with the result. No preamble, restatement, routine tool narration, apology, or closing filler.
+- Prefer plain English. Keep exact model names, commands, paths, errors, and unresolved caveats precise.
+- State failures or uncertainty once, plainly. Never turn an inference into a finding.
+- Runtime model identity comes from AgentLink's Paseo UI; never guess or self-report it in prose.
+- When finishing work, name the verification result in one short line.
+
+Completeness still wins over brevity: never drop a caveat, a failure, or a needed instruction just to be short.
+'''
+paseo_contract = '''## Response contract
+
+Answer in as few words as the question honestly allows.
+
+For a substantial task update or completed task, use only the useful lines below:
+- Asked: the original request.
+- Working on: the current action.
+- Decision: the important choice and reason.
+- Outcome: what changed or will change.
+- Goal: the intended end state.
+
+Use at most five bullets and one short sentence per bullet. Omit redundant or irrelevant lines. For a simple question, answer in one short paragraph instead.
+
+- Lead with the result. No preamble, restatement, routine tool narration, apology, or closing filler.
+- Prefer plain English. Keep exact model names, commands, paths, errors, and unresolved caveats precise.
+- State failures or uncertainty once, plainly. Never turn an inference into a finding.
+- Do not print a Session prefix or guess the active runtime model; AgentLink renders server-derived model identity in Paseo.
+- When finishing work, name the verification result in one short line.'''
+
+def write_atomic(path, text):
+    temp = None
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if os.path.exists(path) and open(path, encoding="utf-8").read() == text:
+            return False
+        if os.path.exists(path):
+            shutil.copy2(path, path + ".bak-agent-link-style")
+        mode = os.stat(path).st_mode & 0o777 if os.path.exists(path) else 0o600
+        fd, temp = tempfile.mkstemp(prefix=".agent-link-style-", dir=os.path.dirname(path))
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.chmod(temp, mode)
+        os.replace(temp, path)
+    except OSError as error:
+        print(f"SKIPPED {path}: {error}")
+        return False
+    finally:
+        if temp and os.path.exists(temp):
+            os.unlink(temp)
+    return True
+
+claude_dirs = [os.path.join(home, ".claude")] + sorted(glob.glob(os.path.join(accounts, "claude", "*")))
+codex_dirs = sorted(glob.glob(os.path.join(accounts, "codex", "*"))) + [os.path.join(home, ".codex")]
+changed = 0
+for directory in claude_dirs:
+    changed += write_atomic(os.path.join(directory, "output-styles", "concise.md"), claude_style)
+    settings_path = os.path.join(directory, "settings.json")
+    try:
+        settings = json.load(open(settings_path, encoding="utf-8")) if os.path.exists(settings_path) else {}
+    except Exception as error:
+        print(f"SKIPPED {settings_path}: invalid JSON ({error})")
+        continue
+    if settings.get("outputStyle") != "Concise":
+        settings["outputStyle"] = "Concise"
+        changed += write_atomic(settings_path, json.dumps(settings, indent=2) + "\n")
+for directory in codex_dirs:
+    changed += write_atomic(os.path.join(directory, "AGENTS.md"), codex_agents)
+paseo_config_path = os.path.join(home, ".paseo", "config.json")
+if os.path.exists(paseo_config_path):
+    try:
+        paseo_config = json.load(open(paseo_config_path, encoding="utf-8"))
+        daemon = paseo_config.setdefault("daemon", {})
+        current_prompt = daemon.get("appendSystemPrompt") or ""
+        role_marker = "\n\n## Your role\n"
+        if role_marker in current_prompt:
+            remainder = role_marker.lstrip("\n") + current_prompt.split(role_marker, 1)[1]
+        elif current_prompt.startswith(paseo_contract):
+            remainder = current_prompt[len(paseo_contract):].lstrip()
+        else:
+            remainder = current_prompt
+        daemon["appendSystemPrompt"] = paseo_contract + ("\n\n" + remainder if remainder else "")
+        changed += write_atomic(paseo_config_path, json.dumps(paseo_config, indent=2) + "\n")
+    except Exception as error:
+        print(f"SKIPPED {paseo_config_path}: invalid config ({error})")
+print(f"concise response contract installed across {len(claude_dirs)} Claude and {len(codex_dirs)} Codex config directories ({changed} file updates)")
+print("Paseo appendSystemPrompt updated for Kimi, Grok and other providers; run `paseo reload` to apply it.")
+PY
+      ;;
+    status)
+      printf 'Claude style: %s\n' "$(jq -r '.outputStyle // "unset"' "$HOME/.claude/settings.json" 2>/dev/null || echo unreadable)"
+      [ -f "$HOME/.codex/AGENTS.md" ] && echo "Codex instructions: installed" || echo "Codex instructions: missing"
+      ;;
+    *) echo "usage: agent-link style [install|status]" >&2; return 1 ;;
+  esac
+}
+
 cmd_sync() { # propagate MCP definitions + project trust from primaries into slots
   # codex: slot config.toml <- primary ~/.codex/config.toml (MCP servers live there),
   # re-pinned to file credential storage. Overwrites slot-local config edits.
@@ -2976,13 +3119,14 @@ usage:
   agent-link codex  [args...]      same for Codex
   agent-link remove <prov> <email> archive a slot outside routing
   agent-link sync                  copy MCP servers + project trust from primaries into slots
+  agent-link style [install|status] install/check the concise contract across Claude/Codex accounts
   agent-link app [list|install|remove] [id] [--link]  optional integrations (Paseo panel, editors)
   agent-link update                update the CLI and reinstall the apps you have
   agent-link fix [model]           test accounts, rescue stuck chats, resync — the one-shot cleanup
   agent-link doctor                sanity checks
 
 slots live in \$AGENT_AUTH_HOME (default ~/.agent-link), one folder per account email.
-Your primary ~/.claude and ~/.codex are never modified.
+Primary ~/.claude and ~/.codex stay untouched except for an explicit `style install`.
 EOF
 }
 
@@ -3024,6 +3168,7 @@ main() {
     run)     shift; cmd_run "$@" ;;
     remove)  shift; cmd_remove "$@" ;;
     sync)    cmd_sync ;;
+    style)   shift; cmd_style "$@" ;;
     fix)     shift; cmd_fix "$@" ;;
     doctor)  cmd_doctor ;;
     claude|codex) cmd_exec_auto "$@" ;;

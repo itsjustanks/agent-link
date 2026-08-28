@@ -1402,7 +1402,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
           <View style={{ padding: pad, gap: t.space.xs }}>
             <Text style={t.text.heading}>AgentRouter</Text>
             <Text style={t.text.caption}>
-              A virtual route across ordered provider/model targets. Haiku selects the route; a concrete Paseo child performs every answer.
+              Optional one-entry automation. Haiku selects the route; a concrete Paseo child performs every answer. Direct Paseo profiles are faster when you already know the model you want.
             </Text>
           </View>
           <Row

@@ -73,7 +73,9 @@ The panel has five operational tabs: **Accounts, Limit sentry, Memory guard, Age
 
 One click installs a **Dynamic Agent Link** provider. Pick that single provider and every new agent passes through a deterministic route: quota/health gate → priority target group → least-recently-used account. The panel labels its **next new launch** forecast separately from the bounded history of real Paseo agents and projects. A running agent is never re-routed: its account is fixed when the process starts, and nothing swaps underneath a live session.
 
-The **AgentRouter** tab installs a virtual Paseo route. Haiku 4.5 is only its control plane: every request is delegated to a concrete Paseo child from an ordered **fast, planning, judgment, build, or browser** target group. The child provider, model, status, and Paseo agent ID appear in the agent's **Routing** panel and on the router's final line; a provider-internal subagent is explicitly labelled `Unknown (runtime not exposed)` instead of being passed off as a route. Claude and Codex targets still pass through Dynamic Agent Link, so account health and cooldown are preserved.
+Every agent composer gets a live model pill from Paseo's runtime metadata. Direct agents show their concrete model; AgentRouter shows `AgentRouter → answer model` once its Paseo child exists. Clicking it opens the full provider, model, status, and agent-ID evidence. A hidden runtime says `Unknown (runtime not exposed)` instead of guessing.
+
+The **AgentRouter** tab installs an optional virtual Paseo route for prompts where you want one automatic entry point. Haiku 4.5 is only its control plane: every request is delegated to a concrete Paseo child from an ordered **fast, planning, judgment, build, or browser** target group. Direct Paseo profiles are faster and simpler when you already know the model. Claude and Codex targets still pass through Dynamic Agent Link, so account health and cooldown are preserved.
 
 The control-plane vocabulary is inspired by [Plexus](https://github.com/mcowger/plexus) (MIT): virtual aliases, healthy targets, ordered groups, `in_order` selection, cooldowns, failover, and decision evidence. AgentRouter applies those ideas to explicit Paseo child agents, while Agent Link applies them again to CLI account launches. It never claims to switch an in-flight agent. Routed launches record the exact Paseo agent ID and working directory, so duplicate-account rows show which agent last consumed that shared quota. If every target is parked, the launch stops cleanly instead of silently falling onto a known-exhausted primary. Because Paseo currently binds a custom provider to one adapter, the control process itself still starts through Claude/Haiku; `claude-auto` can fail over between Claude accounts, but a total Claude-family outage before AgentRouter boots needs a future adapter-independent ACP multiplexer.
 
@@ -293,6 +295,7 @@ agent-link route enable|disable|status   manage the plain-command shims
 agent-link shims                 numbered per-account shims (claude-1, …)
 agent-link env <prov> <email>    eval-able export for one account
 agent-link sync                  copy MCP servers + project trust into accounts
+agent-link style install         apply the concise response contract to primary + managed accounts
 agent-link remove <prov> <email> archive an account slot outside routing
 agent-link app [list|install|remove] [id] [--link]   optional integrations under apps/
 agent-link update                update the CLI, then reinstall the apps you have installed
@@ -313,11 +316,13 @@ agent-link doctor                sanity checks
 
 ## How it works
 
-An account is just the CLI's own config directory, relocated: Claude Code reads `CLAUDE_CONFIG_DIR`, Codex reads `CODEX_HOME`. The CLIs manage their own credentials inside it — **agent-link never reads, writes, copies or backs up a token**. Your original `~/.claude` and `~/.codex` stay untouched and remain the "primary".
+An account is just the CLI's own config directory, relocated: Claude Code reads `CLAUDE_CONFIG_DIR`, Codex reads `CODEX_HOME`. The CLIs manage their own credentials inside it — **agent-link never reads, writes, copies or backs up a token**. Your original `~/.claude` and `~/.codex` remain the "primary"; only the explicit `agent-link style install` command changes their response-style files, with recoverable backups.
 
 Routing is a small launcher script that picks an account and `exec`s the real CLI, so the child process is the genuine article with nothing wrapped around it. Selection state (last used, launch count, cooldowns) lives in `~/.agent-link/state`.
 
 `agent-link sync` copies MCP server definitions, project-trust flags, `settings.json` preferences (output style, permissions, env) and any custom output styles from your primary into each account — preferences and definitions only, never credentials. Run it after changing a setting you want everywhere, and after adding an account. OAuth-based MCP servers authorize once per account, since those grants belong to the account.
+
+`agent-link style install` applies one compact response contract to Claude output styles and Codex `AGENTS.md` across the primary and managed accounts. Task updates use only the relevant **Asked / Working on / Decision / Outcome / Goal** bullets; simple answers stay one short paragraph. Paseo's daemon system prompt covers other providers launched through Paseo.
 
 ## Troubleshooting
 

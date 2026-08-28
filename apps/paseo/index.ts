@@ -1,5 +1,6 @@
 import type { PluginContext } from "@getpaseo/plugin";
 import { AgentRoutingPanel, AgentSyncSurface } from "./agents.client";
+import { contributeModelPills } from "./model-pill.client";
 import { cliInstall, cliStatus, cliUpdateApply, cliUpdateCheck } from "./cli.shared";
 import { handleCliInstall, handleCliStatus, handleCliUpdateApply, handleCliUpdateCheck } from "./cli.server";
 import {
@@ -158,6 +159,7 @@ export default function contribute(plugin: PluginContext) {
     context: "agent",
     Component: AgentRoutingPanel,
   });
+  plugin.addClientSide(contributeModelPills);
   plugin.addSidebarItem({ id: "agent-sync", title: "Agent Link", icon: "Users", surface: "agent-sync" });
   plugin.addSidebarItem({ id: "mcp", title: "MCP", icon: "Plug", surface: "mcp" });
   plugin.addCommandCenterItem({

@@ -8,6 +8,7 @@ import type { Destination, RouteEvent, RouterTraceNode, Slot } from "./contracts
 import { onStart } from "./lifecycle.shared";
 import { ensureLimitSentry } from "./limits.server";
 import type { Dialect } from "./mcpjson.shared";
+import { resolveRuntimeModel } from "./model.shared";
 
 const HOME = homedir();
 // Home dir: prefer whichever location actually holds accounts. Picking a
@@ -1144,16 +1145,17 @@ export async function handleRouterTrace({ agentId }: { agentId: string }, { pase
   const refreshed = await handle.refresh();
   const agent = refreshed?.agent;
   if (!agent) return { isAgentRouter: false, summary: "Agent is no longer available.", nodes: [] };
+  const controlIdentity = resolveRuntimeModel(agent.provider, agent.model);
+  const isAgentRouter = controlIdentity.provider === ROUTER_PROVIDER_ID;
 
   const nodes: RouterTraceNode[] = [
     {
       source: "control" as const,
       id: agent.id,
       title: agent.title ?? "Agent",
-      provider: agent.provider,
-      model: agent.model ?? "Unknown (runtime not exposed)",
+      ...controlIdentity,
       status: agent.status,
-      note: agent.provider === ROUTER_PROVIDER_ID ? "Control plane only; this should nominate a Paseo child." : "Direct Paseo agent.",
+      note: isAgentRouter ? "Control plane only; this should nominate a Paseo child." : "Direct Paseo agent.",
     },
   ];
 
@@ -1164,12 +1166,12 @@ export async function handleRouterTrace({ agentId }: { agentId: string }, { pase
     // A legacy daemon may not support label filters; the control row still loads.
   }
   for (const child of children) {
+    const identity = resolveRuntimeModel(child.provider, child.model);
     nodes.push({
       source: "paseo" as const,
       id: child.id ?? "unknown",
       title: child.title ?? "Paseo child",
-      provider: child.provider ?? "Unknown",
-      model: child.model ?? "Unknown (runtime not exposed)",
+      ...identity,
       status: child.archivedAt ? "archived" : child.status ?? "unknown",
       note: "Concrete Paseo delegation; provider and model are auditable.",
     });
@@ -1203,10 +1205,10 @@ export async function handleRouterTrace({ agentId }: { agentId: string }, { pase
     ? `${concrete.length} concrete Paseo route${concrete.length === 1 ? "" : "s"} recorded.`
     : internal.length > 0
       ? "No concrete Paseo route was recorded; a provider-internal subagent hid its model."
-      : agent.provider === ROUTER_PROVIDER_ID
+      : isAgentRouter
         ? "No answer-model delegation is recorded; only the control model ran."
         : "This agent runs directly; its provider and model are shown below.";
-  return { isAgentRouter: agent.provider === ROUTER_PROVIDER_ID, summary, nodes };
+  return { isAgentRouter, summary, nodes };
 }
 
 // Create the slot and kick off that CLI's own browser login. The flow opens a
@@ -2429,24 +2431,47 @@ Write like a good engineer answering a busy colleague:
 - Keep the precise parts precise: exact file paths with line numbers, exact commands, exact error text. Never paraphrase these.
 - When you finish a task: one short line on what changed, and state plainly what was verified and what was not.
 - If you hit a usage-limit error, say so in one line and stop; the account router gives the next launch a fresh account.
+`, `---
+name: Concise
+description: Short, direct answers with no preamble or filler
+---
+
+Answer in as few words as the question honestly allows.
+
+- Lead with the result or the answer. No preamble, no restating the question, no "Great question".
+- Prefer one short paragraph or a few bullets over prose. Skip summaries of what you just did unless asked.
+- Do not narrate routine tool use or list files you read.
+- Keep code comments and explanations to what the reader could not infer.
+- When something failed or is uncertain, say so plainly in one line rather than hedging across several.
+- Never pad with restatement, apology, or "let me know if…" closers.
+
+Completeness still wins over brevity: never drop a caveat, a failure, or a needed instruction just to be short.
 `];
 
 const CONCISE_STYLE = `---
-name: concise
-description: Plain English, short answers, no fluff
+name: Concise
+description: Short, structured answers with no preamble or filler
 ---
 
-# Output rules
+# Response rules
 
-Write like a good engineer answering a busy colleague:
+Answer in as few words as the question honestly allows.
 
-- Lead with the answer or outcome. Explanation after, only if it changes what the reader does next.
-- Plain English, short sentences, short paragraphs. Define a technical term the first time you use it.
-- No filler: never restate the question, never announce what you are about to do, never pad with "Certainly", "Great question", or a summary of your own message.
-- Match length to the question. One-line question, one-line answer. Only go long when asked, or when skipping detail would mislead.
-- No headers, bullets, or tables unless they genuinely organise the content or the user asked for them.
-- Keep the precise parts precise: exact file paths with line numbers, exact commands, exact error text. Never paraphrase these.
-- When you finish a task: one short line on what changed, and state plainly what was verified and what was not.
+For a substantial task update or completed task, use only the useful lines below:
+
+- Asked: the original request.
+- Working on: the current action.
+- Decision: the important choice and reason.
+- Outcome: what changed or will change.
+- Goal: the intended end state.
+
+Use at most five bullets and one short sentence per bullet. Omit redundant or irrelevant lines. For a simple question, answer in one short paragraph instead.
+
+- Lead with the result. No preamble, restatement, routine tool narration, apology, or closing filler.
+- Prefer plain English. Keep exact model names, commands, paths, errors, and unresolved caveats precise.
+- State failures or uncertainty once, plainly. Never turn an inference into a finding.
+- Runtime model identity comes from AgentLink's Paseo UI; never guess or self-report it in prose.
+- When finishing work, name the verification result in one short line.
 - If you hit a usage-limit error, say so in one line and stop; the account router gives the next launch a fresh account, and a resumed conversation continues on a healthy one.
 - If you were resumed after a usage-limit interruption, continue exactly where you left off; never redo completed work.
 - If you orchestrate Paseo subagents and one stops with a usage-limit error, tell it to continue with send_agent_prompt — its relaunch gets a fresh account automatically.
