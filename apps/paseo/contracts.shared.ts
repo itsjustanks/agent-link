@@ -331,6 +331,31 @@ export const mcpAuth = defineRpc({
   }),
 });
 
+export const ProjectMcpServerSchema = z.object({
+  name: z.string(),
+  transport: z.enum(["stdio", "http", "unknown"]),
+  detail: z.string(),
+  authStyle: z.enum(["inline-credentials", "oauth-or-none"]),
+});
+export type ProjectMcpServer = z.infer<typeof ProjectMcpServerSchema>;
+
+/** Read-only project MCP inventory resolved from a live Paseo workspace id. */
+export const mcpWorkspace = defineRpc({
+  name: "agent-link.mcp-workspace",
+  input: z.object({ workspaceId: z.string().min(1) }),
+  output: z.object({
+    workspace: z.object({
+      id: z.string(),
+      name: z.string(),
+      directory: z.string(),
+      projectRootPath: z.string(),
+    }),
+    configPath: z.string(),
+    servers: z.array(ProjectMcpServerSchema),
+    accounts: z.array(McpAuthAccountSchema),
+  }),
+});
+
 export const mcpSync = defineRpc({
   name: "agent-link.mcp-sync",
   input: z.object({}),

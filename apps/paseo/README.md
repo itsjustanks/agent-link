@@ -2,7 +2,7 @@
 
 # agent-link for Paseo
 
-**Every AI coding account you own and every MCP server across them — in two tabs.**
+**Every AI coding account you own and every MCP server across them — globally and per workspace.**
 
 ![Paseo](https://img.shields.io/badge/Paseo-%E2%89%A5%200.5-8A63D2)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
@@ -37,15 +37,15 @@ The surface has top-level tabs for **Accounts, Limit sentry, Memory guard, Agent
 - **Park 3h / Resume** — take an account that hit its limit out of rotation and put it back
 - **Wire into Paseo** — one click adds that account as a Paseo custom provider (`extends` the native integration, pointing `CLAUDE_CONFIG_DIR` / `CODEX_HOME` at the slot). Each wired account is an independent quota pool: five agents across three Claude accounts genuinely run on three separate rate limits. A banner reminds you Paseo loads new providers at the next daemon restart.
 
-![The MCP tab: 29 servers with a coverage bar each, filters for All, Gaps and Issues, and buttons to add a server, paste JSON, sync accounts and run a health check](../../docs/screenshots/mcp.png)
+![The MCP tab: servers with coverage and live health, plus actions to add, import and sync definitions](../../docs/screenshots/mcp.png)
 
 ## 🔌 MCP
 
-A universal manager for **user-level** MCP servers across every provider on the machine — Claude Code and Codex primaries (labeled with their actual account), every wired provider, every account slot, plus Kimi Code and Grok. Five operational tabs separate **Servers, Connections, Diagnostics, Transfer, and FAQs**; a selected server uses the full panel width instead of a cramped right rail.
+A universal manager for MCP servers across the machine. The global surface covers user-level Claude Code and Codex primaries, wired providers, account slots, Kimi Code and Grok. A workspace panel reads that Paseo workspace's project `.mcp.json`. Selecting a server puts its health, OAuth accounts, definition and destinations in one full-width flow.
 
-- **Servers** — search plus **All / Gaps / Issues**, with full-width server and destination editing after selection
-- **Connections** — Claude and Codex provider tabs, then OAuth status and actions per account
-- **Health check** — HTTP servers get a real request (a 401/403 is reported as **auth needed**, which is the honest answer to "does this need authorizing?"); stdio servers get a binary-on-PATH check. 🟢 / 🟠 / 🔴 per server.
+- **Servers** — search plus **All / Gaps / Issues**, with health, OAuth status and destination editing after selection
+- **Automatic health** — runs on open and every 15 minutes while the surface is visible. HTTP servers get a real request (401/403 means **auth needed**); stdio servers get a binary-on-PATH check.
+- **Workspace MCP connections** — open the panel on a Paseo workspace to see the exact `.mcp.json` servers associated with it and run OAuth from the correct project directory
 - **Expand** a server for its destination table: present or missing per destination, add or remove there
 - **Edit** — every destination's own definition, side by side. Different auth per account is expected and supported: change one account's header and save just that destination, or take one destination's version and **Use for ALL**.
 - **Reveal secrets** — masked (`•••last4`) by default; one tap shows the stored values. Masked values are preserved on save, so editing one account can never copy its token into another. (Deliberate cross-account copies — **Add to all** and **Use for ALL** — do carry a definition's inline credentials, which is the point of those buttons.)
@@ -108,17 +108,17 @@ No, for most of it. This panel reads the account directories and writes MCP conf
 
 ### Authentication by account
 
-MCP *definitions* sync between accounts; MCP *grants* do not — a server is authorized once per account, which is what "server X is not connected" actually means. Open **Connections**, choose Claude or Codex, pick the server, then press **Connect OAuth** or **Reconnect**. The daemon opens its computer's default browser and keeps copyable authorization/callback URLs in the panel; no token is pasted into Agent Link. A remote daemon also shows the exact fallback command:
+MCP *definitions* sync between accounts; MCP *grants* do not — a server is authorized once per account, which is what "server X is not connected" actually means. Open the server, then press **Connect OAuth** or **Reconnect** on the account row. The daemon opens its computer's default browser and keeps copyable authorization/callback URLs in the panel; no token is pasted into Agent Link. A remote daemon also shows the exact fallback command:
 
 ```sh
 CLAUDE_CONFIG_DIR="~/.agent-link/accounts/claude/you@work.com" claude mcp login <server>
 ```
 
-Project-scoped servers (defined in a repo's `.mcp.json`) are listed too, since they also need authorizing per account even though this plugin never edits them.
+For project-scoped servers, open **MCP connections** on the Paseo workspace. OAuth launches from that workspace's `.mcp.json` directory, so the provider resolves the exact raw server name. The plugin reads but never edits project definitions.
 
-### Scope: user-level, not project-level
+### Global and project scope
 
-The MCP tab manages **user-level** (global) servers — each provider's own config, available in all your projects. A repo's own project-level servers (`.mcp.json` in the repository) belong to that repo and are never read or written.
+The sidebar MCP surface manages **user-level** servers available across projects. The workspace MCP panel reads the selected repository's `.mcp.json` and manages its account grants; project definitions remain read-only.
 
 ## About rate limits and failover
 

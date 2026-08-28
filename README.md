@@ -77,15 +77,16 @@ The control-plane vocabulary is inspired by [Plexus](https://github.com/mcowger/
 
 ### 🔌 MCP
 
-![The MCP tab: 29 servers listed with a coverage bar each, filters for All, Gaps and Issues, and buttons to add a server, paste JSON, sync accounts and run a health check](docs/screenshots/mcp.png)
+![The MCP tab: servers listed with coverage and live health, plus actions to add, import and sync definitions](docs/screenshots/mcp.png)
 
-Five task tabs keep the MCP surface readable: **Servers, Connections, Diagnostics, Transfer, and FAQs**. Selecting a server opens a full-width detail view instead of squeezing its destination editor into a right rail. Claude and Codex account grants are nested only inside Connections.
+Each server now owns its definition, automatic health result, destinations and account OAuth actions in one full-width view. There is no separate Connections, Diagnostics or Transfer maze: import and sync are actions on the server list, and health runs when the surface opens and every 15 minutes while it stays open.
 
 - Add, remove or **rename a server everywhere at once**
 - **Edit the raw JSON** for one destination, with a dry-run preview before anything is written (TOML destinations are translated both ways, so you never type TOML and never need to know that Codex spells headers `http_headers`)
 - **Paste a definition straight out of a README** to import it — fenced code, comments and trailing commas are cleaned up and reported, and unfilled placeholders block the write
 - **Run or reconnect OAuth per account** from the panel. The daemon opens its computer's default browser; the authorization URL, callback target and a callback-return field remain available if automatic return fails.
-- Health checks, gap detection, and per-account authorisation status
+- **Open MCP connections on any Paseo workspace** to read that workspace's `.mcp.json`, see its project servers and authorize each account from the same side panel
+- Automatic health checks, gap detection, and per-account authorisation status
 
 Every write is atomic, keeps the file's permissions, backs it up first, and refuses to overwrite a config it cannot parse.
 

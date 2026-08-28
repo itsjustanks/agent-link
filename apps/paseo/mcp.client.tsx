@@ -1,19 +1,9 @@
-/**
- * The MCP surface: operational tabs, then one full-width task at a time.
- *
- * Server definitions, OAuth grants, diagnostics and transfer jobs are separate
- * tasks. A selected server replaces the list instead of being squeezed beside
- * it, which keeps destination editors usable on desktop and mobile.
- *
- * The friction is placed on purpose: copying one definition over the others
- * and importing a definition that still holds a placeholder both ask twice,
- * while revealed secrets keep a notice on screen until they are masked again.
- */
-import type { PluginSurfaceProps } from "@getpaseo/plugin";
-import { useRpc } from "@getpaseo/plugin";
+/** MCP definitions, health and OAuth grants, kept together by server. */
+import type { PluginSurfaceProps, PluginWorkspacePanelProps } from "@getpaseo/plugin";
+import { useRpc, useWorkspace } from "@getpaseo/plugin";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import React, { useEffect, useMemo, useState } from "react";
-import { Linking, ScrollView, Text, View } from "react-native";
+import { Linking, Text, View } from "react-native";
 import { z } from "zod";
 import {
   mcpAdd,
@@ -26,10 +16,12 @@ import {
   mcpRemove,
   mcpRename,
   mcpSync,
+  mcpWorkspace,
   type Destination,
   type McpAuthAccount,
   type McpDefRow,
   type McpHealth,
+  type ProjectMcpServer,
   type McpServerRow,
 } from "./contracts.shared";
 import {
@@ -80,7 +72,6 @@ type PutResult = z.output<typeof mcpRawPut.output>;
 type Flash = { tone: Status; text: string };
 type Mode = "browse" | "add" | "import";
 type Kind = "stdio" | "http";
-type PanelTab = "servers" | "connections" | "diagnostics" | "transfer" | "help";
 
 // -------------------------------------------------------------------- helpers
 
@@ -139,11 +130,16 @@ function formatIssue(source: string, issue: JsonIssue): string {
   return `${head}\n${line}\n${" ".repeat(Math.max(0, issue.column - 1))}^`;
 }
 
-function loginCommand(account: McpAuthAccount, server: string): string {
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+function loginCommand(account: McpAuthAccount, server: string, directory = ""): string {
   const variable = account.provider === "claude" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME";
-  return account.isPrimary
-    ? `${account.provider} mcp login ${server}`
-    : `${variable}="${account.dir}" ${account.provider} mcp login ${server}`;
+  const login = account.isPrimary
+    ? `${account.provider} mcp login ${shellQuote(server)}`
+    : `${variable}=${shellQuote(account.dir)} ${account.provider} mcp login ${shellQuote(server)}`;
+  return directory ? `cd ${shellQuote(directory)} && ${login}` : login;
 }
 
 // ----------------------------------------------------------------- fragments
@@ -491,7 +487,10 @@ function AuthRows({
   sessions,
   oauthCapable,
   daemonIsLocal,
-  pendingDir,
+  pendingAccount,
+  forceDefined = false,
+  workspaceId = "",
+  workspaceDirectory = "",
   onAuthorise,
   onCancel,
   onSignOut,
@@ -505,7 +504,10 @@ function AuthRows({
   sessions: LoginSession[];
   oauthCapable: boolean;
   daemonIsLocal: boolean;
-  pendingDir: string | null;
+  pendingAccount: string | null;
+  forceDefined?: boolean;
+  workspaceId?: string;
+  workspaceDirectory?: string;
   onAuthorise: (account: McpAuthAccount) => void;
   onCancel: (key: string) => void;
   onSignOut: (account: McpAuthAccount) => void;
@@ -520,7 +522,7 @@ function AuthRows({
       const needs = account.needsAuth.includes(server);
       return {
         account,
-        defined: dest ? presentIn.includes(dest.id) : false,
+        defined: forceDefined || (dest ? presentIn.includes(dest.id) : false),
         needs,
         auth: account.authStatus[server] ?? (needs ? "not-connected" : "unknown"),
       };
@@ -531,25 +533,41 @@ function AuthRows({
   return (
     <Section title="OAuth connection">
       <Card padded={false}>
-        {rows.map(({ account, auth, needs }, index) => {
+        {rows.map(({ account, auth }, index) => {
           const session = sessions.find(
-            (entry) => entry.server === server && entry.account === account.email && entry.provider === account.provider,
+            (entry) =>
+              entry.server === server &&
+              entry.account === account.email &&
+              entry.provider === account.provider &&
+              entry.workspaceId === workspaceId,
           );
           const live = session?.state === "starting" || session?.state === "waiting";
           const connected = session?.state === "done" || auth === "connected";
-          const grantUnverified = auth === "unknown" && !needs;
+          const failed = session?.state === "failed";
           const unsupported = auth === "unsupported";
           const remote = !connected && !unsupported && !daemonIsLocal;
-          const status: Status = connected ? "ok" : unsupported ? "neutral" : live ? "busy" : auth === "not-connected" ? "attention" : "neutral";
+          const status: Status = connected
+            ? "ok"
+            : unsupported
+              ? "neutral"
+              : live
+                ? "busy"
+                : failed
+                  ? "error"
+                  : auth === "not-connected"
+                    ? "attention"
+                    : "neutral";
           const statusLabel = connected
             ? "connected"
             : unsupported
               ? "OAuth unsupported"
               : live
                 ? "connecting"
+                : failed
+                  ? "connection failed"
                 : auth === "not-connected"
                   ? "connect required"
-                  : "grant not verified";
+                  : "not checked";
           return (
             <Row
               key={`${account.provider}-${account.dir}`}
@@ -557,7 +575,7 @@ function AuthRows({
               title={account.email}
               subtitle={`${account.isPrimary ? "primary" : "routed"} ${account.provider === "claude" ? "Claude" : "Codex"} account`}
               trailing={
-                connected || grantUnverified ? (
+                connected ? (
                   <>
                     <Button label="Reconnect" onPress={() => onAuthorise(account)} />
                     <ConfirmButton label="Sign out" confirmLabel="Revoke this grant" onConfirm={() => onSignOut(account)} />
@@ -565,7 +583,7 @@ function AuthRows({
                 ) : !unsupported && daemonIsLocal ? (
                   <Button
                     label="Connect OAuth"
-                    loading={pendingDir === account.dir}
+                    loading={pendingAccount === `${account.provider}|${account.email}`}
                     disabled={live}
                     onPress={() => onAuthorise(account)}
                   />
@@ -580,7 +598,7 @@ function AuthRows({
                         <Text style={t.text.caption}>
                           The browser callback lands on the daemon machine, not this one — run it there:
                         </Text>
-                        <CodeBlock>{loginCommand(account, server)}</CodeBlock>
+                        <CodeBlock>{loginCommand(account, server, workspaceDirectory)}</CodeBlock>
                       </>
                     ) : null}
                     {!remote && !session ? (
@@ -673,10 +691,7 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
   const [flash, setFlash] = useState<Flash | null>(null);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<"all" | "gaps" | "issues">("all");
-  const [health, setHealth] = useState<Map<string, McpHealth> | null>(null);
   const [mode, setMode] = useState<Mode>("browse");
-  const [panelTab, setPanelTab] = useState<PanelTab>("servers");
-  const [connectionProvider, setConnectionProvider] = useState<"claude" | "codex">("claude");
   const [selected, setSelected] = useState<string | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
   const [editTab, setEditTab] = useState<"fields" | "json">("fields");
@@ -703,6 +718,17 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
   const matrixQuery = useQuery({ queryKey: ["agent-link", "mcp-matrix"], queryFn: () => callMatrix({}) });
   const destinations = useMemo<Destination[]>(() => matrixQuery.data?.destinations ?? [], [matrixQuery.data]);
   const servers = useMemo<McpServerRow[]>(() => matrixQuery.data?.servers ?? [], [matrixQuery.data]);
+  const healthQuery = useQuery({
+    queryKey: ["agent-link", "mcp-health"],
+    queryFn: () => callHealth({}),
+    staleTime: 5 * 60_000,
+    refetchInterval: 15 * 60_000,
+    retry: false,
+  });
+  const health = useMemo(
+    () => healthQuery.data ? new Map(healthQuery.data.results.map((entry) => [entry.name, entry])) : null,
+    [healthQuery.data],
+  );
 
   const addTargets = useTargetSet(destinations);
   const importTargets = useTargetSet(destinations);
@@ -847,18 +873,6 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
     onError: fail,
     onSuccess: (result) => report({ ok: result.ok, message: result.log }),
   });
-  const healthMutation = useMutation({
-    mutationFn: () => callHealth({}),
-    onError: fail,
-    onSuccess: (result) => {
-      setHealth(new Map(result.results.map((entry) => [entry.name, entry])));
-      const bad = result.results.filter((entry) => entry.status !== "ok" && entry.status !== "unknown").length;
-      setFlash({
-        tone: bad > 0 ? "attention" : "ok",
-        text: `Checked ${result.results.length} servers — ${bad} need attention.`,
-      });
-    },
-  });
   const importMutation = useMutation({
     mutationFn: () =>
       callImportApply({
@@ -876,7 +890,7 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
     },
   });
   const loginMutation = useMutation({
-    mutationFn: (input: { provider: "claude" | "codex"; accountDir: string; account: string; server: string }) =>
+    mutationFn: (input: { provider: "claude" | "codex"; accountDir: string; account: string; server: string; workspaceId?: string }) =>
       callLogin(input),
     onError: fail,
     onSuccess: (result) => {
@@ -903,7 +917,7 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
     },
   });
   const logoutMutation = useMutation({
-    mutationFn: (input: { provider: "claude" | "codex"; accountDir: string; server: string }) => callLogout(input),
+    mutationFn: (input: { provider: "claude" | "codex"; accountDir: string; server: string; workspaceId?: string }) => callLogout(input),
     onError: fail,
     onSuccess: report,
   });
@@ -939,55 +953,40 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
   const rawRows: RawDefRow[] = rawQuery.data?.rows ?? [];
   const defRows: McpDefRow[] = defQuery.data?.rows ?? [];
   const refreshAction = <Button key="refresh" label="Refresh" variant="ghost" grow={layout.compact} onPress={invalidate} />;
-  const panelActions: React.ReactNode[] =
-    panelTab === "servers"
-      ? [
-          <Button
-            key="add"
-            label="Add server"
-            variant={mode === "browse" && !selected ? "primary" : "secondary"}
-            grow={layout.compact}
-            onPress={() => {
-              setMode("add");
-              setSelected(null);
-              setEditing(null);
-            }}
-          />,
-          refreshAction,
-        ]
-      : panelTab === "connections"
-        ? [refreshAction]
-        : panelTab === "diagnostics"
-          ? [
-              <Button
-                key="health"
-                label="Run health check"
-                variant="primary"
-                grow={layout.compact}
-                loading={healthMutation.isPending}
-                onPress={() => healthMutation.mutate()}
-              />,
-              refreshAction,
-            ]
-          : panelTab === "transfer"
-            ? [
-                <Button key="paste" label="Paste JSON" variant="primary" grow={layout.compact} onPress={() => setMode("import")} />,
-                <Button
-                  key="sync"
-                  label="Sync accounts"
-                  grow={layout.compact}
-                  loading={syncMutation.isPending}
-                  onPress={() => syncMutation.mutate()}
-                />,
-                <Button
-                  key="export-all"
-                  label="Export all"
-                  grow={layout.compact}
-                  loading={exportMutation.isPending}
-                  onPress={() => exportMutation.mutate({ scope: "all" })}
-                />,
-              ]
-            : [];
+  const panelActions: React.ReactNode[] = mode === "browse" && !selected
+    ? [
+        <Button
+          key="add"
+          label="Add server"
+          variant="primary"
+          grow={layout.compact}
+          onPress={() => {
+            setMode("add");
+            setSelected(null);
+            setEditing(null);
+          }}
+        />,
+        <Button
+          key="paste"
+          label="Paste JSON"
+          grow={layout.compact}
+          onPress={() => {
+            setMode("import");
+            setSelected(null);
+            setEditing(null);
+          }}
+        />,
+        <Button
+          key="sync"
+          label="Sync accounts"
+          variant="ghost"
+          grow={layout.compact}
+          loading={syncMutation.isPending}
+          onPress={() => syncMutation.mutate()}
+        />,
+        refreshAction,
+      ]
+    : [refreshAction];
 
   const filters = (
     <View style={{ flexDirection: layout.compact ? "column" : "row", alignItems: layout.compact ? "stretch" : "center", gap: t.space.md }}>
@@ -1012,6 +1011,11 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
       {matrixQuery.error ? (
         <View style={{ padding: t.space.md }}>
           <ErrorText>{errorText(matrixQuery.error)}</ErrorText>
+        </View>
+      ) : null}
+      {healthQuery.error ? (
+        <View style={{ padding: t.space.md }}>
+          <ErrorText>{`Automatic health check failed: ${errorText(healthQuery.error)}`}</ErrorText>
         </View>
       ) : null}
       {!matrixQuery.isLoading && shown.length === 0 ? (
@@ -1041,7 +1045,7 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
               />
             }
             trailing={
-              healthMutation.isPending ? (
+              healthQuery.isFetching && !entryHealth ? (
                 <StatusPill status="busy" label="checking" />
               ) : entryHealth ? (
                 <StatusPill status={healthStatus(entryHealth.status)} label={healthWord(entryHealth.status)} />
@@ -1055,7 +1059,7 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
 
   const back = (
     <Button
-      label={panelTab === "transfer" ? "← Transfer" : "← All servers"}
+      label="← MCP servers"
       variant="ghost"
       onPress={() => {
         setMode("browse");
@@ -1069,10 +1073,7 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
     <View style={{ gap: t.space.lg }}>
       {back}
       <Card>
-        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: t.space.sm }}>
-          <Text style={t.text.heading}>Add a server</Text>
-          <Button label="Cancel" variant="ghost" onPress={() => setMode("browse")} />
-        </View>
+        <Text style={t.text.heading}>Add a server</Text>
         <Field label="Name" value={addName} onChangeText={setAddName} placeholder="my-server" autoFocus />
         <Segmented
           value={addKind}
@@ -1131,10 +1132,7 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
     <View style={{ gap: t.space.lg }}>
       {back}
       <Card>
-        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: t.space.sm }}>
-          <Text style={t.text.heading}>Paste a server definition</Text>
-          <Button label="Cancel" variant="ghost" onPress={() => setMode("browse")} />
-        </View>
+        <Text style={t.text.heading}>Paste a server definition</Text>
         <Field
           value={blob}
           onChangeText={setBlob}
@@ -1257,6 +1255,47 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
     </View>
   );
 
+  const authRows = (entry: McpServerRow) => (
+    <AuthRows
+      server={entry.name}
+      accounts={authQuery.data?.accounts ?? []}
+      destinations={destinations}
+      presentIn={entry.presentIn}
+      sessions={sessions}
+      oauthCapable={entry.transport === "http" && entry.authStyle === "oauth-or-none"}
+      daemonIsLocal={daemonIsLocal}
+      pendingAccount={
+        loginMutation.isPending && loginMutation.variables
+          ? `${loginMutation.variables.provider}|${loginMutation.variables.account}`
+          : null
+      }
+      onAuthorise={(account) =>
+        loginMutation.mutate({
+          provider: account.provider,
+          accountDir: account.isPrimary ? "" : account.dir,
+          account: account.email,
+          server: entry.name,
+        })
+      }
+      onCancel={(key) => loginCancelMutation.mutate(key)}
+      onSignOut={(account) =>
+        logoutMutation.mutate({
+          provider: account.provider,
+          accountDir: account.isPrimary ? "" : account.dir,
+          server: entry.name,
+        })
+      }
+      onComplete={(key, redirectUrl) => loginCompleteMutation.mutate({ key, redirectUrl })}
+      onCopied={(ok) =>
+        setFlash(
+          ok
+            ? { tone: "ok", text: "Sign-in link copied." }
+            : { tone: "attention", text: "No clipboard here — the link above is selectable." },
+        )
+      }
+    />
+  );
+
   const serverPane = server ? (
     <View style={{ gap: t.space.lg }}>
       {back}
@@ -1310,6 +1349,14 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
           />
         </Disclosure>
       </Card>
+
+      {server.transport === "http" && server.authStyle === "oauth-or-none" && authQuery.isLoading ? (
+        <Loading label="Reading account connections…" />
+      ) : null}
+      {server.transport === "http" && server.authStyle === "oauth-or-none" && authQuery.error ? (
+        <ErrorText>{errorText(authQuery.error)}</ErrorText>
+      ) : null}
+      {authRows(server)}
 
       {revealed ? (
         <Notice tone="error">
@@ -1400,205 +1447,242 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
     </View>
   ) : null;
 
-  const oauthServers = servers.filter((entry) => entry.transport === "http" && entry.authStyle === "oauth-or-none");
-  const connectionAccounts = (authQuery.data?.accounts ?? []).filter((account) => account.provider === connectionProvider);
-  const connectionServers = oauthServers.filter((entry) =>
-    connectionAccounts.some((account) => {
-      const destination = destinations.find(
-        (candidate) => candidate.provider === account.provider && candidate.account === account.email,
-      );
-      return Boolean(destination && entry.presentIn.includes(destination.id));
-    }),
-  );
-  const connectionServer = selected ? connectionServers.find((entry) => entry.name === selected) : undefined;
-  const connectionCounts = (entry: McpServerRow) => {
-    const relevant = connectionAccounts.filter((account) => {
-      const destination = destinations.find(
-        (candidate) => candidate.provider === account.provider && candidate.account === account.email,
-      );
-      return Boolean(destination && entry.presentIn.includes(destination.id));
-    });
-    const connected = relevant.filter((account) => {
-      const session = sessions.find(
-        (candidate) =>
-          candidate.server === entry.name && candidate.account === account.email && candidate.provider === account.provider,
-      );
-      return session?.state === "done" || account.authStatus[entry.name] === "connected";
-    }).length;
-    const required = relevant.filter((account) => account.authStatus[entry.name] === "not-connected").length;
-    return { total: relevant.length, connected, required };
-  };
-  const authRows = (entry: McpServerRow) => (
-    <AuthRows
-      server={entry.name}
-      accounts={connectionAccounts}
-      destinations={destinations}
-      presentIn={entry.presentIn}
-      sessions={sessions}
-      oauthCapable
-      daemonIsLocal={daemonIsLocal}
-      pendingDir={loginMutation.isPending ? loginMutation.variables?.accountDir ?? null : null}
-      onAuthorise={(account) =>
-        loginMutation.mutate({
-          provider: account.provider,
-          accountDir: account.dir,
-          account: account.email,
-          server: entry.name,
-        })
-      }
-      onCancel={(key) => loginCancelMutation.mutate(key)}
-      onSignOut={(account) => logoutMutation.mutate({ provider: account.provider, accountDir: account.dir, server: entry.name })}
-      onComplete={(key, redirectUrl) => loginCompleteMutation.mutate({ key, redirectUrl })}
-      onCopied={(ok) =>
-        setFlash(
-          ok
-            ? { tone: "ok", text: "Sign-in link copied." }
-            : { tone: "attention", text: "No clipboard here — the link above is selectable." },
-        )
-      }
-    />
-  );
-
-  const connectionsPane = connectionServer ? (
-    <View style={{ gap: t.space.lg }}>
-      <Button label="← All OAuth servers" variant="ghost" onPress={() => setSelected(null)} />
-      <View style={{ gap: t.space.xs }}>
-        <Text style={t.text.display}>{connectionServer.name}</Text>
-        <Text style={t.text.caption}>One grant per account. Reconnect opens the daemon computer's default browser.</Text>
-      </View>
-      {authRows(connectionServer)}
-    </View>
-  ) : (
-    <View style={{ gap: t.space.md }}>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingBottom: t.space.xs }}>
-        <Segmented
-          value={connectionProvider}
-          onChange={setConnectionProvider}
-          options={[
-            { value: "claude", label: "Claude" },
-            { value: "codex", label: "Codex" },
-          ]}
-        />
-      </ScrollView>
-      {authQuery.isLoading ? <Loading label="Reading account grants…" /> : null}
-      {authQuery.error ? <ErrorText>{errorText(authQuery.error)}</ErrorText> : null}
-      <Card padded={false}>
-        {connectionServers.length === 0 && !authQuery.isLoading ? (
-          <EmptyState title="No OAuth servers here" body={`No OAuth-capable server is defined for a ${connectionProvider} account.`} />
-        ) : null}
-        {connectionServers.map((entry, index) => {
-          const counts = connectionCounts(entry);
-          return (
-            <Row
-              key={entry.name}
-              first={index === 0}
-              title={entry.name}
-              subtitle={`${counts.connected} connected · ${counts.required} need sign-in · ${counts.total} accounts`}
-              onPress={() => setSelected(entry.name)}
-              trailing={
-                <StatusPill
-                  status={counts.required > 0 ? "attention" : counts.connected === counts.total && counts.total > 0 ? "ok" : "neutral"}
-                  label={counts.required > 0 ? "action needed" : counts.connected > 0 ? "connected" : "not checked"}
-                />
-              }
-            />
-          );
-        })}
-      </Card>
-    </View>
-  );
-
-  const diagnosticsPane = (
-    <View style={{ gap: t.space.md }}>
-      <Text style={t.text.caption}>Manual checks contact each configured server. Opening this tab does not.</Text>
-      <Card padded={false}>
-        {!health ? <EmptyState title="Not checked yet" body="Run one health check to separate auth, network and binary failures." /> : null}
-        {servers.map((entry, index) => {
-          const result = health?.get(entry.name);
-          return result ? (
-            <Row
-              key={entry.name}
-              first={index === 0}
-              title={entry.name}
-              subtitle={result.note}
-              trailing={<StatusPill status={healthStatus(result.status)} label={healthWord(result.status)} />}
-            />
-          ) : null;
-        })}
-      </Card>
-    </View>
-  );
-
-  const transferPane = mode === "import" ? (
-    importPane
-  ) : (
-    <View style={{ gap: t.space.lg }}>
-      <Card>
-        <Text style={t.text.heading}>Move definitions without moving grants</Text>
-        <Text style={t.text.body}>
-          Paste README JSON, sync definitions and preferences across accounts, or export a private backup. OAuth grants stay account-local.
-        </Text>
-        <Facts items={[{ value: `${servers.length} servers` }, { value: `${destinations.length} destinations` }, { value: "backups before writes" }]} />
-      </Card>
-    </View>
-  );
-
-  const helpPane = (
-    <Card>
+  const help = (
+    <Disclosure title="MCP FAQs">
       <Text style={t.text.heading}>Why is OAuth per account?</Text>
       <Text style={t.text.body}>Definitions can be copied. Provider grants cannot, so each account connects once.</Text>
       <Text style={t.text.heading}>Where does sign-in open?</Text>
       <Text style={t.text.body}>On the Paseo daemon computer. The authorization link and callback target remain visible for manual recovery.</Text>
       <Text style={t.text.heading}>What does Sync accounts move?</Text>
       <Text style={t.text.body}>Server definitions, trusted projects and preferences. It never copies OAuth tokens.</Text>
-      <Text style={t.text.heading}>Are project .mcp.json files changed?</Text>
-      <Text style={t.text.body}>No. This panel manages user-level CLI configurations only.</Text>
-    </Card>
+      <Text style={t.text.heading}>Where are project servers?</Text>
+      <Text style={t.text.body}>Open MCP connections from a Paseo workspace to read that workspace's .mcp.json and connect its accounts.</Text>
+    </Disclosure>
   );
 
-  const serverContent = mode === "add" ? addPane : selected ? serverPane : <View style={{ gap: t.space.md }}>{filters}{list}</View>;
-  const panelOptions: Array<{ value: PanelTab; label: string }> = [
-    { value: "servers", label: "Servers" },
-    { value: "connections", label: "Connections" },
-    { value: "diagnostics", label: "Diagnostics" },
-    { value: "transfer", label: "Transfer" },
-    { value: "help", label: "FAQs" },
-  ];
+  const serverContent = mode === "add"
+    ? addPane
+    : mode === "import"
+      ? importPane
+      : selected
+        ? serverPane
+        : <View style={{ gap: t.space.lg }}>{filters}{list}{help}</View>;
 
   return (
     <Screen t={t}>
       <Toolbar
         title="MCP"
-        subtitle="Definitions, account grants and health — separated by task."
+        subtitle="Definitions, health and account sign-in in one server view. Health refreshes automatically."
         actions={panelActions}
       />
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingBottom: t.space.xs }}>
-        <Segmented
-          options={panelOptions}
-          value={panelTab}
-          onChange={(next) => {
-            setPanelTab(next);
-            setMode("browse");
-            setSelected(null);
-            setEditing(null);
-            setRevealed(false);
-          }}
-        />
-      </ScrollView>
       {flash ? (
         <Notice tone={flash.tone} onDismiss={() => setFlash(null)}>
           {flash.text.includes("\n") ? <CodeBlock tone={flash.tone}>{flash.text}</CodeBlock> : flash.text}
         </Notice>
       ) : null}
-      {panelTab === "servers"
-        ? serverContent
-        : panelTab === "connections"
-          ? connectionsPane
-          : panelTab === "diagnostics"
-            ? diagnosticsPane
-            : panelTab === "transfer"
-              ? transferPane
-              : helpPane}
+      {serverContent}
+    </Screen>
+  );
+}
+
+/** Workspace-local .mcp.json inventory and OAuth, opened beside that workspace. */
+export function McpWorkspacePanel({ theme, layout, workspaceId }: PluginWorkspacePanelProps) {
+  const t = useUi(theme, layout.compact);
+  const queryClient = useQueryClient();
+  const workspace = useWorkspace(workspaceId, ({ name, directory }) => ({ name, directory }));
+  const callWorkspace = useRpc(mcpWorkspace);
+  const callLogin = useRpc(mcpLogin);
+  const callLoginStatus = useRpc(mcpLoginStatus);
+  const callLoginCancel = useRpc(mcpLoginCancel);
+  const callLoginComplete = useRpc(mcpLoginComplete);
+  const callLogout = useRpc(mcpLogout);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [flash, setFlash] = useState<Flash | null>(null);
+  const [liveLogin, setLiveLogin] = useState(false);
+
+  const workspaceQuery = useQuery({
+    queryKey: ["agent-link", "mcp-workspace", workspaceId],
+    queryFn: () => callWorkspace({ workspaceId }),
+    enabled: Boolean(workspace),
+  });
+  const loginQuery = useQuery({
+    queryKey: ["agent-link", "mcp-login-status"],
+    queryFn: () => callLoginStatus({}),
+    refetchInterval: liveLogin ? 2000 : false,
+  });
+  const sessions = useMemo<LoginSession[]>(() => loginQuery.data?.sessions ?? [], [loginQuery.data]);
+  const anyLive = sessions.some((entry) => entry.state === "starting" || entry.state === "waiting");
+  useEffect(() => setLiveLogin(anyLive), [anyLive]);
+  const settled = sessions
+    .filter((entry) => entry.workspaceId === workspaceId && entry.state === "done")
+    .map((entry) => entry.key)
+    .join("|");
+  useEffect(() => {
+    if (!settled) return;
+    void queryClient.invalidateQueries({ queryKey: ["agent-link", "mcp-workspace", workspaceId] });
+  }, [settled, queryClient, workspaceId]);
+
+  const fail = (error: unknown) => setFlash({ tone: "error", text: clampLines(errorText(error), 12) });
+  const loginMutation = useMutation({
+    mutationFn: (input: {
+      provider: "claude" | "codex";
+      accountDir: string;
+      account: string;
+      server: string;
+      workspaceId: string;
+    }) => callLogin(input),
+    onError: fail,
+    onSuccess: (result) => {
+      setFlash({ tone: result.ok ? "ok" : "error", text: result.message });
+      setLiveLogin(result.ok);
+      void queryClient.invalidateQueries({ queryKey: ["agent-link", "mcp-login-status"] });
+    },
+  });
+  const cancelMutation = useMutation({
+    mutationFn: (key: string) => callLoginCancel({ key }),
+    onError: fail,
+    onSuccess: (result) => {
+      setFlash({ tone: result.ok ? "ok" : "error", text: result.message });
+      void queryClient.invalidateQueries({ queryKey: ["agent-link", "mcp-login-status"] });
+    },
+  });
+  const completeMutation = useMutation({
+    mutationFn: (input: { key: string; redirectUrl: string }) => callLoginComplete(input),
+    onError: fail,
+    onSuccess: (result) => {
+      setFlash({ tone: result.ok ? "ok" : "error", text: result.message });
+      setLiveLogin(result.ok);
+      void queryClient.invalidateQueries({ queryKey: ["agent-link", "mcp-login-status"] });
+    },
+  });
+  const logoutMutation = useMutation({
+    mutationFn: (input: { provider: "claude" | "codex"; accountDir: string; server: string; workspaceId: string }) =>
+      callLogout(input),
+    onError: fail,
+    onSuccess: (result) => {
+      setFlash({ tone: result.ok ? "ok" : "error", text: result.message });
+      if (result.ok) void queryClient.invalidateQueries({ queryKey: ["agent-link", "mcp-workspace", workspaceId] });
+    },
+  });
+
+  const data = workspaceQuery.data;
+  const server: ProjectMcpServer | undefined = selected
+    ? data?.servers.find((entry) => entry.name === selected)
+    : undefined;
+  const refresh = () => void queryClient.invalidateQueries({ queryKey: ["agent-link", "mcp-workspace", workspaceId] });
+
+  const body = !workspace ? (
+    <EmptyState title="Workspace unavailable" body="This Paseo workspace no longer exists." />
+  ) : workspaceQuery.isLoading ? (
+    <Loading label="Reading project MCP servers…" />
+  ) : workspaceQuery.error ? (
+    <ErrorText>{errorText(workspaceQuery.error)}</ErrorText>
+  ) : server && data ? (
+    <View style={{ gap: t.space.lg }}>
+      <Button label="← Workspace MCP servers" variant="ghost" onPress={() => setSelected(null)} />
+      <View style={{ gap: t.space.sm }}>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: t.space.sm }}>
+          <Text style={[t.text.display, { flexShrink: 1 }]} numberOfLines={1}>{server.name}</Text>
+          <Tag label={server.transport} />
+          {server.transport === "http" && server.authStyle === "oauth-or-none" ? <Tag label="OAuth available" /> : null}
+        </View>
+        {server.detail ? <Text style={t.text.caption}>{server.detail}</Text> : null}
+      </View>
+      {server.authStyle === "inline-credentials" ? (
+        <Notice tone="ok">This project definition already supplies credentials; no OAuth grant is required here.</Notice>
+      ) : null}
+      {server.transport === "http" && server.authStyle === "oauth-or-none" && loginQuery.isLoading ? (
+        <Loading label="Reading account connections…" />
+      ) : null}
+      {server.transport === "http" && server.authStyle === "oauth-or-none" && loginQuery.error ? (
+        <ErrorText>{errorText(loginQuery.error)}</ErrorText>
+      ) : null}
+      <AuthRows
+        server={server.name}
+        accounts={data.accounts.filter((account) => account.provider === "claude")}
+        destinations={[]}
+        presentIn={[]}
+        sessions={sessions}
+        oauthCapable={server.transport === "http" && server.authStyle === "oauth-or-none"}
+        daemonIsLocal={loginQuery.data?.daemonIsLocal ?? true}
+        pendingAccount={
+          loginMutation.isPending && loginMutation.variables
+            ? `${loginMutation.variables.provider}|${loginMutation.variables.account}`
+            : null
+        }
+        forceDefined
+        workspaceId={workspaceId}
+        workspaceDirectory={data.workspace.directory}
+        onAuthorise={(account) =>
+          loginMutation.mutate({
+            provider: account.provider,
+            accountDir: account.isPrimary ? "" : account.dir,
+            account: account.email,
+            server: server.name,
+            workspaceId,
+          })
+        }
+        onCancel={(key) => cancelMutation.mutate(key)}
+        onSignOut={(account) =>
+          logoutMutation.mutate({
+            provider: account.provider,
+            accountDir: account.isPrimary ? "" : account.dir,
+            server: server.name,
+            workspaceId,
+          })
+        }
+        onComplete={(key, redirectUrl) => completeMutation.mutate({ key, redirectUrl })}
+        onCopied={(ok) =>
+          setFlash(
+            ok
+              ? { tone: "ok", text: "Sign-in link copied." }
+              : { tone: "attention", text: "No clipboard here — the link above is selectable." },
+          )
+        }
+      />
+    </View>
+  ) : data ? (
+    <View style={{ gap: t.space.md }}>
+      <Facts
+        items={[
+          { value: data.configPath || "No .mcp.json" },
+          { value: `${data.servers.length} project servers` },
+        ]}
+      />
+      <Card padded={false}>
+        {data.servers.length === 0 ? (
+          <EmptyState
+            title={data.configPath ? "No project MCP servers" : "No .mcp.json in this workspace"}
+            body={data.configPath ? "The file exists but has no mcpServers entries." : "Add a .mcp.json at the workspace or project root."}
+          />
+        ) : null}
+        {data.servers.map((entry, index) => (
+          <Row
+            key={entry.name}
+            first={index === 0}
+            title={entry.name}
+            subtitle={entry.detail}
+            onPress={() => setSelected(entry.name)}
+            trailing={<Tag label={entry.transport} />}
+          />
+        ))}
+      </Card>
+    </View>
+  ) : null;
+
+  return (
+    <Screen t={t}>
+      <Toolbar
+        title={workspace?.name ?? "MCP connections"}
+        subtitle="Project MCP definitions and account sign-in for this workspace."
+        actions={<Button label="Refresh" variant="ghost" onPress={refresh} />}
+      />
+      {flash ? (
+        <Notice tone={flash.tone} onDismiss={() => setFlash(null)}>
+          {flash.text.includes("\n") ? <CodeBlock tone={flash.tone}>{flash.text}</CodeBlock> : flash.text}
+        </Notice>
+      ) : null}
+      {body}
     </Screen>
   );
 }

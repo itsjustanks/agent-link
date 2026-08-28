@@ -143,10 +143,11 @@ export const mcpExportFile = defineRpc({
  * panel says so and hands over the command instead.
  */
 export const LoginSessionSchema = z.object({
-  key: z.string(), // provider|accountDir|server
+  key: z.string(), // provider|accountDir|workspaceId|server
   server: z.string(),
   account: z.string(),
   provider: z.enum(["claude", "codex"]),
+  workspaceId: z.string(), // empty for a user-level definition
   state: z.enum(["starting", "waiting", "done", "failed"]),
   url: z.string(), // the page to open, when the CLI printed one
   callbackUrl: z.string(), // redirect target advertised by the OAuth request
@@ -164,6 +165,7 @@ export const mcpLogin = defineRpc({
     accountDir: z.string(),
     account: z.string(),
     server: z.string(),
+    workspaceId: z.string().optional(),
   }),
   output: z.object({ ok: z.boolean(), session: LoginSessionSchema.nullable(), message: z.string() }),
 });
@@ -192,6 +194,7 @@ export const mcpLogout = defineRpc({
     provider: z.enum(["claude", "codex"]),
     accountDir: z.string(),
     server: z.string(),
+    workspaceId: z.string().optional(),
   }),
   output: z.object({ ok: z.boolean(), message: z.string() }),
 });

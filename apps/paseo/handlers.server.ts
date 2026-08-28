@@ -2381,6 +2381,54 @@ export async function handleMcpAuth() {
   return { accounts, projectServers };
 }
 
+/** Resolve project MCP state from Paseo's live workspace registry, never a client path. */
+export async function handleMcpWorkspace(
+  { workspaceId }: { workspaceId: string },
+  { paseo }: PluginHandlerContext,
+) {
+  const result = await paseo.workspaces.list();
+  const entries = (result as {
+    entries: Array<{
+      id: string;
+      name: string;
+      workspaceDirectory?: string;
+      projectRootPath: string;
+    }>;
+  }).entries;
+  const workspace = entries.find((entry) => entry.id === workspaceId);
+  if (!workspace) throw new Error("This Paseo workspace no longer exists.");
+
+  const directory = workspace.workspaceDirectory || workspace.projectRootPath;
+  const candidates = [...new Set([directory, workspace.projectRootPath].filter(Boolean))];
+  const configPath = candidates.map((candidate) => join(candidate, ".mcp.json")).find(existsSync) ?? "";
+  const definitions = configPath ? jsonMcpRead(configPath) : {};
+  const servers = Object.entries(definitions)
+    .map(([name, def]) => {
+      const hasInline = Boolean(
+        (def.env && Object.keys(def.env).length > 0) || (def.headers && Object.keys(def.headers).length > 0),
+      );
+      return {
+        name,
+        transport: def.command ? ("stdio" as const) : def.url ? ("http" as const) : ("unknown" as const),
+        detail: redactDetail(def).slice(0, 80),
+        authStyle: hasInline ? ("inline-credentials" as const) : ("oauth-or-none" as const),
+      };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const { accounts } = await handleMcpAuth();
+  return {
+    workspace: {
+      id: workspace.id,
+      name: workspace.name,
+      directory,
+      projectRootPath: workspace.projectRootPath,
+    },
+    configPath,
+    servers,
+    accounts,
+  };
+}
+
 export async function handleMcpSync(): Promise<{ ok: boolean; log: string }> {
   const logs: string[] = [];
   const slots = collectSlots();

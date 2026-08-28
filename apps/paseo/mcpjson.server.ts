@@ -2,7 +2,7 @@ import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import { spawn, type ChildProcess } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
-import { basename, join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import type { Destination } from "./contracts.shared";
 import { onShutdown } from "./lifecycle.shared";
 import {
@@ -1096,6 +1096,38 @@ function cliPath(provider: "claude" | "codex"): string {
   return "";
 }
 
+function accountEnvironment(provider: "claude" | "codex", accountDir: string) {
+  const variable = envVarFor(provider);
+  const defaultDir = join(HOME, provider === "claude" ? ".claude" : ".codex");
+  const primary = !accountDir || resolve(accountDir) === resolve(defaultDir);
+  const env = { ...process.env } as NodeJS.ProcessEnv;
+  if (primary) delete env[variable];
+  else env[variable] = accountDir;
+  return { env, effectiveDir: primary ? "" : accountDir, keyDir: primary ? "primary" : accountDir };
+}
+
+async function workspaceLoginDirectory(
+  workspaceId: string | undefined,
+  server: string,
+  paseo: PluginHandlerContext["paseo"],
+): Promise<string | undefined> {
+  if (!workspaceId) return undefined;
+  const result = await paseo.workspaces.list();
+  const entries = (result as {
+    entries: Array<{ id: string; workspaceDirectory?: string; projectRootPath: string }>;
+  }).entries;
+  const workspace = entries.find((entry) => entry.id === workspaceId);
+  if (!workspace) throw new Error("This Paseo workspace no longer exists.");
+  const directory = workspace.workspaceDirectory || workspace.projectRootPath;
+  const candidates = [...new Set([directory, workspace.projectRootPath].filter(Boolean))];
+  const configPath = candidates.map((candidate) => join(candidate, ".mcp.json")).find(existsSync);
+  if (!configPath) throw new Error("This workspace has no .mcp.json file.");
+  if (!Object.hasOwn(jsonMcpRead(configPath), server)) {
+    throw new Error(`No project MCP server named '${server}' exists in this workspace.`);
+  }
+  return dirname(configPath);
+}
+
 /**
  * The OAuth callback lands on the DAEMON machine's localhost, so a login only
  * completes when the daemon is the machine the user is sitting at. A handler
@@ -1138,39 +1170,56 @@ function openDefaultBrowser(url: string): boolean {
   }
 }
 
-export async function handleMcpLogin({
-  provider,
-  accountDir,
-  account,
-  server,
-}: {
-  provider: "claude" | "codex";
-  accountDir: string;
-  account: string;
-  server: string;
-}) {
+export async function handleMcpLogin(
+  {
+    provider,
+    accountDir,
+    account,
+    server,
+    workspaceId,
+  }: {
+    provider: "claude" | "codex";
+    accountDir: string;
+    account: string;
+    server: string;
+    workspaceId?: string;
+  },
+  { paseo }: PluginHandlerContext,
+) {
   const binary = cliPath(provider);
   if (!binary) return { ok: false, session: null, message: `no '${provider}' on PATH — install it or run the login in a terminal` };
-  if (accountDir && !existsSync(accountDir)) return { ok: false, session: null, message: `${accountDir} does not exist` };
+  const accountConfig = accountEnvironment(provider, accountDir);
+  if (accountConfig.effectiveDir && !existsSync(accountConfig.effectiveDir)) {
+    return { ok: false, session: null, message: `${accountConfig.effectiveDir} does not exist` };
+  }
+  let cwd: string | undefined;
+  try {
+    cwd = await workspaceLoginDirectory(workspaceId, server, paseo);
+  } catch (error) {
+    return { ok: false, session: null, message: error instanceof Error ? error.message : String(error) };
+  }
 
-  const key = `${provider}|${accountDir}|${server}`;
+  const key = `${provider}|${accountConfig.keyDir}|${workspaceId ?? "user"}|${server}`;
   const existing = logins.get(key);
   if (existing && (existing.session.state === "starting" || existing.session.state === "waiting")) {
     return { ok: true, session: existing.session, message: "a login for that server is already running" };
   }
   logins.get(key)?.child.kill("SIGTERM");
 
-  const env = { ...process.env } as NodeJS.ProcessEnv;
-  if (accountDir) env[envVarFor(provider)] = accountDir;
   const expectsRedirect = provider === "claude";
   const args = ["mcp", "login", server, ...(expectsRedirect ? ["--no-browser"] : [])];
-  const child = spawn(binary, args, { stdio: [expectsRedirect ? "pipe" : "ignore", "pipe", "pipe"], env });
+  const child = spawn(binary, args, {
+    stdio: [expectsRedirect ? "pipe" : "ignore", "pipe", "pipe"],
+    env: accountConfig.env,
+    cwd,
+  });
 
   const session: LoginSession = {
     key,
     server,
-    account: account || basename(accountDir || HOME),
+    account: account || basename(accountConfig.effectiveDir || HOME),
     provider,
+    workspaceId: workspaceId ?? "",
     state: "starting",
     url: "",
     callbackUrl: "",
@@ -1274,17 +1323,31 @@ export async function handleMcpLogout({
   provider,
   accountDir,
   server,
+  workspaceId,
 }: {
   provider: "claude" | "codex";
   accountDir: string;
   server: string;
-}) {
+  workspaceId?: string;
+}, { paseo }: PluginHandlerContext) {
   const binary = cliPath(provider);
   if (!binary) return { ok: false, message: `no '${provider}' on PATH` };
-  const env = { ...process.env } as NodeJS.ProcessEnv;
-  if (accountDir) env[envVarFor(provider)] = accountDir;
+  const accountConfig = accountEnvironment(provider, accountDir);
+  if (accountConfig.effectiveDir && !existsSync(accountConfig.effectiveDir)) {
+    return { ok: false, message: `${accountConfig.effectiveDir} does not exist` };
+  }
+  let cwd: string | undefined;
+  try {
+    cwd = await workspaceLoginDirectory(workspaceId, server, paseo);
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : String(error) };
+  }
   return await new Promise<{ ok: boolean; message: string }>((done) => {
-    const child = spawn(binary, ["mcp", "logout", server], { stdio: ["ignore", "pipe", "pipe"], env });
+    const child = spawn(binary, ["mcp", "logout", server], {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: accountConfig.env,
+      cwd,
+    });
     let output = "";
     const onChunk = (chunk: Buffer) => {
       output = `${output}${chunk.toString().replace(ANSI, "")}`.slice(-4000);

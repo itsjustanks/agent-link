@@ -13,6 +13,7 @@ import {
   mcpMatrix,
   mcpRemove,
   mcpSync,
+  mcpWorkspace,
   providerHealth,
   providerHeartbeat,
   accountUsage,
@@ -38,6 +39,7 @@ import {
   handleMcpMatrix,
   handleMcpRemove,
   handleMcpSync,
+  handleMcpWorkspace,
   handleProviderHealth,
   handleProviderHeartbeat,
   handleAccountUsage,
@@ -57,7 +59,7 @@ import { limitsResume, limitsSetAuto, limitsStatus } from "./limits.shared";
 import { handleLimitsResume, handleLimitsSetAuto, handleLimitsStatus } from "./limits.server";
 import { resourceSetEnabled, resourceStatus } from "./resources.shared";
 import { handleResourceSetEnabled, handleResourceStatus } from "./resources.server";
-import { McpSurface } from "./mcp.client";
+import { McpSurface, McpWorkspacePanel } from "./mcp.client";
 import {
   mcpExport,
   mcpExportFile,
@@ -112,6 +114,7 @@ export default function contribute(plugin: PluginContext) {
   plugin.handle(mcpHealth, handleMcpHealth);
   plugin.handle(mcpRemove, handleMcpRemove);
   plugin.handle(mcpSync, handleMcpSync);
+  plugin.handle(mcpWorkspace, handleMcpWorkspace);
   plugin.handle(cliStatus, handleCliStatus);
   plugin.handle(cliInstall, handleCliInstall);
   plugin.handle(cliUpdateCheck, handleCliUpdateCheck);
@@ -135,6 +138,13 @@ export default function contribute(plugin: PluginContext) {
 
   plugin.addSurface("agent-sync", AgentSyncSurface);
   plugin.addSurface("mcp", McpSurface);
+  plugin.addWorkspacePanel({
+    id: "mcp-connections",
+    title: "MCP connections",
+    icon: "Plug",
+    context: "workspace",
+    Component: McpWorkspacePanel,
+  });
   plugin.addSidebarItem({ id: "agent-sync", title: "Agent Link", icon: "Users", surface: "agent-sync" });
   plugin.addSidebarItem({ id: "mcp", title: "MCP", icon: "Plug", surface: "mcp" });
   plugin.addCommandCenterItem({
@@ -145,6 +155,16 @@ export default function contribute(plugin: PluginContext) {
     context: "global",
     onSelect({ openSurface }) {
       openSurface("agent-sync");
+    },
+  });
+  plugin.addCommandCenterItem({
+    id: "open-workspace-mcp",
+    title: "Open workspace MCP connections",
+    icon: "Plug",
+    keywords: ["mcp", "project", "oauth", "connections"],
+    context: "workspace",
+    onSelect({ openPanel }) {
+      openPanel("mcp-connections");
     },
   });
   plugin.addCommandCenterItem({
