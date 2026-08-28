@@ -32,14 +32,13 @@ const STATE_PATH = (() => {
         : join(HOME, ".agent-link");
   return join(root, "state", "paseo-limit-sentry.json");
 })();
+const ROUTES_PATH = join(dirname(STATE_PATH), "pools", "routes.log");
 
 const LIMIT_ERROR = /usage limit|rate limit|spend limit|limit reached|billing|out of credits|quota exceeded|you(?:'|’)ve\s+(?:hit|reached)\s+[^.!\n]{0,80}\blimit\b/i;
 // Every provider's limit-death is worth SHOWING; only providers with an
 // account pool behind them are worth auto-nudging — for the rest a retry just
 // hammers the same exhausted account, so the human picks the moment.
 const ROUTED_PROVIDERS = /^(claude|codex)/;
-const NUDGE =
-  "You stopped because the provider account hit its usage limit. The account router has moved this conversation to a healthy account. Continue the task exactly where you left off; do not redo completed work. If the remaining work is long-running and you have Paseo tools, create a heartbeat (for example every 10 minutes, stopping when the task is complete) so you keep making progress without supervision.";
 const EVENT_KEEP = 20;
 const DEBOUNCE_MS = 5 * 60 * 1000;
 const NON_LIMIT_GUARD_MS = 20 * 1000;
@@ -66,11 +65,33 @@ type PaseoLike = {
 };
 
 type Persisted = { auto: boolean; events: LimitEvent[] };
+type AgentRoute = { account: string; model: string; at: number };
 
 let armed = false;
 let unsubscribe: (() => void) | null = null;
 let lastPaseo: PaseoLike | null = null;
 const lastSeen = new Map<string, number>();
+
+function routeForAgent(agentId: string): AgentRoute | null {
+  try {
+    for (const line of readFileSync(ROUTES_PATH, "utf8").trim().split(/\r?\n/).reverse()) {
+      const [rawAt, , account = "", , , routedAgentId = "", , model = ""] = line.split("\t");
+      if (routedAgentId !== agentId || !account || account === "-") continue;
+      const at = Number.parseInt(rawAt ?? "", 10);
+      if (Number.isFinite(at)) return { account, model, at };
+    }
+  } catch {
+    // The route log is optional for non-AgentLink providers.
+  }
+  return null;
+}
+
+function continuationNudge(route: AgentRoute | null, matched: string, fallbackModel = ""): string {
+  const account = route?.account ? `account ${route.account}` : "the provider account";
+  const modelName = route?.model || fallbackModel;
+  const model = modelName ? ` on ${modelName}` : "";
+  return `AgentLink: ${account} hit ${matched}${model}. Relaunch through the next eligible account, then continue exactly where you stopped without redoing completed work.`;
+}
 
 function loadState(): Persisted {
   try {
@@ -96,7 +117,7 @@ function record(event: LimitEvent): void {
   saveState(state);
 }
 
-function snapshotOf(update: unknown): { id?: string; status?: string; attentionReason?: string | null; provider?: string; workspaceId?: string | null; title?: string | null } {
+function snapshotOf(update: unknown): { id?: string; status?: string; attentionReason?: string | null; provider?: string; model?: string; workspaceId?: string | null; title?: string | null } {
   const u = update as Record<string, unknown>;
   const snap = (u?.agent ?? u) as Record<string, unknown>;
   return {
@@ -104,6 +125,7 @@ function snapshotOf(update: unknown): { id?: string; status?: string; attentionR
     status: typeof snap?.status === "string" ? snap.status : undefined,
     attentionReason: typeof snap?.attentionReason === "string" ? snap.attentionReason : null,
     provider: typeof snap?.provider === "string" ? snap.provider : "",
+    model: typeof snap?.model === "string" ? snap.model : "",
     workspaceId: typeof snap?.workspaceId === "string" ? snap.workspaceId : null,
     title: typeof snap?.title === "string" ? snap.title : null,
   };
@@ -255,12 +277,21 @@ async function actOnLimitDeath(
     provider: snap.provider ?? "",
     at: new Date(now).toISOString(),
   };
+  const route = routeForAgent(snap.id);
+  const evidence = {
+    account: route?.account,
+    model: route?.model || snap.model || undefined,
+    limit: matched,
+  };
+  const model = route?.model || snap.model || "";
+  const detail = `${route?.account ? `${route.account} · ` : ""}${model ? `${model} · ` : ""}${matched}`;
   const routed = ROUTED_PROVIDERS.test(snap.provider ?? "");
   if (!loadState().auto || !routed) {
     record({
       ...base,
+      ...evidence,
       action: "needs-resume",
-      detail: routed ? matched : `${matched} — no account pool for this provider; resume when its limit resets`,
+      detail: routed ? detail : `${detail} — no account pool for this provider; resume when its limit resets`,
     });
     return;
   }
@@ -269,10 +300,10 @@ async function actOnLimitDeath(
     // Paseo relaunch, and only a relaunch consults the account router.
     const retired = retirePinnedProcess(snap.id);
     if (retired) await new Promise((resolve) => setTimeout(resolve, 1_500));
-    await paseo.agents.ref(snap.id).send(NUDGE);
-    record({ ...base, action: "auto-resumed", detail: retired ? `${matched} (relaunched on a live account)` : matched });
+    await paseo.agents.ref(snap.id).send(continuationNudge(route, matched, snap.model));
+    record({ ...base, ...evidence, action: "auto-resumed", detail: retired ? `${detail} (relaunched through routing)` : detail });
   } catch (error) {
-    record({ ...base, action: "resume-failed", detail: `${matched}: ${String(error)}` });
+    record({ ...base, ...evidence, action: "resume-failed", detail: `${detail}: ${String(error)}` });
   }
 }
 
@@ -371,8 +402,9 @@ export async function handleLimitsResume({ agentId }: { agentId: string }, { pas
   const p = (paseo ?? lastPaseo) as PaseoLike | null;
   if (!p) return { ok: false, error: "no daemon connection yet" };
   try {
-    await p.agents.ref(agentId).send(NUDGE);
     const state = loadState();
+    const event = state.events.find((entry) => entry.agentId === agentId);
+    await p.agents.ref(agentId).send(continuationNudge(routeForAgent(agentId), event?.limit ?? "its usage limit", event?.model));
     state.events = state.events.map((e) => (e.agentId === agentId ? { ...e, action: "auto-resumed" as const } : e));
     saveState(state);
     return { ok: true, error: null };

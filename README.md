@@ -23,7 +23,7 @@
 
 **You can only use one account at a time.** If you have more than one Claude or Codex account, you hit a usage limit on one while the others sit idle. Account-switcher tools swap credentials in and out, which logs running sessions out mid-task. agent-link instead gives each account its own config directory — `CLAUDE_CONFIG_DIR` for Claude Code, `CODEX_HOME` for Codex — so every account is live at the same time. **N accounts, N rate limits.** It never reads, copies or backs up a token, so nothing decays and no running agent is ever signed out.
 
-**A usage limit kills your afternoon.** As an account climbs toward its limit, agent-link drains new work off it; when it hits the wall it is parked until the provider's own reset time; and a conversation that died mid-task continues on a healthy account with a plain `--resume` — or resumes itself, if it was a [Paseo](https://paseo.sh) agent. Claude reports through its statusline and hooks, Codex through its own rollout files. You stop noticing limits.
+**A usage limit kills your afternoon.** As an account climbs toward its limit, agent-link drains new work off it; account-wide limits park the account while named-model limits exclude only that account/model pair; and a conversation that died mid-task continues on an eligible account with a plain `--resume` — or resumes itself, if it was a [Paseo](https://paseo.sh) agent. Claude reports through its statusline and hooks, Codex through its own rollout files. You stop noticing limits.
 
 **Your agents write things you never see.** Dashboards, reports and diagrams land in a worktree you would have to go and find in a terminal. agent-link finds them and renders them — live, inside your editor.
 
@@ -73,7 +73,7 @@ The panel has five operational tabs: **Accounts, Limit sentry, Memory guard, Age
 
 One click installs a **Dynamic Agent Link** provider. Pick that single provider and every new agent passes through a deterministic route: quota/health gate → priority target group → least-recently-used account. The panel labels its **next new launch** forecast separately from the bounded history of real Paseo agents and projects. A running agent is never re-routed: its account is fixed when the process starts, and nothing swaps underneath a live session.
 
-Every agent composer gets a live model pill from Paseo's runtime metadata. Direct agents show their concrete model; AgentRouter shows `AgentRouter → answer model` once its Paseo child exists. Clicking it opens the full provider, model, status, and agent-ID evidence. A hidden runtime says `Unknown (runtime not exposed)` instead of guessing.
+Every agent's **Routing** panel shows its server-derived provider, model, AgentLink account, route decision, and agent ID. AgentRouter keeps control and answer models separate. A hidden runtime says `Unknown (runtime not exposed)` instead of guessing. The composer-pill implementation ships in source, but this compatibility build does not register it because Paseo 0.7.0-beta.1 removes its client import without removing `addClientSide`, which prevents the whole plugin from loading.
 
 The **AgentRouter** tab installs an optional virtual Paseo route for prompts where you want one automatic entry point. Haiku 4.5 is only its control plane: every request is delegated to a concrete Paseo child from an ordered **fast, planning, judgment, build, or browser** target group. Direct Paseo profiles are faster and simpler when you already know the model. Claude and Codex targets still pass through Dynamic Agent Link, so account health and cooldown are preserved.
 
@@ -149,7 +149,7 @@ An account can be signed in and healthy yet still refuse a specific model — a 
 agent-link probe claude claude-fable-5 --park
 #   you@work.com     ok
 #   you@side.com     CANNOT SERVE claude-fable-5
-#       HELD — routing skips it until a probe actually serves
+#       HELD for claude-fable-5 — other Claude models remain routable
 ```
 
 Each account answers one token on that model; `--park` holds the ones that refuse out of rotation. Re-run it after a reset; only a passing call releases the hold.
@@ -189,7 +189,7 @@ So the full lifecycle is hands-off: drain at 85% → park at 99% or on the refus
 
 **Codex gets the same lifecycle with no hooks at all**: every Codex turn writes `used_percent`, the reset time, and a limit-reached flag into its own rollout file, and the router reads the newest one at routing time — 85% flags nearing, 99% or the flag parks until Codex's own reset. `codex resume <id>` and `codex resume --last` route through the same owner-or-healthiest logic as Claude resumes, and `claude -c` / `--continue` finds the newest chat for the current project across every account. Moved transcripts are offset-marked so a dead account's telemetry can never park the healthy account it was moved to.
 
-**Running agents in [Paseo](https://paseo.dev) resume themselves.** The panel's *limit sentry* watches the daemon's agent stream: when an agent errors out and its timeline shows a genuine limit/billing failure (not a conversation about limits), it appears in the Agent Link tab with a one-click **Resume** — and with **Auto** switched on, the sentry nudges the agent immediately. Either way the relaunch goes through the account router, so the conversation continues on a healthy account with nobody watching. And when [Paseo's built-in MCP tools](https://paseo.sh/docs/mcp) are injected into agents (`daemon.mcp.injectIntoAgents`), the synced output style teaches orchestrator agents to revive their own dead subagents with `send_agent_prompt` — recovery that works even before the panel has ever been opened.
+**Running agents in [Paseo](https://paseo.dev) resume themselves.** The panel's *limit sentry* watches the daemon's agent stream: when an agent errors out and its timeline shows a genuine limit/billing failure (not a conversation about limits), it records the exact account, model, and refusal and — with **Auto** on — posts that evidence into the continuation message before relaunching through the next eligible account. A model-only refusal excludes only that account/model pair. And when [Paseo's built-in MCP tools](https://paseo.sh/docs/mcp) are injected into agents (`daemon.mcp.injectIntoAgents`), the synced output style teaches orchestrator agents to revive their own dead subagents with `send_agent_prompt` — recovery that works even before the panel has ever been opened.
 
 **Heavy type-checks cool down instead of taking the Mac with them.** The Paseo panel's memory guard treats each shell/package-runner/compiler chain as one job and permits one job at a time across Paseo agents. If macOS reports 15% memory available or less, a job already using at least 512 MB has its real compiler temporarily suspended with `SIGSTOP`; it continues with `SIGCONT` at 25%. Nothing is killed, provider sessions keep their account, and type-checks started outside Paseo are out of scope. The Agent Link tab shows the live state and has an off switch. Thresholds can be overridden with `AGENT_LINK_TYPECHECK_CONCURRENCY`, `AGENT_LINK_MEMORY_PAUSE_PERCENT`, `AGENT_LINK_MEMORY_RESUME_PERCENT`, and `AGENT_LINK_RESOURCE_POLL_SECONDS`.
 

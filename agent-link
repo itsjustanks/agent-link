@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.5.25"
+VERSION="0.5.26"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -234,16 +234,16 @@ PY2
 }
 
 # The primary has no slot dir, so its cooldown is tracked under "primary".
-slot_available_primary() { # $1 provider
-  local until now
+slot_available_primary() { # $1 provider, $2 requested model
+  local until now reset
   [ -f "$(pools_dir)/hold-$1-primary" ] && return 1
+  model_held "$1" primary "${2:-}" && return 1
   until="$(cat "$(pools_dir)/cooldown-$1-primary" 2>/dev/null || echo 0)"
   now="$(date +%s)"
   [ "$until" -gt "$now" ] && return 1
-  local reset
   if reset="$(recently_refused "$1" "$([ "$1" = claude ] && echo "$HOME/.claude" || echo "$HOME/.codex")")"; then
     autopark "$1" primary "$reset"
-    return 1
+    case "$reset" in hold:model:*) model_held "$1" primary "${2:-}" && return 1 ;; *) return 1 ;; esac
   fi
   if [ "$1" = claude ]; then
     claude_quota_scan primary "$HOME/.claude" || return 1
@@ -322,7 +322,15 @@ for line in tail.splitlines():
         # A guessed one-hour timer made a still-refusing account eligible again.
         # Keep unknown resets out until a real probe serves; maybe_revalidate
         # performs that proof at most once an hour, never once per launch.
-        print("hold:unknown")
+        # Named model limits are scoped to that model. A Fable refusal must not
+        # remove the same account from Sonnet/Opus routing.
+        named = re.search(r"(?:hit|reached)\s+(?:your\s+)?([a-z0-9 ._-]{2,50})\s+limit", low)
+        label = (named.group(1).strip() if named else "")
+        if label and label not in {"session", "weekly", "usage", "rate", "monthly", "spend"}:
+            slug = re.sub(r"[^a-z0-9]+", "-", label).strip("-")
+            print(f"hold:model:{slug}")
+        else:
+            print("hold:unknown")
     else:
         # Never bench longer than one rolling window, never shorter than 10 minutes.
         until = max(now + 10 * 60, min(until, now + 5 * 60 * 60))
@@ -649,6 +657,28 @@ hold_get() { # $1 provider, $2 key — prints the reason if held
 }
 hold_clear() { rm -f "$(pools_dir)/hold-$1-$2"; }
 
+model_key() {
+  printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | sed -E 's/^claude-//; s/[^a-z0-9]+/-/g; s/^-+//; s/-+$//'
+}
+
+model_held() { # provider account model — true only for this requested model
+  local key
+  [ -n "${3:-}" ] || return 1
+  key="$(model_key "$3")"
+  [ -n "$key" ] && [ -f "$(pools_dir)/holdmodel-$1-$2-$key" ]
+}
+
+model_holds_text() { # provider account — comma-separated model slugs
+  local f prefix out="" label
+  prefix="holdmodel-$1-$2-"
+  for f in "$(pools_dir)/$prefix"*; do
+    [ -f "$f" ] || continue
+    label="$(basename "$f")"; label="${label#$prefix}"
+    out="${out}${out:+, }$label"
+  done
+  printf '%s' "$out"
+}
+
 is_limit_refusal_text() {
   printf '%s' "$1" | grep -Eqi "you.?ve (hit|reached) .{0,80}limit|usage limit|rate limit|spend limit|limit reached|credit balance|quota exceeded|out of credits"
 }
@@ -657,6 +687,14 @@ is_limit_refusal_text() {
 autopark() { # $1 provider, $2 key (email or "primary"), $3 until-epoch or hold:<reason>
   mkdir -p "$(pools_dir)"
   case "${3:-}" in
+  hold:model:*)
+    local model_slug="${3#hold:model:}"
+    [ -n "$model_slug" ] || return 1
+    printf '%s\n' "model limit refusal — probe this model to release" > "$(pools_dir)/holdmodel-$1-$2-$model_slug"
+    ( cmd_evict "$1" "$model_slug" >/dev/null 2>&1 & )
+    echo "$(date '+%Y-%m-%d %H:%M')  HELD $1/$2 for model $model_slug" >> "$STATE/autopark.log"
+    return 0
+    ;;
   hold|hold:spend|hold:unknown)
     local hold_reason="limit refusal with no verified reset — release only after Probe accounts serves"
     [ "${3:-}" = hold:spend ] && hold_reason="monthly spend limit — raise it at claude.ai/settings/usage, then probe the account"
@@ -678,18 +716,19 @@ autopark() { # $1 provider, $2 key (email or "primary"), $3 until-epoch or hold:
   echo "$(date '+%Y-%m-%d %H:%M')  auto-parked $1/$2 after a limit refusal" >> "$STATE/autopark.log"
 }
 
-slot_available() { # $1 provider, $2 email
+slot_available() { # $1 provider, $2 email, $3 requested model
   local until now reset actual
   prov_logged_in "$1" "$(slot_dir "$1" "$2")" || return 1
   actual="$(prov_email "$1" "$(slot_dir "$1" "$2")")"
   [ -n "$actual" ] && [ "$actual" != "$2" ] && return 1
   [ -f "$(pools_dir)/hold-$1-$2" ] && return 1
+  model_held "$1" "$2" "${3:-}" && return 1
   until="$(cat "$(pools_dir)/cooldown-$1-$2" 2>/dev/null || echo 0)"
   now="$(date +%s)"
   [ "$until" -gt "$now" ] && return 1
   if reset="$(recently_refused "$1" "$(slot_dir "$1" "$2")")"; then
     autopark "$1" "$2" "$reset"
-    return 1
+    case "$reset" in hold:model:*) model_held "$1" "$2" "${3:-}" && return 1 ;; *) return 1 ;; esac
   fi
   if [ "$1" = claude ]; then
     claude_quota_scan "$2" "$(slot_dir "$1" "$2")" || return 1
@@ -1040,14 +1079,21 @@ EOF
 # be re-pointed — but it can be ended, and the next message then relaunches it
 # through the launcher, which picks a live account. Only processes bound to a
 # HELD (refusing) account are touched: they cannot serve anything anyway.
-cmd_evict() { # [provider] — end processes pinned to a held account
-  local p="${1:-claude}" pid dir key ended=0 until_ts
+cmd_evict() { # [provider] [model-slug] — end processes pinned to a held account/model
+  local p="${1:-claude}" model_slug="${2:-}" pid dir key ended=0 until_ts command
   prov_valid "$p" || { echo "usage: agent-link evict [claude]" >&2; return 1; }
   [ "$p" = claude ] || { echo "evict supports claude only" >&2; return 1; }
   for pid in $(ps -axo pid,command | grep "[c]laude " | awk '{print $1}'); do
     dir="$(ps eww -p "$pid" 2>/dev/null | tr ' ' '\n' | grep '^CLAUDE_CONFIG_DIR=' | head -1 | cut -d= -f2-)"
     [ -n "$dir" ] || continue
     key="$(basename "$dir")"
+    if [ -n "$model_slug" ]; then
+      [ -f "$(pools_dir)/holdmodel-$p-$key-$model_slug" ] || continue
+      command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+      case "$command" in *"$model_slug"*) ;; *) continue ;; esac
+      kill "$pid" 2>/dev/null && ended=$((ended+1))
+      continue
+    fi
     # A timed cooldown is just as fatal as a hold while it lasts: a session
     # limit resets at midnight, and until then every message to that pinned
     # process comes back refused. Retire on either.
@@ -1277,12 +1323,17 @@ cmd_prefer() { # $1 provider [$2 email|primary] [first|last|clear]
 }
 
 record_route_decision() { # provider target decision group
-  local route_log route_lines agent_id route_cwd
+  local route_log route_lines agent_id route_cwd route_model agent_file
   mkdir -p "$(pools_dir)"
   route_log="$(pools_dir)/routes.log"
   agent_id="$(printf '%s' "${PASEO_AGENT_ID:-}" | tr '\t\r\n' '   ')"
   route_cwd="$(printf '%s' "${PASEO_AGENT_CWD:-$PWD}" | tr '\t\r\n' '   ')"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date +%s)" "$1" "$2" "$3" "$4" "$agent_id" "$route_cwd" >> "$route_log"
+  route_model="$(printf '%s' "${AGENT_LINK_ROUTE_MODEL:-}" | tr '\t\r\n' '   ')"
+  if [ -z "$route_model" ] && [ -n "$agent_id" ]; then
+    agent_file="$(find "${PASEO_HOME:-$HOME/.paseo}/agents" -maxdepth 2 -type f -name "$agent_id.json" -print -quit 2>/dev/null || true)"
+    [ -n "$agent_file" ] && route_model="$(sed -n 's/.*"model":[[:space:]]*"\([^"]*\)".*/\1/p' "$agent_file" | head -1)"
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date +%s)" "$1" "$2" "$3" "$4" "$agent_id" "$route_cwd" "$route_model" >> "$route_log"
   route_lines="$(wc -l < "$route_log" 2>/dev/null | tr -d ' ' || echo 0)"
   if [ "${route_lines:-0}" -gt 240 ]; then
     tail -n 200 "$route_log" > "$route_log.tmp" && mv "$route_log.tmp" "$route_log"
@@ -1290,8 +1341,8 @@ record_route_decision() { # provider target decision group
 }
 
 # Print the slot to use next ("primary" or an email), and stamp it as used.
-pick_slot() { # $1 provider
-  local best="" best_ts="" e ts pemail covered pass decision="" rank_label="standard"
+pick_slot() { # $1 provider, $2 dry|live, $3 requested model
+  local best="" best_ts="" e ts pemail covered pass decision="" rank_label="standard" model="${3:-}"
   maybe_revalidate "$1"
   mkdir -p "$(pools_dir)"
   # The primary counts as a candidate unless a slot already holds that account.
@@ -1306,14 +1357,14 @@ pick_slot() { # $1 provider
   # when nothing unflagged is available — drain new work off them early.
   local rank best_rank=""
   for pass in fresh nearing; do
-    if [ -n "$pemail" ] && [ -z "$covered" ] && slot_available_primary "$1"; then
+    if [ -n "$pemail" ] && [ -z "$covered" ] && slot_available_primary "$1" "$model"; then
       if [ "$pass" = nearing ] || ! slot_nearing "$1" primary; then
         ts="$(cat "$(pools_dir)/last-$1-primary" 2>/dev/null || echo 0)"
         best="primary"; best_ts="$ts"; best_rank="$(pref_rank "$1" primary)"
       fi
     fi
     for e in $(slot_list "$1"); do
-      slot_available "$1" "$e" || continue
+      slot_available "$1" "$e" "$model" || continue
       [ "$pass" = fresh ] && slot_nearing "$1" "$e" && continue
       ts="$(cat "$(pools_dir)/last-$1-$e" 2>/dev/null || echo 0)"
       rank="$(pref_rank "$1" "$e")"
@@ -1414,7 +1465,7 @@ fi
 
 # One place that knows how an account should look: dot colour + words.
 slot_state() { # $1 provider, $2 email -> "dot|state|note"
-  local dir got until now last mins runs
+  local dir got until now last mins runs held_models suffix
   dir="$(slot_dir "$1" "$2")"
   if ! prov_logged_in "$1" "$dir"; then
     printf '%s|%s|%s' "${C_YELLOW}○${C_OFF}" "not logged in" "run 'l' to log in"
@@ -1428,6 +1479,8 @@ slot_state() { # $1 provider, $2 email -> "dot|state|note"
   now="$(date +%s)"
   until="$(cat "$(pools_dir)/cooldown-$1-$2" 2>/dev/null || echo 0)"
   last="$(cat "$(pools_dir)/last-$1-$2" 2>/dev/null || echo 0)"
+  held_models="$(model_holds_text "$1" "$2")"
+  suffix="${held_models:+ · unavailable: $held_models}"
   if [ "$until" -gt "$now" ]; then
     printf '%s|%s|%s' "${C_RED}●${C_OFF}" "logged in" "parked $(( (until - now + 59) / 60 ))m — $(cat "$(pools_dir)/reason-$1-$2" 2>/dev/null || echo 'routing skips it')"
     return
@@ -1436,9 +1489,9 @@ slot_state() { # $1 provider, $2 email -> "dot|state|note"
   runs="$(cat "$(pools_dir)/count-$1-$2" 2>/dev/null || echo 0)"
   if [ "$last" -gt 0 ]; then
     mins=$(( (now - last) / 60 ))
-    printf '%s|%s|%s' "${C_GREEN}●${C_OFF}" "logged in" "in rotation · ${runs} launches · last ${mins}m ago"
+    printf '%s|%s|%s' "${C_GREEN}●${C_OFF}" "logged in" "in rotation · ${runs} launches · last ${mins}m ago${suffix}"
   else
-    printf '%s|%s|%s' "${C_GREEN}●${C_OFF}" "logged in" "in rotation · never used"
+    printf '%s|%s|%s' "${C_GREEN}●${C_OFF}" "logged in" "in rotation · never used${suffix}"
   fi
 }
 
@@ -1687,19 +1740,23 @@ IFS="\$old_ifs"
 aa_sid=""
 aa_cont=""
 aa_prev=""
+aa_model=""
 for aa_a in "\$@"; do
   case "\$aa_a" in
     --resume=*) aa_sid="\${aa_a#--resume=}" ;;
+    --model=*) aa_model="\${aa_a#--model=}" ;;
     $cont_flags) aa_cont=1 ;;
     -*) ;;
     *)
       case "\$aa_prev" in
         --resume|-r|resume) aa_sid="\$aa_a" ;;
+        --model) aa_model="\$aa_a" ;;
       esac
       ;;
   esac
   aa_prev="\$aa_a"
 done
+[ -n "\$aa_model" ] && export AGENT_LINK_ROUTE_MODEL="\$aa_model"
 # Paseo starts Codex as an app-server, then sends the thread id over RPC. That
 # means it is absent from argv when this launcher has to choose an account.
 # Paseo does provide the persisted agent id, so recover the thread id from that
@@ -1718,7 +1775,7 @@ if [ -n "\${$env_var:-}" ]; then aa_sid=""; aa_cont=""; fi
 # "continue" means the newest chat — which may live in any account. The CLI
 # finds it and routes it like a resume of that session.
 if [ -z "\$aa_sid" ] && [ -n "\$aa_cont" ] && [ -x "$self" ]; then
-  aa_pin="\$("$self" continue-target $p "\$PWD" --go 2>/dev/null || true)"
+  aa_pin="\$("$self" continue-target $p "\$PWD" --go "\$aa_model" 2>/dev/null || true)"
 fi
 if [ -n "\$aa_sid" ]; then
   # The CLI resolves which account owns this session — and when that account is
@@ -1726,7 +1783,7 @@ if [ -n "\$aa_sid" ]; then
   # healthy account and answers with THAT dir, so a plain --resume recovers a
   # chat that died on a limit. "primary" means: leave the env var unset.
   if [ -x "$self" ]; then
-    aa_pin="\$("$self" resume-target $p "\$aa_sid" --go 2>/dev/null || true)"
+    aa_pin="\$("$self" resume-target $p "\$aa_sid" --go "\$aa_model" 2>/dev/null || true)"
   fi
   if [ -z "\$aa_pin" ]; then
     # The CLI was missing or failed — at least pin to the owner so the resume
@@ -1749,7 +1806,14 @@ if [ -z "\${$env_var:-}" ] && [ "\$aa_pin" != primary ]; then
   if [ -n "\$aa_pin" ]; then
     export $env_var="\$aa_pin"
   elif [ -x "$self" ]; then
-    slot="\$("$self" pick $p 2>/dev/null || true)"
+    # Paseo starts short-lived provider discovery processes from / without an
+    # agent id. They need a valid account, but they are not real launches and
+    # must not advance LRU or inflate launch counts.
+    if [ -z "\${PASEO_AGENT_ID:-}" ] && [ -z "\${PASEO_AGENT_CWD:-}" ] && [ "\$PWD" = / ]; then
+      slot="\$("$self" pick $p dry "\$aa_model" 2>/dev/null || true)"
+    else
+      slot="\$("$self" pick $p live "\$aa_model" 2>/dev/null || true)"
+    fi
     if [ -z "\$slot" ]; then
       echo "agent-link: no healthy $p account is available; wait for a cooldown or release an account" >&2
       exit 75
@@ -1918,18 +1982,18 @@ cmd_handoff() { # $1 provider, $2 session-id, $3 target email|primary
 # or was just refused for a limit, the transcript is handed to the healthiest
 # other account and THAT dir is printed. This is what lets a chat that died on
 # a limit continue with a plain --resume, no rescue by hand.
-cmd_resume_target() { # $1 provider, $2 session-id [--go]
+cmd_resume_target() { # $1 provider, $2 session-id [--go] [model]
   prov_valid "${1:-}" && [ -n "${2:-}" ] || {
     echo "usage: agent-link resume-target <claude|codex> <session-id> [--go]" >&2; return 1; }
   # Without --go this is a pure query: it prints where a resume would land and
   # touches nothing. The launchers pass --go, which is when the transcript
   # actually moves and the LRU stamp is written.
-  local p="$1" sid="$2" go="" owner owner_dir healthy="" e ts best="" best_ts="" pemail covered dest_dir
+  local p="$1" sid="$2" go="" model="${4:-}" owner owner_dir healthy="" e ts best="" best_ts="" pemail covered dest_dir
   [ "${3:-}" = --go ] && go=1
   owner="$(session_owner "$p" "$sid")" || return 0
   owner_dir="$(session_dir "$p" "$owner")"
-  if [ "$owner" = primary ]; then slot_available_primary "$p" && healthy=1
-  else slot_available "$p" "$owner" && healthy=1; fi
+  if [ "$owner" = primary ]; then slot_available_primary "$p" "$model" && healthy=1
+  else slot_available "$p" "$owner" "$model" && healthy=1; fi
   if [ -n "$healthy" ]; then
     if [ -n "$go" ]; then
       local owner_group="standard" owner_rank
@@ -1953,14 +2017,14 @@ cmd_resume_target() { # $1 provider, $2 session-id [--go]
   fi
   local pass rank best_rank=""
   for pass in fresh nearing; do
-    if [ -n "$pemail" ] && [ "$owner" != primary ] && [ -z "$covered" ] && slot_available_primary "$p"; then
+    if [ -n "$pemail" ] && [ "$owner" != primary ] && [ -z "$covered" ] && slot_available_primary "$p" "$model"; then
       if [ "$pass" = nearing ] || ! slot_nearing "$p" primary; then
         best=primary; best_ts="$(cat "$(pools_dir)/last-$p-primary" 2>/dev/null || echo 0)"; best_rank="$(pref_rank "$p" primary)"
       fi
     fi
     for e in $(slot_list "$p"); do
       [ "$e" = "$owner" ] && continue
-      slot_available "$p" "$e" || continue
+      slot_available "$p" "$e" "$model" || continue
       [ "$pass" = fresh ] && slot_nearing "$p" "$e" && continue
       ts="$(cat "$(pools_dir)/last-$p-$e" 2>/dev/null || echo 0)"
       rank="$(pref_rank "$p" "$e")"
@@ -2018,12 +2082,12 @@ cmd_continue_target() { # $1 provider, $2 cwd [--go]
     sid="$(basename "$best" .jsonl | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' || true)"
     [ -n "$sid" ] || return 0
   fi
-  cmd_resume_target "$p" "$sid" "${3:-}"
+  cmd_resume_target "$p" "$sid" "${3:-}" "${4:-}"
 }
 
 cmd_pick() { # provider — print the account to use next (used by the launchers)
   prov_valid "${1:-}" || { echo "usage: agent-link pick <claude|codex>" >&2; return 1; }
-  pick_slot "$1"
+  pick_slot "$@"
 }
 
 cmd_cooldown() { # provider email minutes — park an exhausted account
@@ -2052,7 +2116,7 @@ cmd_cooldown() { # provider email minutes — park an exhausted account
 # unreliable — an account marked "out of credits" can still serve, and one that
 # looks fine can refuse — so this measures instead of guessing.
 cmd_probe() { # $1 provider (default claude), $2 model, [--park]
-  local p="${1:-claude}" model="${2:-}" park="" e dir out rc ok
+  local p="${1:-claude}" model="${2:-}" park="" e dir out rc ok model_slug
   case "${3:-}" in --park) park=1 ;; esac
   prov_valid "$p" || { echo "usage: agent-link probe <claude|codex> [model] [--park]" >&2; return 1; }
   [ "$p" = claude ] || { echo "probe currently supports claude only" >&2; return 1; }
@@ -2084,6 +2148,11 @@ cmd_probe() { # $1 provider (default claude), $2 model, [--park]
       printf '%sok%s\n' "$C_GREEN" "$C_OFF"
     fi
     if [ -n "$ok" ]; then
+      model_slug="$(model_key "$model")"
+      if [ -n "$model_slug" ] && [ -f "$(pools_dir)/holdmodel-$p-$e-$model_slug" ]; then
+        rm -f "$(pools_dir)/holdmodel-$p-$e-$model_slug"
+        echo "      released ${model:-model} — it just served"
+      fi
       # Proof of service releases whatever was holding the account back.
       if [ -f "$(pools_dir)/hold-$p-$e" ] || [ -f "$(pools_dir)/cooldown-$p-$e" ]; then
         rm -f "$(pools_dir)/hold-$p-$e" "$(pools_dir)/cooldown-$p-$e" "$(pools_dir)/reason-$p-$e"
@@ -2097,8 +2166,13 @@ cmd_probe() { # $1 provider (default claude), $2 model, [--park]
           echo "      HELD (spend limit) — no expiry; probe again or clear to release"
           ;;
         *)
-          autopark "$p" "$e" hold:unknown
-          echo "      HELD — routing skips it until a probe actually serves"
+          if [ -n "$model" ]; then
+            autopark "$p" "$e" "hold:model:$(model_key "$model")"
+            echo "      HELD for $model — other Claude models remain routable"
+          else
+            autopark "$p" "$e" hold:unknown
+            echo "      HELD — routing skips it until a probe actually serves"
+          fi
           ;;
       esac
     fi

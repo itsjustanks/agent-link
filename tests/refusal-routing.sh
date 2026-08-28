@@ -8,15 +8,20 @@ trap 'rm -rf "$fixture_root"' EXIT
 account="test@example.com"
 account_dir="$fixture_root/accounts/claude/$account"
 mkdir -p "$account_dir/projects/fixture"
+printf '%s\n' '{"oauthAccount":{"emailAddress":"test@example.com"}}' > "$account_dir/.claude.json"
 printf '%s\n' '{"isApiErrorMessage":true,"message":"You'"'"'ve reached your Fable 5 limit."}' \
   > "$account_dir/projects/fixture/refusal.jsonl"
 
 AGENT_LINK_HOME="$fixture_root" CLAUDE_CONFIG_DIR="$account_dir" \
   "$repo_root/agent-link" refused claude >/dev/null
 
-test -f "$fixture_root/state/pools/hold-claude-$account"
+test -f "$fixture_root/state/pools/holdmodel-claude-$account-fable-5"
+test ! -f "$fixture_root/state/pools/hold-claude-$account"
 test ! -f "$fixture_root/state/pools/cooldown-claude-$account"
-grep -q "awaiting successful probe" "$fixture_root/state/pools/reason-claude-$account"
+
+# The model hold excludes this account only for Fable, not every Claude model.
+test "$(HOME="$fixture_root" AGENT_LINK_HOME="$fixture_root" "$repo_root/agent-link" pick claude dry claude-fable-5 2>/dev/null || true)" != "$account"
+test "$(HOME="$fixture_root" AGENT_LINK_HOME="$fixture_root" "$repo_root/agent-link" pick claude dry claude-sonnet-5 2>/dev/null)" = "$account"
 
 # A transport/auth/process failure is not proof that a held account recovered.
 mkdir -p "$fixture_root/bin"

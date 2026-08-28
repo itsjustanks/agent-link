@@ -20,6 +20,7 @@ export const SlotSchema = z.object({
   parkReason: z.string(), // why it is parked, "" when not parked
   outputStyle: z.string(), // active output style, "" when unset
   settingsDrift: z.array(z.string()), // preference keys that differ from the primary
+  modelHolds: z.array(z.string()), // model slugs this account cannot currently serve
 });
 export type Slot = z.infer<typeof SlotSchema>;
 
@@ -39,6 +40,7 @@ export const RouteEventSchema = z.object({
   group: z.enum(["preferred", "standard", "reserve", "fallback"]),
   agentId: z.string(),
   cwd: z.string(),
+  model: z.string(),
 });
 export type RouteEvent = z.infer<typeof RouteEventSchema>;
 
@@ -59,6 +61,7 @@ export const scan = defineRpc({
         parkReason: z.string(),
         preference: z.enum(["preferred", "standard", "reserve"]),
         nearing: z.boolean(),
+        modelHolds: z.array(z.string()),
         duplicated: z.boolean(), // an account slot already holds this account
       }),
     ),
@@ -116,6 +119,8 @@ export const RouterTraceNodeSchema = z.object({
   model: z.string(),
   status: z.string(),
   note: z.string(),
+  account: z.string(),
+  routedAt: z.number(),
 });
 export type RouterTraceNode = z.infer<typeof RouterTraceNodeSchema>;
 

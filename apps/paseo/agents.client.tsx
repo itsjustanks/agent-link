@@ -579,7 +579,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                   <Text style={t.text.bodyStrong}>Recent launches</Text>
                   {routeHistory.map((route, index) => (
                     <Text key={`${route.at}-${route.email}-${index}`} style={t.text.caption}>
-                      {`${agoLabel(route.at)} · ${route.email === "primary" ? primaryEmail(entry.provider) : route.email} · ${route.agentId ? `Paseo ${route.agentId}` : "non-Paseo launch"}${route.cwd ? ` · ${routeLocation(route.cwd)}` : ""}`}
+                      {`${agoLabel(route.at)} · ${route.email === "primary" ? primaryEmail(entry.provider) : route.email}${route.model ? ` · ${route.model}` : ""} · ${route.agentId ? `Paseo ${route.agentId}` : "non-Paseo launch"}${route.cwd ? ` · ${routeLocation(route.cwd)}` : ""}`}
                     </Text>
                   ))}
                 </View>
@@ -870,6 +870,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
       lastRoute?.cwd ? { value: routeLocation(lastRoute.cwd) } : null,
       slot.creditNote ? { value: slot.creditNote, tone: "attention" } : null,
       usage && usage.limitHits > 0 ? { value: plural(usage.limitHits, "limit refusal", "limit refusals"), tone: "error" } : null,
+      slot.modelHolds.length > 0 ? { value: `unavailable: ${slot.modelHolds.join(", ")}`, tone: "attention" } : null,
     ];
     const open = Boolean(openRows[slot.dir]);
     return (
@@ -891,6 +892,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
               <StatusPill status={status} label={label} />
               {nextUpKeys[slot.provider] === slot.dir ? <Tag label="next new launch" tone="busy" /> : null}
               {shared ? <Tag label="shared quota" tone="attention" /> : null}
+              {slot.modelHolds.map((model) => <Tag key={model} label={`${model} limited`} tone="attention" />)}
             </View>
             <Facts items={facts.slice(0, 5)} />
             {capacity ? <CapacitySummary entry={capacity} /> : null}
@@ -958,6 +960,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
               <StatusPill status={status} label={label} />
               {nextUpKeys[provider] === key ? <Tag label="next new launch" tone="busy" /> : null}
               {shared ? <Tag label="shared quota" tone="attention" /> : null}
+              {info?.modelHolds.map((model) => <Tag key={model} label={`${model} limited`} tone="attention" />)}
             </View>
             <Facts
               items={[
@@ -1303,6 +1306,8 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                 meta={
                   <>
                     <Tag label={event.provider} />
+                    {event.account ? <Tag label={event.account} tone="attention" /> : null}
+                    {event.model ? <Tag label={event.model} /> : null}
                     <Tag label={agoLabel(Math.floor(new Date(event.at).getTime() / 1000)) } />
                   </>
                 }
@@ -1462,7 +1467,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
           <Text style={t.text.heading}>Do running agents switch accounts?</Text>
           <Text style={t.text.body}>No. A running process stays fixed. A failed resume moves its conversation before relaunch.</Text>
           <Text style={t.text.heading}>Why can the first launch still hit a limit?</Text>
-          <Text style={t.text.body}>Claude does not expose fresh quota for every account without a model call. Routing uses its latest telemetry; after a refusal, that account stays held until a real probe serves.</Text>
+          <Text style={t.text.body}>Claude does not expose fresh quota for every account without a model call. Routing uses its latest telemetry; a named-model refusal excludes that account only for that model, while spend and generic limits hold the whole account until a real probe serves.</Text>
           <Text style={t.text.heading}>How do I add an account?</Text>
           <Text style={t.text.body}>Open Accounts, choose its provider, press + Add account, then finish the browser sign-in using the command shown.</Text>
           <CodeBlock>{"agent-link status\nagent-link auto\nagent-link login all\nagent-link cooldown"}</CodeBlock>
@@ -1518,6 +1523,7 @@ export function AgentRoutingPanel({ theme, layout, agentId }: PluginAgentPanelPr
                 items={[
                   { value: node.source === "control" ? "control plane" : node.source === "paseo" ? "answer model" : "model hidden" },
                   { value: `${node.provider} / ${node.model}` },
+                  { value: `account: ${node.account}` },
                   { value: `agent: ${node.id}` },
                 ]}
               />

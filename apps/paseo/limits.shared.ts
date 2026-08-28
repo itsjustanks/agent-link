@@ -14,6 +14,9 @@ export const LimitEventSchema = z.object({
   at: z.string(),
   action: z.enum(["auto-resumed", "needs-resume", "resume-failed"]),
   detail: z.string(),
+  account: z.string().optional(),
+  model: z.string().optional(),
+  limit: z.string().optional(),
 });
 export type LimitEvent = z.infer<typeof LimitEventSchema>;
 

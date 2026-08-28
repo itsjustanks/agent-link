@@ -154,8 +154,8 @@ export function envVarFor(provider: "claude" | "codex"): string {
   return provider === "claude" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME";
 }
 
-function collectSlots(): Array<Omit<Slot, "wiredProviderId" | "cooldownUntil" | "launches" | "lastUsed" | "preference" | "nearing" | "creditNote" | "blocked" | "parkReason" | "outputStyle" | "settingsDrift">> {
-  const slots: Array<Omit<Slot, "wiredProviderId" | "cooldownUntil" | "launches" | "lastUsed" | "preference" | "nearing" | "creditNote" | "blocked" | "parkReason" | "outputStyle" | "settingsDrift">> = [];
+function collectSlots(): Array<Omit<Slot, "wiredProviderId" | "cooldownUntil" | "launches" | "lastUsed" | "preference" | "nearing" | "creditNote" | "blocked" | "parkReason" | "outputStyle" | "settingsDrift" | "modelHolds">> {
+  const slots: Array<Omit<Slot, "wiredProviderId" | "cooldownUntil" | "launches" | "lastUsed" | "preference" | "nearing" | "creditNote" | "blocked" | "parkReason" | "outputStyle" | "settingsDrift" | "modelHolds">> = [];
   const seen = new Set<string>();
   const add = (provider: "claude" | "codex", dir: string, source: "agent-link" | "external") => {
     if (seen.has(dir)) return;
@@ -746,15 +746,38 @@ function recentRouteEvents(): RouteEvent[] {
       .slice(-20)
       .reverse()
       .flatMap((line) => {
-        const [rawAt, provider, email, decision, group, agentId = "", cwd = ""] = line.split("\t");
+        const [rawAt, provider, email, decision, group, agentId = "", cwd = "", model = ""] = line.split("\t");
         const at = Number.parseInt(rawAt ?? "", 10);
         if (!Number.isFinite(at) || (provider !== "claude" && provider !== "codex") || !email) return [];
         if (group !== "preferred" && group !== "standard" && group !== "reserve" && group !== "fallback") return [];
-        return [{ at, provider, email, decision: decision || "routed", group, agentId, cwd }];
+        return [{ at, provider, email, decision: decision || "routed", group, agentId, cwd, model }];
       });
   } catch {
     return [];
   }
+}
+
+function routeForAgent(agentId: string): RouteEvent | null {
+  try {
+    const lines = readFileSync(join(poolsDir(), "routes.log"), "utf8").trim().split(/\r?\n/).reverse();
+    for (const line of lines) {
+      const [rawAt, provider, email, decision, group, routedAgentId = "", cwd = "", model = ""] = line.split("\t");
+      if (routedAgentId !== agentId || (provider !== "claude" && provider !== "codex") || !email) continue;
+      if (group !== "preferred" && group !== "standard" && group !== "reserve" && group !== "fallback") continue;
+      const at = Number.parseInt(rawAt ?? "", 10);
+      if (!Number.isFinite(at)) continue;
+      return { at, provider, email, decision: decision || "routed", group, agentId: routedAgentId, cwd, model };
+    }
+  } catch {
+    // No route evidence yet.
+  }
+  return null;
+}
+
+function displayedRouteAccount(route: RouteEvent | null): string {
+  if (!route) return "Unknown (no AgentLink launch record)";
+  if (route.email !== "primary") return route.email;
+  return route.provider === "claude" ? claudeAccountEmail(HOME) || "primary" : codexAccountEmail(join(HOME, ".codex")) || "primary";
 }
 
 export async function handleProbeAccounts({
@@ -836,6 +859,19 @@ function parkReason(provider: string, email: string): string {
   }
 }
 
+function modelHolds(provider: string, email: string): string[] {
+  const prefix = `holdmodel-${provider}-${email}-`;
+  try {
+    return readdirSync(poolsDir())
+      .filter((name) => name.startsWith(prefix))
+      .map((name) => name.slice(prefix.length))
+      .filter(Boolean)
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
 function cooldownUntil(provider: string, email: string): number {
   try {
     const raw = readFileSync(join(poolsDir(), `cooldown-${provider}-${email}`), "utf8").trim();
@@ -892,6 +928,7 @@ export async function handleScan(_input: Record<string, never>, { paseo }: Plugi
       parkReason: parked,
       outputStyle: drift.style,
       settingsDrift: drift.drift,
+      modelHolds: modelHolds(slot.provider, slot.email),
       lastUsed: poolNumber("last", slot.provider, slot.email),
     };
   });
@@ -917,6 +954,7 @@ export async function handleScan(_input: Record<string, never>, { paseo }: Plugi
         parkReason: parkReason(provider, "primary"),
         preference: routePreference(provider, "primary"),
         nearing: nearingLimit(provider, "primary"),
+        modelHolds: modelHolds(provider, "primary"),
         duplicated: routingSlots.some((slot) => slot.provider === provider && (slot.actualEmail || slot.email) === email),
       };
     }),
@@ -1147,6 +1185,7 @@ export async function handleRouterTrace({ agentId }: { agentId: string }, { pase
   if (!agent) return { isAgentRouter: false, summary: "Agent is no longer available.", nodes: [] };
   const controlIdentity = resolveRuntimeModel(agent.provider, agent.model);
   const isAgentRouter = controlIdentity.provider === ROUTER_PROVIDER_ID;
+  const controlRoute = routeForAgent(agent.id);
 
   const nodes: RouterTraceNode[] = [
     {
@@ -1155,7 +1194,9 @@ export async function handleRouterTrace({ agentId }: { agentId: string }, { pase
       title: agent.title ?? "Agent",
       ...controlIdentity,
       status: agent.status,
-      note: isAgentRouter ? "Control plane only; this should nominate a Paseo child." : "Direct Paseo agent.",
+      note: isAgentRouter ? "Control plane only; this should nominate a Paseo child." : controlRoute?.decision ?? "Direct Paseo agent.",
+      account: displayedRouteAccount(controlRoute),
+      routedAt: controlRoute?.at ?? 0,
     },
   ];
 
@@ -1167,6 +1208,7 @@ export async function handleRouterTrace({ agentId }: { agentId: string }, { pase
   }
   for (const child of children) {
     const identity = resolveRuntimeModel(child.provider, child.model);
+    const childRoute = child.id ? routeForAgent(child.id) : null;
     nodes.push({
       source: "paseo" as const,
       id: child.id ?? "unknown",
@@ -1174,6 +1216,8 @@ export async function handleRouterTrace({ agentId }: { agentId: string }, { pase
       ...identity,
       status: child.archivedAt ? "archived" : child.status ?? "unknown",
       note: "Concrete Paseo delegation; provider and model are auditable.",
+      account: displayedRouteAccount(childRoute),
+      routedAt: childRoute?.at ?? 0,
     });
   }
 
@@ -1192,6 +1236,8 @@ export async function handleRouterTrace({ agentId }: { agentId: string }, { pase
           model: "Unknown (runtime not exposed)",
           status: item.status,
           note: "Provider-internal subagent; this bypasses auditable AgentRouter target selection.",
+          account: "Unknown (provider-internal)",
+          routedAt: 0,
         });
       }
     } catch {
