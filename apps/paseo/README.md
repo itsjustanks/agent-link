@@ -27,6 +27,8 @@ The surface has top-level tabs for **Accounts, Limit sentry, Memory guard, Agent
 - **Activity in account Details** — an on-request Claude and Codex transcript scan for sessions, input/output/reasoning tokens, cache rate, context window, projects, and models actually used.
 - **Credit state** — when an account has hit a spend limit, its row says so (Claude records the reason in its own config), instead of you finding out when an agent dies.
 - **Rotation usage** — a bar and a count showing how many agents the router has handed each account and when it was last used, so you can see the rotation actually spreading. This is launch distribution, separate from the provider quota shown in **Available capacity**.
+- **Last Paseo consumer** — routed launches retain the exact Paseo agent ID and working directory, so duplicate rows reveal which agent last used their shared quota.
+- **Probe accounts** — an explicit measured Claude turn from the UI; it cools refusing accounts and releases held accounts that prove they can serve. Heartbeat never performs this paid check.
 - **Memory guard tab** — one Paseo-owned TypeScript check runs at a time; under critical pressure it is paused, not killed, and continued after the machine recovers. Checks launched from Terminal are never touched.
 - **+ Add account** — creates the slot for a new account and hands you the one command to finish sign-in. The browser step itself stays in a terminal because both CLIs ask you to paste a code back; the row turns green once you have (and flags a mismatch if you signed in as someone else)
 - **Automatic routing row** — one click wires a single `Claude (Dynamic Agent Link)` / `Codex (Dynamic Agent Link)` provider. The first row shows the next account and recent decisions; each account row carries its own priority, quota, cooldown, and rotation evidence. Selection is deterministic: health gate → priority group → least-recently-used target. The model is inspired by [Plexus](https://github.com/mcowger/plexus) (MIT), adapted to process launches; a running agent is never re-routed, and an all-parked pool blocks cleanly instead of launching a known-dead primary.
@@ -39,9 +41,10 @@ The surface has top-level tabs for **Accounts, Limit sentry, Memory guard, Agent
 
 ## 🔌 MCP
 
-A universal manager for **user-level** MCP servers across every provider on the machine — Claude Code and Codex primaries (labeled with their actual account), every wired provider, every account slot, plus Kimi Code and Grok. One row per server, one column-equivalent per destination:
+A universal manager for **user-level** MCP servers across every provider on the machine — Claude Code and Codex primaries (labeled with their actual account), every wired provider, every account slot, plus Kimi Code and Grok. Five operational tabs separate **Servers, Connections, Diagnostics, Transfer, and FAQs**; a selected server uses the full panel width instead of a cramped right rail.
 
-- **Sticky header** with search and **All / Gaps / Issues** tabs
+- **Servers** — search plus **All / Gaps / Issues**, with full-width server and destination editing after selection
+- **Connections** — Claude and Codex provider tabs, then OAuth status and actions per account
 - **Health check** — HTTP servers get a real request (a 401/403 is reported as **auth needed**, which is the honest answer to "does this need authorizing?"); stdio servers get a binary-on-PATH check. 🟢 / 🟠 / 🔴 per server.
 - **Expand** a server for its destination table: present or missing per destination, add or remove there
 - **Edit** — every destination's own definition, side by side. Different auth per account is expected and supported: change one account's header and save just that destination, or take one destination's version and **Use for ALL**.
@@ -50,7 +53,7 @@ A universal manager for **user-level** MCP servers across every provider on the 
 - **Add server** — http or stdio, headers/env as `KEY=VALUE` lines, targeting all destinations or specific ones
 - **Edit as JSON** — a `Fields | JSON` switch on every destination. You always type the shape people actually paste out of a README (Claude's), and TOML destinations are translated on the way in and out, so you never have to know that Codex spells headers `http_headers`. Validate before saving, Preview shows exactly what the destination will hold in its own format with any dropped keys named, and errors point at a line and column with a caret.
 - **Paste JSON to import** — accepts `{"mcpServers":{…}}`, `{"servers":{…}}`, a single named entry, a bare definition, a `claude mcp add-json` command, or a TOML block; strips code fences, comments and trailing commas and tells you what it had to clean up. Unfilled placeholders like `<YOUR_TOKEN>` block the write until you say otherwise. Validation covers every server × destination pair before anything is written, so a bad import writes nothing at all rather than half of it.
-- **Authorise from the panel** — OAuth servers are authorised once per account, and this runs `claude mcp login` / `codex mcp login` under the right account for you, shows the URL to open, and watches for it to finish. Sign out is there too. (The callback lands on the daemon machine's localhost, so when Paseo's daemon is somewhere else the panel hands you the command instead of pretending.)
+- **Authorise or reconnect from the panel** — OAuth servers are authorised once per account. The daemon runs the right account's CLI and opens its computer's default browser. The authorization URL and callback target stay visible; Claude's manual flow accepts the browser's final callback URL directly in the panel. Sign out remains available.
 - **Sync accounts** — pushes user-level definitions and project trust from each primary into its account slots
 
 Every write backs up the target config first (last 20 kept — one "apply to all" is seven files in one press), replaces it atomically, and keeps the permissions it had, because these files hold bearer tokens. A config that exists but cannot be parsed is never overwritten. An edit is **lossless**: the stored entry is loaded and only the fields you changed are modified, so keys the plugin does not model — Claude's `type`, Codex's `enabled` and `startup_timeout_sec` — survive it.
@@ -105,7 +108,7 @@ No, for most of it. This panel reads the account directories and writes MCP conf
 
 ### Authentication by account
 
-MCP *definitions* sync between accounts; MCP *grants* do not — a server is authorized once per account, which is what "server X is not connected" actually means. For an OAuth HTTP server, open it in the MCP tab and press **Connect OAuth** beside each Claude or Codex account. Agent Link starts that account's CLI login and opens the provider's browser sign-in; no token is pasted into the panel. A remote daemon also shows the exact fallback command:
+MCP *definitions* sync between accounts; MCP *grants* do not — a server is authorized once per account, which is what "server X is not connected" actually means. Open **Connections**, choose Claude or Codex, pick the server, then press **Connect OAuth** or **Reconnect**. The daemon opens its computer's default browser and keeps copyable authorization/callback URLs in the panel; no token is pasted into Agent Link. A remote daemon also shows the exact fallback command:
 
 ```sh
 CLAUDE_CONFIG_DIR="~/.agent-link/accounts/claude/you@work.com" claude mcp login <server>

@@ -69,22 +69,22 @@ agent-link update
 
 ![The Agent Link tab: a Routing card showing the auto-router installed for Claude and Codex, then each account with its state, park timer, credit note and launch count](docs/screenshots/agent-link.png)
 
-The panel has five operational tabs: **Accounts, Limit sentry, Memory guard, AgentRouter, and FAQs**. Provider tabs — Claude, Codex, Kimi, Grok, and custom additions — appear only inside Accounts. Automatic routing is the first collapsible account-list row; every account row owns its live quota meters, reset times, rotation state, cooldown, priority, and on-request 7-day activity. There are no separate usage or routing dashboards repeating the same accounts. A cheap 30-second heartbeat refreshes provider registration, account readiness, routing decisions, limit sentry, and capacity snapshots without launching a provider; **Deep check** remains manual because it starts the provider.
+The panel has five operational tabs: **Accounts, Limit sentry, Memory guard, AgentRouter, and FAQs**. Provider tabs — Claude, Codex, Kimi, Grok, and custom additions — appear only inside Accounts. Automatic routing is the first collapsible account-list row; every account row owns its live quota meters, reset times, rotation state, cooldown, priority, and on-request 7-day activity. There are no separate usage or routing dashboards repeating the same accounts. A cheap 30-second heartbeat refreshes provider registration, account readiness, routing decisions, limit sentry, and capacity snapshots without launching a provider; **Deep check** remains manual because it starts the provider. **Probe accounts** runs the CLI's measured Claude check from the panel, spends one small turn per account, cools refusals and releases proven-working accounts.
 
 One click installs a **Dynamic Agent Link** provider. Pick that single provider and every new agent passes through a deterministic route: quota/health gate → priority target group → least-recently-used account. The panel shows every target, its quota headroom and cooldown state, the next decision, and a bounded history of real launches. A running agent is never re-routed: its account is fixed when the process starts, and nothing swaps underneath a live session.
 
-The control-plane vocabulary is inspired by [Plexus](https://github.com/mcowger/plexus) (MIT): healthy targets, ordered groups, selectors, cooldowns, and decision evidence. Agent Link applies those ideas to CLI process launches rather than API requests, so failover means the next launch/resume moves to a healthy account; it never claims to switch an in-flight agent. Automatic resume moves and manual handoffs are written into the same bounded route history with a short session ID, source, and destination, so account cycling is visible. If every target is parked, the launch stops cleanly instead of silently falling onto a known-exhausted primary.
+The control-plane vocabulary is inspired by [Plexus](https://github.com/mcowger/plexus) (MIT): healthy targets, ordered groups, selectors, cooldowns, and decision evidence. Agent Link applies those ideas to CLI process launches rather than API requests, so failover means the next launch/resume moves to a healthy account; it never claims to switch an in-flight agent. Routed launches record the exact Paseo agent ID and working directory, so duplicate-account rows show which agent last consumed that shared quota. If every target is parked, the launch stops cleanly instead of silently falling onto a known-exhausted primary.
 
 ### 🔌 MCP
 
 ![The MCP tab: 29 servers listed with a coverage bar each, filters for All, Gaps and Issues, and buttons to add a server, paste JSON, sync accounts and run a health check](docs/screenshots/mcp.png)
 
-One table for every MCP server across every account and every CLI on the machine — Claude Code, Codex, Kimi, Grok, and each per-account slot.
+Five task tabs keep the MCP surface readable: **Servers, Connections, Diagnostics, Transfer, and FAQs**. Selecting a server opens a full-width detail view instead of squeezing its destination editor into a right rail. Claude and Codex account grants are nested only inside Connections.
 
 - Add, remove or **rename a server everywhere at once**
 - **Edit the raw JSON** for one destination, with a dry-run preview before anything is written (TOML destinations are translated both ways, so you never type TOML and never need to know that Codex spells headers `http_headers`)
 - **Paste a definition straight out of a README** to import it — fenced code, comments and trailing commas are cleaned up and reported, and unfilled placeholders block the write
-- **Run the OAuth sign-in per account** from the panel, instead of hunting for the right terminal command
+- **Run or reconnect OAuth per account** from the panel. The daemon opens its computer's default browser; the authorization URL, callback target and a callback-return field remain available if automatic return fails.
 - Health checks, gap detection, and per-account authorisation status
 
 Every write is atomic, keeps the file's permissions, backs it up first, and refuses to overwrite a config it cannot parse.

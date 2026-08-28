@@ -149,6 +149,9 @@ export const LoginSessionSchema = z.object({
   provider: z.enum(["claude", "codex"]),
   state: z.enum(["starting", "waiting", "done", "failed"]),
   url: z.string(), // the page to open, when the CLI printed one
+  callbackUrl: z.string(), // redirect target advertised by the OAuth request
+  browserOpened: z.boolean(), // system-browser handoff was attempted on the daemon
+  expectsRedirect: z.boolean(), // CLI needs the returned redirect URL on stdin
   message: z.string(),
   startedAt: z.number(),
 });
@@ -174,6 +177,12 @@ export const mcpLoginStatus = defineRpc({
 export const mcpLoginCancel = defineRpc({
   name: "agent-link.mcp-login-cancel",
   input: z.object({ key: z.string() }),
+  output: z.object({ ok: z.boolean(), message: z.string() }),
+});
+
+export const mcpLoginComplete = defineRpc({
+  name: "agent-link.mcp-login-complete",
+  input: z.object({ key: z.string(), redirectUrl: z.string().url().max(8192) }),
   output: z.object({ ok: z.boolean(), message: z.string() }),
 });
 

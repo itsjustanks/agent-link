@@ -9,6 +9,7 @@ import { resourceSetEnabled, resourceStatus } from "./resources.shared";
 import {
   accountUsage,
   accountCapacity,
+  probeAccounts,
   addAccount,
   removeAccount,
   diagnoseProvider,
@@ -264,6 +265,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const callSetPreference = useRpc(setPreference);
   const callUsage = useRpc(accountUsage);
   const callCapacity = useRpc(accountCapacity);
+  const callProbe = useRpc(probeAccounts);
   const callLimitsStatus = useRpc(limitsStatus);
   const callLimitsSetAuto = useRpc(limitsSetAuto);
   const callLimitsResume = useRpc(limitsResume);
@@ -279,6 +281,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const [routerTask, setRouterTask] = useState("");
   const [panelTab, setPanelTab] = useState<PanelTab>("accounts");
   const [providerTab, setProviderTab] = useState("claude");
+  const [probeLogs, setProbeLogs] = useState<Record<string, string>>({});
 
   const scanQuery = useQuery({
     queryKey: ["agent-link", "scan"],
@@ -395,6 +398,17 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
     },
   });
 
+  const probeMutation = useMutation({
+    mutationFn: (provider: ProviderId) => callProbe({ provider, model: "", parkFailures: true }),
+    onSuccess: (result, provider) => {
+      setNotice(result.message);
+      setProbeLogs((previous) => ({ ...previous, [provider]: result.log }));
+      void queryClient.invalidateQueries({ queryKey: ["agent-link", "scan"] });
+      void queryClient.invalidateQueries({ queryKey: ["agent-link", "account-capacity"] });
+    },
+    onError: (error: Error) => setNotice(error.message),
+  });
+
   const slots = scanQuery.data?.slots ?? [];
   const routingSlots = slots.filter((slot) => slot.source === "agent-link");
   const primaryAccounts = scanQuery.data?.primaryAccounts;
@@ -403,6 +417,15 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const heartbeatById = new Map(heartbeatProviders.map((provider) => [provider.id, provider]));
   const primaryInfo = (provider: ProviderId) => (scanQuery.data?.primaries ?? []).find((entry) => entry.provider === provider);
   const primaryEmail = (provider: ProviderId) => (provider === "claude" ? primaryAccounts?.claude : primaryAccounts?.codex) ?? "";
+
+  const lastRouteForAccount = (provider: ProviderId, email: string) =>
+    (scanQuery.data?.recentRoutes ?? []).find((route) => {
+      if (route.provider !== provider) return false;
+      if (route.email === "primary") return primaryEmail(provider) === email;
+      const target = routingSlots.find((slot) => slot.provider === provider && slot.email === route.email);
+      return Boolean(target && (target.actualEmail || target.email) === email);
+    });
+  const routeLocation = (cwd: string) => cwd.split("/").filter(Boolean).pop() || cwd;
 
   // A rate limit belongs to an ACCOUNT, so two entries signed into the same
   // account are one pool wearing two hats — the failure mode where you think
@@ -672,7 +695,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
               row.limitLast > 0 ? ` · last ${agoLabel(row.limitLast)}` : ""
             } — an account can be healthy and still refuse one model`}
           </ErrorText>
-          <CodeBlock tone="error">{`agent-link probe ${provider} <model> --park`}</CodeBlock>
+          <Text style={t.text.caption}>Use Probe accounts above to test service, cool refusals, and release accounts that pass.</Text>
         </View>
       ) : null}
     </View>
@@ -721,6 +744,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
     const usage = usageFor(slot.provider, slot.actualEmail || slot.email);
     const capacity = capacityFor(slot.provider, slot.email, slot.actualEmail || slot.email);
     const pinning = pinMutation.variables?.dir === slot.dir;
+    const lastRoute = lastRouteForAccount(slot.provider, slot.actualEmail || slot.email);
     return (
       <View style={{ gap: t.space.sm }}>
         {!slot.loggedIn || slot.wrongAccount ? (
@@ -744,8 +768,10 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
             slot.settingsDrift.length > 0
               ? { value: `settings differ from primary: ${slot.settingsDrift.join(", ")}`, tone: "attention" }
               : null,
+            lastRoute?.cwd ? { value: `last used in ${routeLocation(lastRoute.cwd)}` } : null,
           ]}
         />
+        {lastRoute?.agentId ? <CodeBlock>{`Paseo agent ${lastRoute.agentId}${lastRoute.cwd ? `\n${lastRoute.cwd}` : ""}`}</CodeBlock> : null}
         {slot.source === "agent-link" ? preferenceControl(slot.provider, slot.email, slot.preference) : null}
         <CodeBlock>{slot.dir}</CodeBlock>
         {usage ? activityDetail(slot.provider, usage) : null}
@@ -800,6 +826,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
     const shared = slot.loggedIn && isShared(slot.provider, slot.actualEmail || slot.email);
     const usage = usageFor(slot.provider, slot.actualEmail || slot.email);
     const capacity = capacityFor(slot.provider, slot.email, slot.actualEmail || slot.email);
+    const lastRoute = lastRouteForAccount(slot.provider, slot.actualEmail || slot.email);
     const status: Status = !slot.loggedIn
       ? "attention"
       : slot.wrongAccount || slot.blocked
@@ -822,6 +849,8 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
               : "in rotation";
     const facts: Array<{ value: string; tone?: Status } | null> = [
       slot.lastUsed > 0 ? { value: `last agent ${agoLabel(slot.lastUsed)}` } : null,
+      lastRoute?.agentId ? { value: `Paseo ${lastRoute.agentId}` } : null,
+      lastRoute?.cwd ? { value: routeLocation(lastRoute.cwd) } : null,
       slot.creditNote ? { value: slot.creditNote, tone: "attention" } : null,
       usage && usage.limitHits > 0 ? { value: plural(usage.limitHits, "limit refusal", "limit refusals"), tone: "error" } : null,
     ];
@@ -846,7 +875,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
               {nextUpKeys[slot.provider] === slot.dir ? <Tag label="next up" tone="busy" /> : null}
               {shared ? <Tag label="shared quota" tone="attention" /> : null}
             </View>
-            <Facts items={facts.slice(0, 3)} />
+            <Facts items={facts.slice(0, 5)} />
             {capacity ? <CapacitySummary entry={capacity} /> : null}
             {slot.loggedIn ? (
               <Meter
@@ -885,6 +914,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
     const usage = account ? usageFor(provider, account) : null;
     const capacity = account ? capacityFor(provider, "primary", account) : null;
     const launches = info?.launches ?? 0;
+    const lastRoute = lastRouteForAccount(provider, account);
     const status: Status = !account ? "attention" : parked ? "neutral" : credit || info?.duplicated ? "attention" : "ok";
     const label = !account
       ? "sign-in needed"
@@ -914,6 +944,8 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
               items={[
                 credit ? { value: credit, tone: "attention" } : null,
                 info?.duplicated ? { value: "an account below holds it too — routing uses that row", tone: "attention" } : null,
+                lastRoute?.agentId ? { value: `Paseo ${lastRoute.agentId}` } : null,
+                lastRoute?.cwd ? { value: `last used in ${routeLocation(lastRoute.cwd)}` } : null,
                 usage && usage.limitHits > 0
                   ? { value: plural(usage.limitHits, "limit refusal", "limit refusals"), tone: "error" }
                   : null,
@@ -955,6 +987,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
               {capacity ? <CapacityDetail entry={capacity} /> : null}
               {capacityQuery.error ? <ErrorText>{`Capacity failed to load: ${String(capacityQuery.error)}`}</ErrorText> : null}
               {info ? preferenceControl(provider, "primary", info.preference) : null}
+              {lastRoute?.agentId ? <CodeBlock>{`Paseo agent ${lastRoute.agentId}${lastRoute.cwd ? `\n${lastRoute.cwd}` : ""}`}</CodeBlock> : null}
               {usage ? activityDetail(provider, usage) : null}
               {!usage && usageQuery.isFetching ? <Text style={t.text.caption}>Reading 7-day activity…</Text> : null}
               {usageQuery.error ? <ErrorText>{`Activity failed to load: ${String(usageQuery.error)}`}</ErrorText> : null}
@@ -1069,6 +1102,17 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                   disabled={diagnosing !== null}
                   onPress={() => runDiagnose(provider, provider)}
                 />
+                {provider === "claude" ? (
+                  probeMutation.isPending ? (
+                    <StatusPill status="busy" label="probing accounts" />
+                  ) : (
+                    <ConfirmButton
+                      label="Probe accounts"
+                      confirmLabel="Spend one small turn per account"
+                      onConfirm={() => probeMutation.mutate(provider)}
+                    />
+                  )
+                ) : null}
               </View>
             </View>
             <Text style={t.text.caption}>
@@ -1080,6 +1124,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
             {capacityQuery.error ? <ErrorText>{`Capacity failed to load: ${String(capacityQuery.error)}`}</ErrorText> : null}
             {usageQuery.error ? <ErrorText>{`Activity failed to load: ${String(usageQuery.error)}`}</ErrorText> : null}
             {diagnosis[provider] ? <CodeBlock>{diagnosis[provider]}</CodeBlock> : null}
+            {probeLogs[provider] ? <CodeBlock>{probeLogs[provider]}</CodeBlock> : null}
           </View>
           {router ? (
             routerRow(router, true)

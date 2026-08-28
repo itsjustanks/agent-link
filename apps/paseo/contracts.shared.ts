@@ -37,6 +37,8 @@ export const RouteEventSchema = z.object({
   email: z.string(),
   decision: z.string(),
   group: z.enum(["preferred", "standard", "reserve", "fallback"]),
+  agentId: z.string(),
+  cwd: z.string(),
 });
 export type RouteEvent = z.infer<typeof RouteEventSchema>;
 
@@ -193,6 +195,20 @@ export const accountCapacity = defineRpc({
   name: "agent-link.account-capacity",
   input: z.object({}),
   output: z.object({ accounts: z.array(CapacityAccountSchema) }),
+});
+
+/**
+ * An explicit, paid provider turn. This is deliberately separate from the
+ * cheap heartbeat so opening the panel can never consume quota.
+ */
+export const probeAccounts = defineRpc({
+  name: "agent-link.probe-accounts",
+  input: z.object({
+    provider: z.enum(["claude", "codex"]),
+    model: z.string().max(160),
+    parkFailures: z.boolean(),
+  }),
+  output: z.object({ ok: z.boolean(), message: z.string(), log: z.string() }),
 });
 
 export const providerHealth = defineRpc({

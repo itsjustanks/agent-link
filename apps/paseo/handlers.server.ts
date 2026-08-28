@@ -1,5 +1,5 @@
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { copyFileSync, createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, join } from "node:path";
@@ -725,15 +725,74 @@ function recentRouteEvents(): RouteEvent[] {
       .slice(-20)
       .reverse()
       .flatMap((line) => {
-        const [rawAt, provider, email, decision, group] = line.split("\t");
+        const [rawAt, provider, email, decision, group, agentId = "", cwd = ""] = line.split("\t");
         const at = Number.parseInt(rawAt ?? "", 10);
         if (!Number.isFinite(at) || (provider !== "claude" && provider !== "codex") || !email) return [];
         if (group !== "preferred" && group !== "standard" && group !== "reserve" && group !== "fallback") return [];
-        return [{ at, provider, email, decision: decision || "routed", group }];
+        return [{ at, provider, email, decision: decision || "routed", group, agentId, cwd }];
       });
   } catch {
     return [];
   }
+}
+
+export async function handleProbeAccounts({
+  provider,
+  model,
+  parkFailures,
+}: {
+  provider: "claude" | "codex";
+  model: string;
+  parkFailures: boolean;
+}) {
+  if (provider !== "claude") {
+    return { ok: false, message: "Codex exposes its quota windows directly; its CLI has no account probe yet.", log: "" };
+  }
+  const binary = searchPath()
+    .flatMap((directory) => [join(directory, "agent-link"), join(directory, "agent-auth")])
+    .find(existsSync);
+  if (!binary) return { ok: false, message: "Install the AgentLink CLI from this panel before probing accounts.", log: "" };
+
+  const args = ["probe", provider];
+  const trimmedModel = model.trim();
+  if (trimmedModel || parkFailures) args.push(trimmedModel);
+  if (parkFailures) args.push("--park");
+
+  return await new Promise<{ ok: boolean; message: string; log: string }>((done) => {
+    const child = spawn(binary, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, AGENT_LINK_HOME: AGENT_LINK_HOME_DIR },
+    });
+    let output = "";
+    let settled = false;
+    const finish = (result: { ok: boolean; message: string; log: string }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      done(result);
+    };
+    const onChunk = (chunk: Buffer) => {
+      output = `${output}${chunk.toString()}`.slice(-64 * 1024);
+    };
+    child.stdout?.on("data", onChunk);
+    child.stderr?.on("data", onChunk);
+    child.once("error", (error) => finish({ ok: false, message: error.message, log: output.trim() }));
+    child.once("exit", (code) => {
+      const log = output.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "").trim();
+      const refused = /CANNOT SERVE/i.test(log);
+      finish({
+        ok: code === 0,
+        message: refused
+          ? "Probe complete. Refusing accounts were cooled down; passing accounts were released."
+          : "Probe complete. Every checked account served the model.",
+        log,
+      });
+    });
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      finish({ ok: false, message: "Account probe timed out after 3 minutes.", log: output.trim() });
+    }, 180_000);
+  });
 }
 
 // Which preferences differ from the primary — an account out of step behaves

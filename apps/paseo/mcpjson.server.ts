@@ -1117,6 +1117,27 @@ function finish(key: string, state: LoginSession["state"], message: string): voi
   live.session = { ...live.session, state, message };
 }
 
+function callbackFrom(url: string): string {
+  try {
+    return new URL(url).searchParams.get("redirect_uri") ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/** Open on the daemon machine; the URL remains visible in the panel either way. */
+function openDefaultBrowser(url: string): boolean {
+  try {
+    const command = process.platform === "darwin" ? "/usr/bin/open" : process.platform === "win32" ? "cmd" : "xdg-open";
+    const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
+    const opener = spawn(command, args, { detached: true, stdio: "ignore", windowsHide: true });
+    opener.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function handleMcpLogin({
   provider,
   accountDir,
@@ -1141,7 +1162,9 @@ export async function handleMcpLogin({
 
   const env = { ...process.env } as NodeJS.ProcessEnv;
   if (accountDir) env[envVarFor(provider)] = accountDir;
-  const child = spawn(binary, ["mcp", "login", server], { stdio: ["ignore", "pipe", "pipe"], env });
+  const expectsRedirect = provider === "claude";
+  const args = ["mcp", "login", server, ...(expectsRedirect ? ["--no-browser"] : [])];
+  const child = spawn(binary, args, { stdio: [expectsRedirect ? "pipe" : "ignore", "pipe", "pipe"], env });
 
   const session: LoginSession = {
     key,
@@ -1150,6 +1173,9 @@ export async function handleMcpLogin({
     provider,
     state: "starting",
     url: "",
+    callbackUrl: "",
+    browserOpened: false,
+    expectsRedirect,
     message: `running '${provider} mcp login ${server}' on ${hostname()}`,
     startedAt: Math.floor(Date.now() / 1000),
   };
@@ -1157,7 +1183,13 @@ export async function handleMcpLogin({
     const live = logins.get(key);
     if (!live || live.session.state === "done" || live.session.state === "failed") return;
     live.child.kill("SIGTERM");
-    finish(key, "failed", `${provider} mcp login printed no link in ${LOGIN_TIMEOUT_MS / 1000}s — run it in a terminal to see why`);
+    finish(
+      key,
+      "failed",
+      live.session.url
+        ? `authorisation timed out after ${LOGIN_TIMEOUT_MS / 1000}s — reconnect to request a fresh link`
+        : `${provider} mcp login printed no link in ${LOGIN_TIMEOUT_MS / 1000}s — run it in a terminal to see why`,
+    );
   }, LOGIN_TIMEOUT_MS);
   const live: Live = { session, child, timer };
   logins.set(key, live);
@@ -1166,9 +1198,19 @@ export async function handleMcpLogin({
   const onChunk = (chunk: Buffer) => {
     output = `${output}${chunk.toString().replace(ANSI, "")}`.slice(-8000);
     if (live.session.url) return;
-    const match = /https:\/\/[^\s'"<>()\]]+/.exec(output);
+    const match = /https?:\/\/[^\s'"<>()\]]+/.exec(output);
     if (!match) return;
-    live.session = { ...live.session, state: "waiting", url: match[0], message: "open the link to finish authorising" };
+    const browserOpened = openDefaultBrowser(match[0]);
+    live.session = {
+      ...live.session,
+      state: "waiting",
+      url: match[0],
+      callbackUrl: callbackFrom(match[0]),
+      browserOpened,
+      message: browserOpened
+        ? `opened the sign-in page in ${hostname()}'s default browser`
+        : "open the sign-in link to continue",
+    };
   };
   child.stdout?.on("data", onChunk);
   child.stderr?.on("data", onChunk);
@@ -1182,6 +1224,27 @@ export async function handleMcpLogin({
   // the panel polls mcp-login-status for everything after that.
   await new Promise((done) => setTimeout(done, 2500));
   return { ok: true, session: logins.get(key)?.session ?? session, message: live.session.url ? "open the link to finish" : "starting…" };
+}
+
+export async function handleMcpLoginComplete({ key, redirectUrl }: { key: string; redirectUrl: string }) {
+  const live = logins.get(key);
+  if (!live || live.session.state !== "waiting") return { ok: false, message: "that login is not waiting for a callback" };
+  if (!live.session.expectsRedirect || !live.child.stdin?.writable) {
+    return { ok: false, message: "this provider completes through its localhost callback; keep the sign-in page open" };
+  }
+  const trimmed = redirectUrl.trim();
+  if (/\r|\n/.test(trimmed)) return { ok: false, message: "paste one callback URL, without extra lines" };
+  try {
+    const returned = new URL(trimmed);
+    if (returned.protocol !== "http:" && returned.protocol !== "https:") {
+      return { ok: false, message: "the callback must be an http or https URL" };
+    }
+    live.child.stdin.write(`${trimmed}\n`);
+    live.session = { ...live.session, message: "callback returned — finishing authorisation" };
+    return { ok: true, message: "callback returned; waiting for the provider to confirm" };
+  } catch {
+    return { ok: false, message: "that is not a complete callback URL" };
+  }
 }
 
 export async function handleMcpLoginStatus() {

@@ -1,10 +1,9 @@
 /**
- * The MCP surface: the list of servers beside one server's detail.
+ * The MCP surface: operational tabs, then one full-width task at a time.
  *
- * Master–detail because every question asked here is about one server at a
- * time — where is it defined, what does each destination actually hold, who
- * has authorised it — and because an editor that opens anywhere other than
- * where the user clicked is an editor they will not find.
+ * Server definitions, OAuth grants, diagnostics and transfer jobs are separate
+ * tasks. A selected server replaces the list instead of being squeezed beside
+ * it, which keeps destination editors usable on desktop and mobile.
  *
  * The friction is placed on purpose: copying one definition over the others
  * and importing a definition that still holds a placeholder both ask twice,
@@ -14,7 +13,7 @@ import type { PluginSurfaceProps } from "@getpaseo/plugin";
 import { useRpc } from "@getpaseo/plugin";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import React, { useEffect, useMemo, useState } from "react";
-import { Linking, Text, View } from "react-native";
+import { Linking, ScrollView, Text, View } from "react-native";
 import { z } from "zod";
 import {
   mcpAdd,
@@ -40,6 +39,7 @@ import {
   mcpImportApply,
   mcpImportParse,
   mcpLogin,
+  mcpLoginComplete,
   mcpLoginCancel,
   mcpLoginStatus,
   mcpLogout,
@@ -66,7 +66,6 @@ import {
   Screen,
   Section,
   Segmented,
-  SplitView,
   StatusPill,
   Tag,
   Toolbar,
@@ -81,6 +80,7 @@ type PutResult = z.output<typeof mcpRawPut.output>;
 type Flash = { tone: Status; text: string };
 type Mode = "browse" | "add" | "import";
 type Kind = "stdio" | "http";
+type PanelTab = "servers" | "connections" | "diagnostics" | "transfer" | "help";
 
 // -------------------------------------------------------------------- helpers
 
@@ -495,6 +495,7 @@ function AuthRows({
   onAuthorise,
   onCancel,
   onSignOut,
+  onComplete,
   onCopied,
 }: {
   server: string;
@@ -508,9 +509,11 @@ function AuthRows({
   onAuthorise: (account: McpAuthAccount) => void;
   onCancel: (key: string) => void;
   onSignOut: (account: McpAuthAccount) => void;
+  onComplete: (key: string, redirectUrl: string) => void;
   onCopied: (ok: boolean) => void;
 }) {
   const t = useTokens();
+  const [redirects, setRedirects] = useState<Record<string, string>>({});
   const rows = accounts
     .map((account) => {
       const dest = destinations.find((entry) => entry.provider === account.provider && entry.account === account.email);
@@ -528,12 +531,13 @@ function AuthRows({
   return (
     <Section title="OAuth connection">
       <Card padded={false}>
-        {rows.map(({ account, auth }, index) => {
+        {rows.map(({ account, auth, needs }, index) => {
           const session = sessions.find(
             (entry) => entry.server === server && entry.account === account.email && entry.provider === account.provider,
           );
           const live = session?.state === "starting" || session?.state === "waiting";
           const connected = session?.state === "done" || auth === "connected";
+          const grantUnverified = auth === "unknown" && !needs;
           const unsupported = auth === "unsupported";
           const remote = !connected && !unsupported && !daemonIsLocal;
           const status: Status = connected ? "ok" : unsupported ? "neutral" : live ? "busy" : auth === "not-connected" ? "attention" : "neutral";
@@ -545,7 +549,7 @@ function AuthRows({
                 ? "connecting"
                 : auth === "not-connected"
                   ? "connect required"
-                  : "not checked";
+                  : "grant not verified";
           return (
             <Row
               key={`${account.provider}-${account.dir}`}
@@ -553,8 +557,11 @@ function AuthRows({
               title={account.email}
               subtitle={`${account.isPrimary ? "primary" : "routed"} ${account.provider === "claude" ? "Claude" : "Codex"} account`}
               trailing={
-                connected ? (
-                  <ConfirmButton label="Sign out" confirmLabel="Revoke this grant" onConfirm={() => onSignOut(account)} />
+                connected || grantUnverified ? (
+                  <>
+                    <Button label="Reconnect" onPress={() => onAuthorise(account)} />
+                    <ConfirmButton label="Sign out" confirmLabel="Revoke this grant" onConfirm={() => onSignOut(account)} />
+                  </>
                 ) : !unsupported && daemonIsLocal ? (
                   <Button
                     label="Connect OAuth"
@@ -590,6 +597,12 @@ function AuthRows({
                           </Text>
                         </View>
                         {session.url ? <CodeBlock>{session.url}</CodeBlock> : null}
+                        {session.callbackUrl ? (
+                          <View style={{ gap: t.space.xs }}>
+                            <Text style={t.text.caption}>Callback returns to</Text>
+                            <CodeBlock>{session.callbackUrl}</CodeBlock>
+                          </View>
+                        ) : null}
                         <View style={{ flexDirection: "row", gap: t.space.sm }}>
                           {session.url ? (
                             <>
@@ -599,6 +612,23 @@ function AuthRows({
                           ) : null}
                           {live ? <Button label="Cancel" variant="ghost" onPress={() => onCancel(session.key)} /> : null}
                         </View>
+                        {live && session.expectsRedirect && session.url ? (
+                          <View style={{ gap: t.space.sm }}>
+                            <Field
+                              label="Callback return URL"
+                              value={redirects[session.key] ?? ""}
+                              onChangeText={(value) => setRedirects((previous) => ({ ...previous, [session.key]: value }))}
+                              placeholder={session.callbackUrl || "Paste the full URL after sign-in"}
+                              hint="If the browser cannot return automatically, copy its final address here."
+                            />
+                            <Button
+                              label="Finish connection"
+                              variant="primary"
+                              disabled={!redirects[session.key]?.trim()}
+                              onPress={() => onComplete(session.key, redirects[session.key]!.trim())}
+                            />
+                          </View>
+                        ) : null}
                       </>
                     ) : null}
                   </View>
@@ -635,6 +665,7 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
   const callImportParse = useRpc(mcpImportParse);
   const callImportApply = useRpc(mcpImportApply);
   const callLogin = useRpc(mcpLogin);
+  const callLoginComplete = useRpc(mcpLoginComplete);
   const callLoginStatus = useRpc(mcpLoginStatus);
   const callLoginCancel = useRpc(mcpLoginCancel);
   const callLogout = useRpc(mcpLogout);
@@ -644,6 +675,8 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
   const [filter, setFilter] = useState<"all" | "gaps" | "issues">("all");
   const [health, setHealth] = useState<Map<string, McpHealth> | null>(null);
   const [mode, setMode] = useState<Mode>("browse");
+  const [panelTab, setPanelTab] = useState<PanelTab>("servers");
+  const [connectionProvider, setConnectionProvider] = useState<"claude" | "codex">("claude");
   const [selected, setSelected] = useState<string | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
   const [editTab, setEditTab] = useState<"fields" | "json">("fields");
@@ -860,6 +893,15 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
       void queryClient.invalidateQueries({ queryKey: ["agent-link", "mcp-login-status"] });
     },
   });
+  const loginCompleteMutation = useMutation({
+    mutationFn: (input: { key: string; redirectUrl: string }) => callLoginComplete(input),
+    onError: fail,
+    onSuccess: (result) => {
+      setFlash({ tone: result.ok ? "ok" : "error", text: result.message });
+      setLiveLogin(true);
+      void queryClient.invalidateQueries({ queryKey: ["agent-link", "mcp-login-status"] });
+    },
+  });
   const logoutMutation = useMutation({
     mutationFn: (input: { provider: "claude" | "codex"; accountDir: string; server: string }) => callLogout(input),
     onError: fail,
@@ -896,36 +938,56 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
   const missing = server ? destinations.filter((dest) => !server.presentIn.includes(dest.id)) : [];
   const rawRows: RawDefRow[] = rawQuery.data?.rows ?? [];
   const defRows: McpDefRow[] = defQuery.data?.rows ?? [];
-  const paneOwnsPrimary = mode !== "browse" || editing !== null;
-
-  const toolbarActions = [
-    <Button
-      key="add"
-      label="Add server"
-      variant={paneOwnsPrimary ? "secondary" : "primary"}
-      grow={layout.compact}
-      onPress={() => {
-        setMode("add");
-        setEditing(null);
-      }}
-    />,
-    <Button key="paste" label="Paste JSON" grow={layout.compact} onPress={() => setMode("import")} />,
-    <Button
-      key="sync"
-      label="Sync accounts"
-      grow={layout.compact}
-      loading={syncMutation.isPending}
-      onPress={() => syncMutation.mutate()}
-    />,
-    <Button
-      key="health"
-      label="Health check"
-      grow={layout.compact}
-      loading={healthMutation.isPending}
-      onPress={() => healthMutation.mutate()}
-    />,
-    <Button key="refresh" label="Refresh" variant="ghost" grow={layout.compact} onPress={invalidate} />,
-  ];
+  const refreshAction = <Button key="refresh" label="Refresh" variant="ghost" grow={layout.compact} onPress={invalidate} />;
+  const panelActions: React.ReactNode[] =
+    panelTab === "servers"
+      ? [
+          <Button
+            key="add"
+            label="Add server"
+            variant={mode === "browse" && !selected ? "primary" : "secondary"}
+            grow={layout.compact}
+            onPress={() => {
+              setMode("add");
+              setSelected(null);
+              setEditing(null);
+            }}
+          />,
+          refreshAction,
+        ]
+      : panelTab === "connections"
+        ? [refreshAction]
+        : panelTab === "diagnostics"
+          ? [
+              <Button
+                key="health"
+                label="Run health check"
+                variant="primary"
+                grow={layout.compact}
+                loading={healthMutation.isPending}
+                onPress={() => healthMutation.mutate()}
+              />,
+              refreshAction,
+            ]
+          : panelTab === "transfer"
+            ? [
+                <Button key="paste" label="Paste JSON" variant="primary" grow={layout.compact} onPress={() => setMode("import")} />,
+                <Button
+                  key="sync"
+                  label="Sync accounts"
+                  grow={layout.compact}
+                  loading={syncMutation.isPending}
+                  onPress={() => syncMutation.mutate()}
+                />,
+                <Button
+                  key="export-all"
+                  label="Export all"
+                  grow={layout.compact}
+                  loading={exportMutation.isPending}
+                  onPress={() => exportMutation.mutate({ scope: "all" })}
+                />,
+              ]
+            : [];
 
   const filters = (
     <View style={{ flexDirection: layout.compact ? "column" : "row", alignItems: layout.compact ? "stretch" : "center", gap: t.space.md }}>
@@ -991,9 +1053,9 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
     </Card>
   );
 
-  const back = layout.compact ? (
+  const back = (
     <Button
-      label="← All servers"
+      label={panelTab === "transfer" ? "← Transfer" : "← All servers"}
       variant="ghost"
       onPress={() => {
         setMode("browse");
@@ -1001,36 +1063,6 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
         setEditing(null);
       }}
     />
-  ) : null;
-
-  const emptyPane = (
-    <View style={{ gap: t.space.lg }}>
-      <EmptyState
-        title="Pick a server"
-        body={`${servers.length} servers across ${destinations.length} destinations. Choose one to see where it is defined, edit it per destination, or authorise it per account.`}
-      />
-      <Disclosure title="How this works">
-        <Text style={t.text.body}>
-          These are user-level servers — each CLI's global config, available in every project. A repo's own .mcp.json is
-          project-level and is never touched here.
-        </Text>
-        <Text style={t.text.body}>
-          Every destination keeps its own definition, so different auth per account is expected. Masked ••• values keep
-          that destination's stored secret when you save.
-        </Text>
-        <Text style={t.text.body}>
-          Definitions sync; grants do not. A server still has to be authorised once per account — that is what "not
-          connected" means inside a session.
-        </Text>
-        <Text style={t.text.body}>Every write backs the target config up first.</Text>
-        {authQuery.data && authQuery.data.projectServers.length > 0 ? (
-          <Text style={t.text.body}>
-            Project-scoped servers seen nearby, not managed here:{" "}
-            {[...new Set(authQuery.data.projectServers.map((entry) => entry.name))].join(", ")}
-          </Text>
-        ) : null}
-      </Disclosure>
-    </View>
   );
 
   const addPane = (
@@ -1292,38 +1324,6 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
         </Notice>
       ) : null}
 
-      {authQuery.data ? (
-        <AuthRows
-          server={server.name}
-          accounts={authQuery.data.accounts}
-          destinations={destinations}
-          presentIn={server.presentIn}
-          sessions={sessions}
-          oauthCapable={server.transport === "http" && server.authStyle === "oauth-or-none"}
-          daemonIsLocal={daemonIsLocal}
-          pendingDir={loginMutation.isPending ? loginMutation.variables?.accountDir ?? null : null}
-          onAuthorise={(account) =>
-            loginMutation.mutate({
-              provider: account.provider,
-              accountDir: account.dir,
-              account: account.email,
-              server: server.name,
-            })
-          }
-          onCancel={(key) => loginCancelMutation.mutate(key)}
-          onSignOut={(account) =>
-            logoutMutation.mutate({ provider: account.provider, accountDir: account.dir, server: server.name })
-          }
-          onCopied={(ok) =>
-            setFlash(
-              ok
-                ? { tone: "ok", text: "Sign-in link copied." }
-                : { tone: "attention", text: "No clipboard here — the link above is selectable." },
-            )
-          }
-        />
-      ) : null}
-
       <Section title="Destinations">
         <Card padded={false}>
           {destinations.map((dest, index) => {
@@ -1398,39 +1398,207 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
       </Section>
 
     </View>
-  ) : (
-    emptyPane
+  ) : null;
+
+  const oauthServers = servers.filter((entry) => entry.transport === "http" && entry.authStyle === "oauth-or-none");
+  const connectionAccounts = (authQuery.data?.accounts ?? []).filter((account) => account.provider === connectionProvider);
+  const connectionServers = oauthServers.filter((entry) =>
+    connectionAccounts.some((account) => {
+      const destination = destinations.find(
+        (candidate) => candidate.provider === account.provider && candidate.account === account.email,
+      );
+      return Boolean(destination && entry.presentIn.includes(destination.id));
+    }),
+  );
+  const connectionServer = selected ? connectionServers.find((entry) => entry.name === selected) : undefined;
+  const connectionCounts = (entry: McpServerRow) => {
+    const relevant = connectionAccounts.filter((account) => {
+      const destination = destinations.find(
+        (candidate) => candidate.provider === account.provider && candidate.account === account.email,
+      );
+      return Boolean(destination && entry.presentIn.includes(destination.id));
+    });
+    const connected = relevant.filter((account) => {
+      const session = sessions.find(
+        (candidate) =>
+          candidate.server === entry.name && candidate.account === account.email && candidate.provider === account.provider,
+      );
+      return session?.state === "done" || account.authStatus[entry.name] === "connected";
+    }).length;
+    const required = relevant.filter((account) => account.authStatus[entry.name] === "not-connected").length;
+    return { total: relevant.length, connected, required };
+  };
+  const authRows = (entry: McpServerRow) => (
+    <AuthRows
+      server={entry.name}
+      accounts={connectionAccounts}
+      destinations={destinations}
+      presentIn={entry.presentIn}
+      sessions={sessions}
+      oauthCapable
+      daemonIsLocal={daemonIsLocal}
+      pendingDir={loginMutation.isPending ? loginMutation.variables?.accountDir ?? null : null}
+      onAuthorise={(account) =>
+        loginMutation.mutate({
+          provider: account.provider,
+          accountDir: account.dir,
+          account: account.email,
+          server: entry.name,
+        })
+      }
+      onCancel={(key) => loginCancelMutation.mutate(key)}
+      onSignOut={(account) => logoutMutation.mutate({ provider: account.provider, accountDir: account.dir, server: entry.name })}
+      onComplete={(key, redirectUrl) => loginCompleteMutation.mutate({ key, redirectUrl })}
+      onCopied={(ok) =>
+        setFlash(
+          ok
+            ? { tone: "ok", text: "Sign-in link copied." }
+            : { tone: "attention", text: "No clipboard here — the link above is selectable." },
+        )
+      }
+    />
   );
 
-  const detail = mode === "add" ? addPane : mode === "import" ? importPane : selected ? serverPane : emptyPane;
+  const connectionsPane = connectionServer ? (
+    <View style={{ gap: t.space.lg }}>
+      <Button label="← All OAuth servers" variant="ghost" onPress={() => setSelected(null)} />
+      <View style={{ gap: t.space.xs }}>
+        <Text style={t.text.display}>{connectionServer.name}</Text>
+        <Text style={t.text.caption}>One grant per account. Reconnect opens the daemon computer's default browser.</Text>
+      </View>
+      {authRows(connectionServer)}
+    </View>
+  ) : (
+    <View style={{ gap: t.space.md }}>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingBottom: t.space.xs }}>
+        <Segmented
+          value={connectionProvider}
+          onChange={setConnectionProvider}
+          options={[
+            { value: "claude", label: "Claude" },
+            { value: "codex", label: "Codex" },
+          ]}
+        />
+      </ScrollView>
+      {authQuery.isLoading ? <Loading label="Reading account grants…" /> : null}
+      {authQuery.error ? <ErrorText>{errorText(authQuery.error)}</ErrorText> : null}
+      <Card padded={false}>
+        {connectionServers.length === 0 && !authQuery.isLoading ? (
+          <EmptyState title="No OAuth servers here" body={`No OAuth-capable server is defined for a ${connectionProvider} account.`} />
+        ) : null}
+        {connectionServers.map((entry, index) => {
+          const counts = connectionCounts(entry);
+          return (
+            <Row
+              key={entry.name}
+              first={index === 0}
+              title={entry.name}
+              subtitle={`${counts.connected} connected · ${counts.required} need sign-in · ${counts.total} accounts`}
+              onPress={() => setSelected(entry.name)}
+              trailing={
+                <StatusPill
+                  status={counts.required > 0 ? "attention" : counts.connected === counts.total && counts.total > 0 ? "ok" : "neutral"}
+                  label={counts.required > 0 ? "action needed" : counts.connected > 0 ? "connected" : "not checked"}
+                />
+              }
+            />
+          );
+        })}
+      </Card>
+    </View>
+  );
+
+  const diagnosticsPane = (
+    <View style={{ gap: t.space.md }}>
+      <Text style={t.text.caption}>Manual checks contact each configured server. Opening this tab does not.</Text>
+      <Card padded={false}>
+        {!health ? <EmptyState title="Not checked yet" body="Run one health check to separate auth, network and binary failures." /> : null}
+        {servers.map((entry, index) => {
+          const result = health?.get(entry.name);
+          return result ? (
+            <Row
+              key={entry.name}
+              first={index === 0}
+              title={entry.name}
+              subtitle={result.note}
+              trailing={<StatusPill status={healthStatus(result.status)} label={healthWord(result.status)} />}
+            />
+          ) : null;
+        })}
+      </Card>
+    </View>
+  );
+
+  const transferPane = mode === "import" ? (
+    importPane
+  ) : (
+    <View style={{ gap: t.space.lg }}>
+      <Card>
+        <Text style={t.text.heading}>Move definitions without moving grants</Text>
+        <Text style={t.text.body}>
+          Paste README JSON, sync definitions and preferences across accounts, or export a private backup. OAuth grants stay account-local.
+        </Text>
+        <Facts items={[{ value: `${servers.length} servers` }, { value: `${destinations.length} destinations` }, { value: "backups before writes" }]} />
+      </Card>
+    </View>
+  );
+
+  const helpPane = (
+    <Card>
+      <Text style={t.text.heading}>Why is OAuth per account?</Text>
+      <Text style={t.text.body}>Definitions can be copied. Provider grants cannot, so each account connects once.</Text>
+      <Text style={t.text.heading}>Where does sign-in open?</Text>
+      <Text style={t.text.body}>On the Paseo daemon computer. The authorization link and callback target remain visible for manual recovery.</Text>
+      <Text style={t.text.heading}>What does Sync accounts move?</Text>
+      <Text style={t.text.body}>Server definitions, trusted projects and preferences. It never copies OAuth tokens.</Text>
+      <Text style={t.text.heading}>Are project .mcp.json files changed?</Text>
+      <Text style={t.text.body}>No. This panel manages user-level CLI configurations only.</Text>
+    </Card>
+  );
+
+  const serverContent = mode === "add" ? addPane : selected ? serverPane : <View style={{ gap: t.space.md }}>{filters}{list}</View>;
+  const panelOptions: Array<{ value: PanelTab; label: string }> = [
+    { value: "servers", label: "Servers" },
+    { value: "connections", label: "Connections" },
+    { value: "diagnostics", label: "Diagnostics" },
+    { value: "transfer", label: "Transfer" },
+    { value: "help", label: "FAQs" },
+  ];
 
   return (
     <Screen t={t}>
       <Toolbar
         title="MCP"
-        subtitle="User-level servers, shared by every project on this machine."
-        actions={
-          layout.compact ? (
-            <View style={{ gap: t.space.sm, flex: 1 }}>
-              <View style={{ flexDirection: "row", gap: t.space.sm }}>{toolbarActions.slice(0, 2)}</View>
-              <View style={{ flexDirection: "row", gap: t.space.sm }}>{toolbarActions.slice(2)}</View>
-            </View>
-          ) : (
-            toolbarActions
-          )
-        }
-        below={
-          <View style={{ gap: t.space.md }}>
-            {flash ? (
-              <Notice tone={flash.tone} onDismiss={() => setFlash(null)}>
-                {flash.text.includes("\n") ? <CodeBlock tone={flash.tone}>{flash.text}</CodeBlock> : flash.text}
-              </Notice>
-            ) : null}
-            {filters}
-          </View>
-        }
+        subtitle="Definitions, account grants and health — separated by task."
+        actions={panelActions}
       />
-      <SplitView list={list} detail={detail} showDetail={mode !== "browse" || Boolean(selected)} />
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingBottom: t.space.xs }}>
+        <Segmented
+          options={panelOptions}
+          value={panelTab}
+          onChange={(next) => {
+            setPanelTab(next);
+            setMode("browse");
+            setSelected(null);
+            setEditing(null);
+            setRevealed(false);
+          }}
+        />
+      </ScrollView>
+      {flash ? (
+        <Notice tone={flash.tone} onDismiss={() => setFlash(null)}>
+          {flash.text.includes("\n") ? <CodeBlock tone={flash.tone}>{flash.text}</CodeBlock> : flash.text}
+        </Notice>
+      ) : null}
+      {panelTab === "servers"
+        ? serverContent
+        : panelTab === "connections"
+          ? connectionsPane
+          : panelTab === "diagnostics"
+            ? diagnosticsPane
+            : panelTab === "transfer"
+              ? transferPane
+              : helpPane}
     </Screen>
   );
 }

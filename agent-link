@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.5.19"
+VERSION="0.5.20"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -1176,10 +1176,12 @@ cmd_prefer() { # $1 provider [$2 email|primary] [first|last|clear]
 }
 
 record_route_decision() { # provider target decision group
-  local route_log route_lines
+  local route_log route_lines agent_id route_cwd
   mkdir -p "$(pools_dir)"
   route_log="$(pools_dir)/routes.log"
-  printf '%s\t%s\t%s\t%s\t%s\n' "$(date +%s)" "$1" "$2" "$3" "$4" >> "$route_log"
+  agent_id="$(printf '%s' "${PASEO_AGENT_ID:-}" | tr '\t\r\n' '   ')"
+  route_cwd="$(printf '%s' "${PASEO_AGENT_CWD:-$PWD}" | tr '\t\r\n' '   ')"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date +%s)" "$1" "$2" "$3" "$4" "$agent_id" "$route_cwd" >> "$route_log"
   route_lines="$(wc -l < "$route_log" 2>/dev/null | tr -d ' ' || echo 0)"
   if [ "${route_lines:-0}" -gt 240 ]; then
     tail -n 200 "$route_log" > "$route_log.tmp" && mv "$route_log.tmp" "$route_log"
@@ -1827,7 +1829,17 @@ cmd_resume_target() { # $1 provider, $2 session-id [--go]
   owner_dir="$(session_dir "$p" "$owner")"
   if [ "$owner" = primary ]; then slot_available_primary "$p" && healthy=1
   else slot_available "$p" "$owner" && healthy=1; fi
-  if [ -n "$healthy" ]; then echo "$([ "$owner" = primary ] && echo primary || echo "$owner_dir")"; return 0; fi
+  if [ -n "$healthy" ]; then
+    if [ -n "$go" ]; then
+      local owner_group="standard" owner_rank
+      owner_rank="$(pref_rank "$p" "$owner")"
+      case "$owner_rank" in 0) owner_group="preferred" ;; 2) owner_group="reserve" ;; 9) owner_group="fallback" ;; esac
+      date +%s > "$(pools_dir)/last-$p-$owner"
+      record_route_decision "$p" "$owner" "session ${sid%%-*} resumed on owner" "$owner_group"
+    fi
+    echo "$([ "$owner" = primary ] && echo primary || echo "$owner_dir")"
+    return 0
+  fi
   # The owner is benched. LRU among the healthy others, nearing accounts last;
   # the primary counts unless a slot already holds that account (pick_slot's rule).
   mkdir -p "$(pools_dir)"

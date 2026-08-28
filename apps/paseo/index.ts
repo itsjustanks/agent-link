@@ -17,6 +17,7 @@ import {
   providerHeartbeat,
   accountUsage,
   accountCapacity,
+  probeAccounts,
   addAccount,
   removeAccount,
   routerLaunch,
@@ -41,6 +42,7 @@ import {
   handleProviderHeartbeat,
   handleAccountUsage,
   handleAccountCapacity,
+  handleProbeAccounts,
   handleAddAccount,
   handleRemoveAccount,
   handleRouterLaunch,
@@ -62,6 +64,7 @@ import {
   mcpImportApply,
   mcpImportParse,
   mcpLogin,
+  mcpLoginComplete,
   mcpLoginCancel,
   mcpLoginStatus,
   mcpLogout,
@@ -74,6 +77,7 @@ import {
   handleMcpImportApply,
   handleMcpImportParse,
   handleMcpLogin,
+  handleMcpLoginComplete,
   handleMcpLoginCancel,
   handleMcpLoginStatus,
   handleMcpLogout,
@@ -95,6 +99,7 @@ export default function contribute(plugin: PluginContext) {
   plugin.handle(setPreference, handleSetPreference);
   plugin.handle(accountUsage, handleAccountUsage);
   plugin.handle(accountCapacity, handleAccountCapacity);
+  plugin.handle(probeAccounts, handleProbeAccounts);
   plugin.handle(diagnoseProvider, handleDiagnoseProvider);
   plugin.handle(providerHealth, handleProviderHealth);
   plugin.handle(providerHeartbeat, handleProviderHeartbeat);
@@ -118,6 +123,7 @@ export default function contribute(plugin: PluginContext) {
   plugin.handle(mcpExport, handleMcpExport);
   plugin.handle(mcpExportFile, handleMcpExportFile);
   plugin.handle(mcpLogin, handleMcpLogin);
+  plugin.handle(mcpLoginComplete, handleMcpLoginComplete);
   plugin.handle(mcpLoginStatus, handleMcpLoginStatus);
   plugin.handle(mcpLoginCancel, handleMcpLoginCancel);
   plugin.handle(mcpLogout, handleMcpLogout);
