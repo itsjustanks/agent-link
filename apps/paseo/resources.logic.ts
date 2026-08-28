@@ -79,7 +79,7 @@ export function paseoTypechecks(rows: ProcessRow[]): ProcessRow[] {
     }
   }
 
-  return rows.filter((row) => {
+  const candidates = rows.filter((row) => {
     if (!isTypecheckProcess(row.command)) return false;
     let parent = byPid.get(row.ppid);
     const seen = new Set<number>();
@@ -90,6 +90,23 @@ export function paseoTypechecks(rows: ProcessRow[]): ProcessRow[] {
     }
     return false;
   });
+
+  // A single command commonly appears as a shell -> pnpm/npm -> tsc chain.
+  // Counting every matching ancestor turns one check into three lanes and can
+  // leave wrapper processes stopped after the actual compiler exits. Govern
+  // only leaf-most compiler processes; their wrappers simply wait for them.
+  const candidatePids = new Set(candidates.map((row) => row.pid));
+  const hasTypecheckDescendant = new Set<number>();
+  for (const row of candidates) {
+    let parent = byPid.get(row.ppid);
+    const seen = new Set<number>();
+    while (parent && !seen.has(parent.pid)) {
+      if (candidatePids.has(parent.pid)) hasTypecheckDescendant.add(parent.pid);
+      seen.add(parent.pid);
+      parent = byPid.get(parent.ppid);
+    }
+  }
+  return candidates.filter((row) => !hasTypecheckDescendant.has(row.pid));
 }
 
 /** Oldest check keeps the lane: it is normally closest to releasing its RAM. */

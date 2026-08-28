@@ -1351,14 +1351,14 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
             <Row
               first
               title="Keep heavy Paseo type-checks in one lane"
-              subtitle="Runs one Paseo type-check at a time. Under memory pressure it pauses the check, keeps its agent alive, then continues when macOS recovers. Terminal jobs are never touched."
+              subtitle="Treats each shell/package-runner/compiler chain as one job. One compiler runs at a time; under memory pressure it pauses, keeps its agent alive, then continues when macOS recovers. Terminal jobs are never touched."
               meta={
                 <Facts
                   items={[
                     resourceQuery.data.freePercent === null
                       ? { value: "memory signal unavailable" }
                       : { value: `${resourceQuery.data.freePercent}% memory available` },
-                    { value: `${resourceQuery.data.activeTypechecks} running` },
+                    { value: `${resourceQuery.data.activeTypechecks} compiler job${resourceQuery.data.activeTypechecks === 1 ? "" : "s"} running` },
                   ]}
                 />
               }
