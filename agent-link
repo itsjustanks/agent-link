@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.5.21"
+VERSION="0.5.22"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -300,14 +300,15 @@ for line in tail.splitlines():
     if '"isApiErrorMessage":true' not in line:
         continue
     low = line.lower()
-    if "usage limit" not in low and "spend limit" not in low and "limit reached" not in low:
+    refusal = re.search(r"you(?:'|’)?ve\s+(?:hit|reached)\s+[^.!\n]{0,80}\blimit\b", low)
+    if not refusal and "usage limit" not in low and "spend limit" not in low and "limit reached" not in low:
         continue
-    until = now + 60 * 60  # unknown reset: a short bench, re-proved on expiry
+    until = None
     # A spend limit is monthly, or a budget someone must raise. No amount of
     # waiting proves it over, so it is a HOLD, not a bench — the caller parks
     # it with no expiry and only a probe or an explicit clear releases it.
     if "spend limit" in low:
-        print("hold")
+        print("hold:spend")
         sys.exit(0)
     m = re.search(r"resets?\s*(?:at\s*)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)", low)
     if m:
@@ -317,9 +318,15 @@ for line in tail.splitlines():
         if target <= now:
             target += 24 * 60 * 60
         until = target
-    # Never bench longer than one rolling window, never shorter than 10 minutes.
-    until = max(now + 10 * 60, min(until, now + 5 * 60 * 60))
-    print(int(until))
+    if until is None:
+        # A guessed one-hour timer made a still-refusing account eligible again.
+        # Keep unknown resets out until a real probe serves; maybe_revalidate
+        # performs that proof at most once an hour, never once per launch.
+        print("hold:unknown")
+    else:
+        # Never bench longer than one rolling window, never shorter than 10 minutes.
+        until = max(now + 10 * 60, min(until, now + 5 * 60 * 60))
+        print(int(until))
     sys.exit(0)
 sys.exit(1)
 PY2
@@ -642,18 +649,30 @@ hold_get() { # $1 provider, $2 key — prints the reason if held
 }
 hold_clear() { rm -f "$(pools_dir)/hold-$1-$2"; }
 
+is_limit_refusal_text() {
+  printf '%s' "$1" | grep -Eqi "you.?ve (hit|reached) .{0,80}limit|usage limit|rate limit|spend limit|limit reached|credit balance|quota exceeded|out of credits"
+}
+
 # Park an account that just refused, until the reset time when one was parsed.
-autopark() { # $1 provider, $2 key (email or "primary"), $3 until-epoch or "hold"
+autopark() { # $1 provider, $2 key (email or "primary"), $3 until-epoch or hold:<reason>
   mkdir -p "$(pools_dir)"
-  if [ "${3:-}" = hold ]; then
-    hold_set "$1" "$2" "monthly spend limit — raise it at claude.ai/settings/usage, then: agent-link probe $1 (or cooldown clear)"
+  case "${3:-}" in
+  hold|hold:spend|hold:unknown)
+    local hold_reason="limit refusal with no verified reset — release only after Probe accounts serves"
+    [ "${3:-}" = hold:spend ] && hold_reason="monthly spend limit — raise it at claude.ai/settings/usage, then probe the account"
+    hold_set "$1" "$2" "$hold_reason"
     # Live processes on a just-held account will answer "usage limit" to every
     # message until they end, so retire them now; the next message re-routes.
     ( cmd_evict "$1" >/dev/null 2>&1 & )
-    echo "$(date '+%Y-%m-%d %H:%M')  HELD $1/$2 (spend limit — no expiry; probe or clear to release)" >> "$STATE/autopark.log"
-    echo "auto: monthly spend limit" > "$(pools_dir)/reason-$1-$2"
+    echo "$(date '+%Y-%m-%d %H:%M')  HELD $1/$2 (limit refusal — probe must pass before release)" >> "$STATE/autopark.log"
+    if [ "${3:-}" = hold:spend ]; then
+      echo "auto: monthly spend limit" > "$(pools_dir)/reason-$1-$2"
+    else
+      echo "auto: limit refusal — awaiting successful probe" > "$(pools_dir)/reason-$1-$2"
+    fi
     return 0
-  fi
+    ;;
+  esac
   echo "${3:-$(( $(date +%s) + 60 * 60 ))}" > "$(pools_dir)/cooldown-$1-$2"
   echo "auto: refused for a limit" > "$(pools_dir)/reason-$1-$2"
   echo "$(date '+%Y-%m-%d %H:%M')  auto-parked $1/$2 after a limit refusal" >> "$STATE/autopark.log"
@@ -876,9 +895,8 @@ pref_rank() { # $1 provider, $2 key
 # ------------------------------------------------------------ AgentRouter
 # An OPTIONAL Paseo provider profile: a cheap base model triages every prompt
 # and either answers directly or delegates to the right provider/model through
-# Paseo's own orchestration tools, always naming what it chose. The brain is a
-# system prompt appended to the claude-auto launcher; the rules are a plain
-# file the user edits.
+# Paseo's own tools. It gets a dedicated Claude agent definition while still
+# launching through claude-auto, so account health routing remains intact.
 router_dir() { echo "$ROOT/router"; }
 
 router_write_files() {
@@ -929,6 +947,34 @@ EOF
     echo "----- ROUTING RULES (user-edited) -----"
     cat "$(router_dir)/rules.md"
   } > "$(router_dir)/system.md"
+
+  mkdir -p "$SHIM_BIN"
+  cat > "$SHIM_BIN/agent-router" <<EOF
+#!/usr/bin/env bash
+# AgentRouter provider launcher — managed by \`agent-link router install\`.
+aa_root="\${AGENT_LINK_HOME:-\${AGENT_AUTH_HOME:-$ROOT}}"
+aa_auto="\$aa_root/bin/claude-auto"
+aa_prompt="\$aa_root/router/system.md"
+[ -x "\$aa_auto" ] || { echo "agent-link: claude-auto is missing; run agent-link auto" >&2; exit 75; }
+[ -f "\$aa_prompt" ] || { echo "agent-link: AgentRouter prompt is missing; run agent-link router install" >&2; exit 75; }
+# Paseo diagnostics call these directly. They do not launch an agent and must
+# not acquire a routing lock or fire a recovery probe.
+case "\${1:-}" in
+  --version|-v|version|auth) exec claude "\$@" ;;
+esac
+aa_agents="\$(python3 - "\$aa_prompt" <<'PY'
+import json, sys
+prompt = open(sys.argv[1], encoding="utf-8").read()
+print(json.dumps({"agent-router": {
+    "description": "Triage each request, answer cheap work directly, and delegate complex work through Paseo.",
+    "prompt": prompt,
+    "model": "haiku",
+}}))
+PY
+)" || exit 75
+exec "\$aa_auto" --agents "\$aa_agents" --agent agent-router "\$@"
+EOF
+  chmod +x "$SHIM_BIN/agent-router"
 }
 
 
@@ -1007,10 +1053,10 @@ cmd_switch() { # [provider] [session-id] — default: the newest session in this
   echo "(in Paseo: just send the agent a message — the launcher routes the resume for you)"
 }
 
-HOLD_RECHECK_HOURS=6
+HOLD_RECHECK_HOURS=1
 
 cmd_revalidate() { # [provider] — probe only HELD accounts, release those that serve
-  local p="${1:-claude}" e dir out held=0
+  local p="${1:-claude}" e dir out rc held=0
   prov_valid "$p" || { echo "usage: agent-link revalidate [claude]" >&2; return 1; }
   [ "$p" = claude ] || { echo "revalidate supports claude only" >&2; return 1; }
   for e in primary $(slot_list "$p"); do
@@ -1019,19 +1065,22 @@ cmd_revalidate() { # [provider] — probe only HELD accounts, release those that
     if [ "$e" = primary ]; then dir=""; else dir="$(slot_dir "$p" "$e")"; fi
     printf '  %-28s ' "$e"
     if [ -n "$dir" ]; then
-      out="$(CLAUDE_CONFIG_DIR="$dir" claude -p "ok" 2>&1 | tr '\n' ' ')"
+      out="$(CLAUDE_CONFIG_DIR="$dir" claude -p "ok" 2>&1)"
+      rc=$?
     else
-      out="$(claude -p "ok" 2>&1 | tr '\n' ' ')"
+      out="$(claude -p "ok" 2>&1)"
+      rc=$?
     fi
-    case "$out" in
-      *"spend limit"*|*"usage limit"*|*"rate limit"*|*"Credit balance"*)
-        printf 'still refusing — hold stands\n' ;;
-      *)
+    out="$(printf '%s' "$out" | tr '\n' ' ')"
+    if [ "$rc" -ne 0 ]; then
+      printf 'probe failed — hold stands\n'
+    elif is_limit_refusal_text "$out"; then
+      printf 'still refusing — hold stands\n'
+    else
         rm -f "$(pools_dir)/hold-$p-$e" "$(pools_dir)/cooldown-$p-$e" "$(pools_dir)/reason-$p-$e"
         printf 'RECOVERED — released back into rotation\n'
         echo "$(date '+%Y-%m-%d %H:%M')  released $p/$e — it serves again (revalidate)" >> "$STATE/autopark.log"
-        ;;
-    esac
+    fi
     date +%s > "$(pools_dir)/holdcheck-$p-$e"
   done
   [ "$held" -gt 0 ] || echo "  no held $p accounts to re-prove"
@@ -1062,15 +1111,16 @@ cmd_router() { # [install|status]
       echo "AgentRouter brain written."
       echo "  rules:  $(router_dir)/rules.md   (edit freely — read at every launch)"
       echo "  prompt: $(router_dir)/prompt.md"
-      echo
-      echo "Start one from the Paseo panel: Agent Link tab → AgentRouter → type the"
-      echo "task → Start. It runs as an agent with this system prompt on a cheap"
-      echo "model and delegates through Paseo's own tools. (A provider-shaped router"
-      echo "is not possible: Paseo's adapter owns the CLI arguments, so a provider"
-      echo "command cannot carry a system prompt — measured, not assumed.)"
+      echo "  launcher: $SHIM_BIN/agent-router"
+      echo "Install the AgentRouter provider from the Paseo Agent Link panel."
       ;;
     status)
-      [ -f "$(router_dir)/rules.md" ] && echo "rules: $(router_dir)/rules.md" || echo "not installed — agent-link router install"
+      if [ -f "$(router_dir)/rules.md" ] && [ -x "$SHIM_BIN/agent-router" ]; then
+        echo "ready: $SHIM_BIN/agent-router"
+        echo "rules: $(router_dir)/rules.md"
+      else
+        echo "not installed — agent-link router install"
+      fi
       ;;
     *) echo "usage: agent-link router [install|status]" >&2; return 1 ;;
   esac
@@ -1951,7 +2001,7 @@ cmd_cooldown() { # provider email minutes — park an exhausted account
 # unreliable — an account marked "out of credits" can still serve, and one that
 # looks fine can refuse — so this measures instead of guessing.
 cmd_probe() { # $1 provider (default claude), $2 model, [--park]
-  local p="${1:-claude}" model="${2:-}" park="" e dir out ok
+  local p="${1:-claude}" model="${2:-}" park="" e dir out rc ok
   case "${3:-}" in --park) park=1 ;; esac
   prov_valid "$p" || { echo "usage: agent-link probe <claude|codex> [model] [--park]" >&2; return 1; }
   [ "$p" = claude ] || { echo "probe currently supports claude only" >&2; return 1; }
@@ -1965,17 +2015,23 @@ cmd_probe() { # $1 provider (default claude), $2 model, [--park]
     fi
     printf '  %-28s ' "$e"
     if [ -n "$dir" ]; then
-      out="$(CLAUDE_CONFIG_DIR="$dir" claude -p "ok" ${model:+--model "$model"} 2>&1 | tr '\n' ' ')"
+      out="$(CLAUDE_CONFIG_DIR="$dir" claude -p "ok" ${model:+--model "$model"} 2>&1)"
+      rc=$?
     else
-      out="$(claude -p "ok" ${model:+--model "$model"} 2>&1 | tr '\n' ' ')"
+      out="$(claude -p "ok" ${model:+--model "$model"} 2>&1)"
+      rc=$?
     fi
-    case "$out" in
-      *"spend limit"*|*"usage limit"*|*"rate limit"*|*"Credit balance"*)
-        ok=""
-        printf '%sCANNOT SERVE%s %s\n' "$C_RED" "$C_OFF" "${model:-default}"
-        ;;
-      *) ok=1; printf '%sok%s\n' "$C_GREEN" "$C_OFF" ;;
-    esac
+    out="$(printf '%s' "$out" | tr '\n' ' ')"
+    if [ "$rc" -ne 0 ]; then
+      ok=""
+      printf '%sCHECK FAILED%s — account remains unavailable\n' "$C_RED" "$C_OFF"
+    elif is_limit_refusal_text "$out"; then
+      ok=""
+      printf '%sCANNOT SERVE%s %s\n' "$C_RED" "$C_OFF" "${model:-default}"
+    else
+      ok=1
+      printf '%sok%s\n' "$C_GREEN" "$C_OFF"
+    fi
     if [ -n "$ok" ]; then
       # Proof of service releases whatever was holding the account back.
       if [ -f "$(pools_dir)/hold-$p-$e" ] || [ -f "$(pools_dir)/cooldown-$p-$e" ]; then
@@ -1990,8 +2046,8 @@ cmd_probe() { # $1 provider (default claude), $2 model, [--park]
           echo "      HELD (spend limit) — no expiry; probe again or clear to release"
           ;;
         *)
-          cmd_cooldown "$p" "$e" 180 >/dev/null
-          echo "      parked for 180m — routing will skip it"
+          autopark "$p" "$e" hold:unknown
+          echo "      HELD — routing skips it until a probe actually serves"
           ;;
       esac
     fi

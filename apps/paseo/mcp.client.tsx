@@ -142,6 +142,12 @@ function loginCommand(account: McpAuthAccount, server: string, directory = ""): 
   return directory ? `cd ${shellQuote(directory)} && ${login}` : login;
 }
 
+function oauthState(account: McpAuthAccount, server: string) {
+  const needs = account.needsAuth.includes(server);
+  const auth = account.authStatus[server] ?? (needs ? "not-connected" : "unknown");
+  return { needs, auth, known: needs || auth === "connected" || auth === "not-connected" };
+}
+
 // ----------------------------------------------------------------- fragments
 
 function Issues({ source, issues }: { source: string; issues: JsonIssue[] }) {
@@ -421,7 +427,7 @@ function DestinationEditor({
   // definition on disk, so an unsaved buffer withdraws the offer.
   const [dirty, setDirty] = useState(false);
   return (
-    <Card level={2}>
+    <View style={{ gap: t.space.md }}>
       <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: t.space.sm }}>
         <Segmented
           value={tab}
@@ -473,7 +479,7 @@ function DestinationEditor({
           )}
         </View>
       ) : null}
-    </Card>
+    </View>
   );
 }
 
@@ -496,6 +502,8 @@ function AuthRows({
   onSignOut,
   onComplete,
   onCopied,
+  bare = false,
+  onlyAccount,
 }: {
   server: string;
   accounts: McpAuthAccount[];
@@ -513,34 +521,37 @@ function AuthRows({
   onSignOut: (account: McpAuthAccount) => void;
   onComplete: (key: string, redirectUrl: string) => void;
   onCopied: (ok: boolean) => void;
+  bare?: boolean;
+  onlyAccount?: { provider: string; email: string };
 }) {
   const t = useTokens();
   const [redirects, setRedirects] = useState<Record<string, string>>({});
   const rows = accounts
+    .filter(
+      (account) =>
+        !onlyAccount || (account.provider === onlyAccount.provider && account.email === onlyAccount.email),
+    )
     .map((account) => {
       const dest = destinations.find((entry) => entry.provider === account.provider && entry.account === account.email);
-      const needs = account.needsAuth.includes(server);
+      const state = oauthState(account, server);
+      const session = sessions.find(
+        (entry) =>
+          entry.server === server &&
+          entry.account === account.email &&
+          entry.provider === account.provider &&
+          entry.workspaceId === workspaceId,
+      );
       return {
         account,
         defined: forceDefined || (dest ? presentIn.includes(dest.id) : false),
-        needs,
-        auth: account.authStatus[server] ?? (needs ? "not-connected" : "unknown"),
+        ...state,
+        session,
       };
     })
-    .filter((row) => row.defined || row.needs);
+    .filter((row) => (row.defined || row.needs) && (row.known || row.session));
   if (rows.length === 0 || !oauthCapable) return null;
 
-  return (
-    <Section title="OAuth connection">
-      <Card padded={false}>
-        {rows.map(({ account, auth }, index) => {
-          const session = sessions.find(
-            (entry) =>
-              entry.server === server &&
-              entry.account === account.email &&
-              entry.provider === account.provider &&
-              entry.workspaceId === workspaceId,
-          );
+  const content = rows.map(({ account, auth, session }, index) => {
           const live = session?.state === "starting" || session?.state === "waiting";
           const connected = session?.state === "done" || auth === "connected";
           const failed = session?.state === "failed";
@@ -572,8 +583,12 @@ function AuthRows({
             <Row
               key={`${account.provider}-${account.dir}`}
               first={index === 0}
-              title={account.email}
-              subtitle={`${account.isPrimary ? "primary" : "routed"} ${account.provider === "claude" ? "Claude" : "Codex"} account`}
+              title={bare ? "Account connection" : account.email}
+              subtitle={
+                bare
+                  ? `${account.email} · ${account.isPrimary ? "primary" : "routed"} ${account.provider === "claude" ? "Claude" : "Codex"}`
+                  : `${account.isPrimary ? "primary" : "routed"} ${account.provider === "claude" ? "Claude" : "Codex"} account`
+              }
               trailing={
                 connected ? (
                   <>
@@ -654,8 +669,11 @@ function AuthRows({
               }
             />
           );
-        })}
-      </Card>
+        });
+  if (bare) return <View style={{ gap: t.space.xs }}>{content}</View>;
+  return (
+    <Section title="Account connections">
+      <Card padded={false}>{content}</Card>
     </Section>
   );
 }
@@ -952,6 +970,18 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
   const missing = server ? destinations.filter((dest) => !server.presentIn.includes(dest.id)) : [];
   const rawRows: RawDefRow[] = rawQuery.data?.rows ?? [];
   const defRows: McpDefRow[] = defQuery.data?.rows ?? [];
+  const accountForDestination = (dest: Destination) =>
+    (authQuery.data?.accounts ?? []).find(
+      (account) => account.provider === dest.provider && account.email === dest.account,
+    );
+  const oauthDestinations = server
+    ? destinations.filter((dest) => {
+        if (!server.presentIn.includes(dest.id) || server.inlineCredentialsIn.includes(dest.id)) return false;
+        const account = accountForDestination(dest);
+        return Boolean(account && oauthState(account, server.name).known);
+      })
+    : [];
+  const inlineCredentialCount = server?.inlineCredentialsIn.length ?? 0;
   const refreshAction = <Button key="refresh" label="Refresh" variant="ghost" grow={layout.compact} onPress={invalidate} />;
   const panelActions: React.ReactNode[] = mode === "browse" && !selected
     ? [
@@ -1255,14 +1285,14 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
     </View>
   );
 
-  const authRows = (entry: McpServerRow) => (
+  const destinationConnection = (entry: McpServerRow, dest: Destination) => (
     <AuthRows
       server={entry.name}
       accounts={authQuery.data?.accounts ?? []}
-      destinations={destinations}
-      presentIn={entry.presentIn}
+      destinations={[dest]}
+      presentIn={[dest.id]}
       sessions={sessions}
-      oauthCapable={entry.transport === "http" && entry.authStyle === "oauth-or-none"}
+      oauthCapable={entry.transport === "http" && !entry.inlineCredentialsIn.includes(dest.id)}
       daemonIsLocal={daemonIsLocal}
       pendingAccount={
         loginMutation.isPending && loginMutation.variables
@@ -1293,6 +1323,8 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
             : { tone: "attention", text: "No clipboard here — the link above is selectable." },
         )
       }
+      bare
+      onlyAccount={{ provider: dest.provider, email: dest.account }}
     />
   );
 
@@ -1305,7 +1337,8 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
             {server.name}
           </Text>
           <Tag label={server.transport} />
-          {server.transport === "http" && server.authStyle === "oauth-or-none" ? <Tag label="OAuth available" /> : null}
+          {inlineCredentialCount > 0 ? <Tag label={`credentials in ${inlineCredentialCount}`} /> : null}
+          {oauthDestinations.length > 0 ? <Tag label={`OAuth on ${oauthDestinations.length}`} /> : null}
           {serverHealth ? (
             <StatusPill status={healthStatus(serverHealth.status)} label={healthWord(serverHealth.status)} />
           ) : null}
@@ -1350,13 +1383,9 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
         </Disclosure>
       </Card>
 
-      {server.transport === "http" && server.authStyle === "oauth-or-none" && authQuery.isLoading ? (
-        <Loading label="Reading account connections…" />
-      ) : null}
-      {server.transport === "http" && server.authStyle === "oauth-or-none" && authQuery.error ? (
+      {server.transport === "http" && authQuery.error ? (
         <ErrorText>{errorText(authQuery.error)}</ErrorText>
       ) : null}
-      {authRows(server)}
 
       {revealed ? (
         <Notice tone="error">
@@ -1378,6 +1407,8 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
             const rawRow = rawRows.find((entry) => entry.destId === dest.id);
             const defRow = defRows.find((entry) => entry.destId === dest.id);
             const open = editing === dest.id && present;
+            const authAccount = accountForDestination(dest);
+            const destinationOauth = authAccount ? oauthState(authAccount, server.name) : null;
             return (
               <Row
                 key={dest.id}
@@ -1389,23 +1420,26 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
                     ? rawRow?.nativePreview ?? (rawQuery.isFetching ? "reading…" : undefined)
                     : "not defined here"
                 }
+                meta={
+                  present && server.inlineCredentialsIn.includes(dest.id) ? (
+                    <StatusPill status="ok" label="credentials in definition" />
+                  ) : present && destinationOauth?.known ? (
+                    <StatusPill
+                      status={destinationOauth.auth === "connected" ? "ok" : "attention"}
+                      label={destinationOauth.auth === "connected" ? "OAuth connected" : "OAuth needed"}
+                    />
+                  ) : undefined
+                }
                 trailing={
                   present ? (
                     open ? undefined : (
-                      <>
-                        <Button
-                          label="Edit"
-                          onPress={() => {
-                            setEditing(dest.id);
-                            setEditTab("fields");
-                          }}
-                        />
-                        <ConfirmButton
-                          label="Remove"
-                          confirmLabel="Remove from here"
-                          onConfirm={() => removeMutation.mutate({ name: server.name, targets: [dest.id] })}
-                        />
-                      </>
+                      <Button
+                        label="Manage"
+                        onPress={() => {
+                          setEditing(dest.id);
+                          setEditTab("fields");
+                        }}
+                      />
                     )
                   ) : (
                     <Button
@@ -1418,24 +1452,32 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
                 }
                 expanded={
                   open ? (
-                    <DestinationEditor
-                      tab={editTab}
-                      onTab={setEditTab}
-                      defRow={defRow}
-                      rawRow={rawRow}
-                      saving={editOneMutation.isPending}
-                      otherCount={destinations.length - 1}
-                      onSaveFields={(input) => editOneMutation.mutate({ destId: dest.id, ...input })}
-                      onPut={(json, dryRun) => putJson(dest.id, json, dryRun)}
-                      onCopyEverywhere={() =>
-                        applyMutation.mutate({
-                          name: server.name,
-                          targets: destinations.filter((other) => other.id !== dest.id).map((other) => other.id),
-                          sourceDestId: dest.id,
-                        })
-                      }
-                      onClose={closeEditor}
-                    />
+                    <View style={{ gap: t.space.md }}>
+                      {destinationConnection(server, dest)}
+                      <DestinationEditor
+                        tab={editTab}
+                        onTab={setEditTab}
+                        defRow={defRow}
+                        rawRow={rawRow}
+                        saving={editOneMutation.isPending}
+                        otherCount={destinations.length - 1}
+                        onSaveFields={(input) => editOneMutation.mutate({ destId: dest.id, ...input })}
+                        onPut={(json, dryRun) => putJson(dest.id, json, dryRun)}
+                        onCopyEverywhere={() =>
+                          applyMutation.mutate({
+                            name: server.name,
+                            targets: destinations.filter((other) => other.id !== dest.id).map((other) => other.id),
+                            sourceDestId: dest.id,
+                          })
+                        }
+                        onClose={closeEditor}
+                      />
+                      <ConfirmButton
+                        label="Remove from this destination"
+                        confirmLabel="Remove from here"
+                        onConfirm={() => removeMutation.mutate({ name: server.name, targets: [dest.id] })}
+                      />
+                    </View>
                   ) : undefined
                 }
               />
@@ -1569,6 +1611,11 @@ export function McpWorkspacePanel({ theme, layout, workspaceId }: PluginWorkspac
   const server: ProjectMcpServer | undefined = selected
     ? data?.servers.find((entry) => entry.name === selected)
     : undefined;
+  const projectOauthAccounts = server
+    ? (data?.accounts ?? []).filter(
+        (account) => account.provider === "claude" && oauthState(account, server.name).known,
+      )
+    : [];
   const refresh = () => void queryClient.invalidateQueries({ queryKey: ["agent-link", "mcp-workspace", workspaceId] });
 
   const body = !workspace ? (
@@ -1584,26 +1631,26 @@ export function McpWorkspacePanel({ theme, layout, workspaceId }: PluginWorkspac
         <View style={{ flexDirection: "row", alignItems: "center", gap: t.space.sm }}>
           <Text style={[t.text.display, { flexShrink: 1 }]} numberOfLines={1}>{server.name}</Text>
           <Tag label={server.transport} />
-          {server.transport === "http" && server.authStyle === "oauth-or-none" ? <Tag label="OAuth available" /> : null}
+          {projectOauthAccounts.length > 0 ? <Tag label={`OAuth on ${projectOauthAccounts.length}`} /> : null}
         </View>
         {server.detail ? <Text style={t.text.caption}>{server.detail}</Text> : null}
       </View>
       {server.authStyle === "inline-credentials" ? (
         <Notice tone="ok">This project definition already supplies credentials; no OAuth grant is required here.</Notice>
       ) : null}
-      {server.transport === "http" && server.authStyle === "oauth-or-none" && loginQuery.isLoading ? (
+      {projectOauthAccounts.length > 0 && loginQuery.isLoading ? (
         <Loading label="Reading account connections…" />
       ) : null}
-      {server.transport === "http" && server.authStyle === "oauth-or-none" && loginQuery.error ? (
+      {projectOauthAccounts.length > 0 && loginQuery.error ? (
         <ErrorText>{errorText(loginQuery.error)}</ErrorText>
       ) : null}
       <AuthRows
         server={server.name}
-        accounts={data.accounts.filter((account) => account.provider === "claude")}
+        accounts={projectOauthAccounts}
         destinations={[]}
         presentIn={[]}
         sessions={sessions}
-        oauthCapable={server.transport === "http" && server.authStyle === "oauth-or-none"}
+        oauthCapable={projectOauthAccounts.length > 0}
         daemonIsLocal={loginQuery.data?.daemonIsLocal ?? true}
         pendingAccount={
           loginMutation.isPending && loginMutation.variables

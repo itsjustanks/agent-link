@@ -21,7 +21,8 @@ import {
   probeAccounts,
   addAccount,
   removeAccount,
-  routerLaunch,
+  routerInstall,
+  routerStatus,
   scan,
   setCooldown,
   setPreference,
@@ -47,7 +48,8 @@ import {
   handleProbeAccounts,
   handleAddAccount,
   handleRemoveAccount,
-  handleRouterLaunch,
+  handleRouterInstall,
+  handleRouterStatus,
   handleScan,
   handleSetCooldown,
   handleSetPreference,
@@ -94,7 +96,8 @@ export default function contribute(plugin: PluginContext) {
   plugin.handle(scan, handleScan);
   plugin.handle(wireProvider, handleWireProvider);
   plugin.handle(wireAuto, handleWireAuto);
-  plugin.handle(routerLaunch, handleRouterLaunch);
+  plugin.handle(routerStatus, handleRouterStatus);
+  plugin.handle(routerInstall, handleRouterInstall);
   plugin.handle(setCooldown, handleSetCooldown);
   plugin.handle(addAccount, handleAddAccount);
   plugin.handle(removeAccount, handleRemoveAccount);

@@ -33,7 +33,7 @@ const STATE_PATH = (() => {
   return join(root, "state", "paseo-limit-sentry.json");
 })();
 
-const LIMIT_ERROR = /usage limit|rate limit|spend limit|limit reached|billing|out of credits|quota exceeded/i;
+const LIMIT_ERROR = /usage limit|rate limit|spend limit|limit reached|billing|out of credits|quota exceeded|you(?:'|’)ve\s+(?:hit|reached)\s+[^.!\n]{0,80}\blimit\b/i;
 // Every provider's limit-death is worth SHOWING; only providers with an
 // account pool behind them are worth auto-nudging — for the rest a retry just
 // hammers the same exhausted account, so the human picks the moment.
@@ -47,7 +47,7 @@ const NON_LIMIT_GUARD_MS = 20 * 1000;
 // message: the turn COMPLETES and the agent settles at "idle", never "error".
 // So idle transitions get a cheap check of just the newest timeline entry for
 // the refusal phrasing — the error path alone would miss every such death.
-const REFUSAL_TEXT = /you've hit your [^.!\n]{0,40}limit|usage limit reached|monthly spend limit|spend limit reached/i;
+const REFUSAL_TEXT = /you(?:'|’)ve\s+(?:hit|reached)\s+[^.!\n]{0,80}\blimit\b|usage limit reached|monthly spend limit|spend limit reached/i;
 const IDLE_CHECK_GUARD_MS = 60 * 1000;
 const lastIdleCheck = new Map<string, number>();
 

@@ -70,10 +70,28 @@ export const scan = defineRpc({
   }),
 });
 
-export const routerLaunch = defineRpc({
-  name: "agent-link.router-launch",
-  input: z.object({ prompt: z.string().min(1) }),
-  output: z.object({ ok: z.boolean(), message: z.string() }),
+export const RouterProviderStatusSchema = z.object({
+  installed: z.boolean(),
+  configured: z.boolean(),
+  loaded: z.boolean(),
+  launcherPath: z.string(),
+  rulesPath: z.string(),
+  baseProvider: z.string(),
+  baseModel: z.string(),
+  message: z.string(),
+});
+export type RouterProviderStatus = z.infer<typeof RouterProviderStatusSchema>;
+
+export const routerStatus = defineRpc({
+  name: "agent-link.router-status",
+  input: z.object({}),
+  output: RouterProviderStatusSchema,
+});
+
+export const routerInstall = defineRpc({
+  name: "agent-link.router-install",
+  input: z.object({}),
+  output: RouterProviderStatusSchema,
 });
 
 export const wireAuto = defineRpc({
@@ -269,6 +287,7 @@ export const McpServerRowSchema = z.object({
   transport: z.enum(["stdio", "http", "unknown"]),
   detail: z.string(),
   authStyle: z.enum(["inline-credentials", "oauth-or-none"]),
+  inlineCredentialsIn: z.array(z.string()),
   presentIn: z.array(z.string()), // destination ids
 });
 export type McpServerRow = z.infer<typeof McpServerRowSchema>;

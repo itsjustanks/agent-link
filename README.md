@@ -69,9 +69,11 @@ agent-link update
 
 ![The Agent Link tab: a Routing card showing the auto-router installed for Claude and Codex, then each account with its state, park timer, credit note and launch count](docs/screenshots/agent-link.png)
 
-The panel has five operational tabs: **Accounts, Limit sentry, Memory guard, AgentRouter, and FAQs**. Provider tabs — Claude, Codex, Kimi, Grok, and custom additions — appear only inside Accounts. Automatic routing is the first collapsible account-list row; every account row owns its live quota meters, reset times, rotation state, cooldown, priority, and on-request 7-day activity. There are no separate usage or routing dashboards repeating the same accounts. A cheap 30-second heartbeat refreshes provider registration, account readiness, routing decisions, limit sentry, and capacity snapshots without launching a provider; **Deep check** remains manual because it starts the provider. **Probe accounts** runs the CLI's measured Claude check from the panel, spends one small turn per account, cools refusals and releases proven-working accounts.
+The panel has five operational tabs: **Accounts, Limit sentry, Memory guard, AgentRouter, and FAQs**. Provider tabs — Claude, Codex, Kimi, Grok, and custom additions — appear only inside Accounts. Automatic routing is the first collapsible account-list row; every account row owns its live quota meters, reset times, rotation state, cooldown, priority, and on-request 7-day activity. There are no separate usage or routing dashboards repeating the same accounts. A cheap 30-second heartbeat refreshes provider registration, account readiness, routing decisions, limit sentry, and capacity snapshots without launching a provider; **Deep check** remains manual because it starts the provider. **Probe accounts** spends one small Claude turn per account, keeps refusals held out, and releases only accounts that actually serve.
 
-One click installs a **Dynamic Agent Link** provider. Pick that single provider and every new agent passes through a deterministic route: quota/health gate → priority target group → least-recently-used account. The panel shows every target, its quota headroom and cooldown state, the next decision, and a bounded history of real launches. A running agent is never re-routed: its account is fixed when the process starts, and nothing swaps underneath a live session.
+One click installs a **Dynamic Agent Link** provider. Pick that single provider and every new agent passes through a deterministic route: quota/health gate → priority target group → least-recently-used account. The panel labels its **next new launch** forecast separately from the bounded history of real Paseo agents and projects. A running agent is never re-routed: its account is fixed when the process starts, and nothing swaps underneath a live session.
+
+The **AgentRouter** tab installs a separate, normal Paseo provider. Its Haiku 4.5 base handles cheap triage and delegates larger tasks through Paseo; its Claude process still launches through Dynamic Agent Link, so account health routing is preserved.
 
 The control-plane vocabulary is inspired by [Plexus](https://github.com/mcowger/plexus) (MIT): healthy targets, ordered groups, selectors, cooldowns, and decision evidence. Agent Link applies those ideas to CLI process launches rather than API requests, so failover means the next launch/resume moves to a healthy account; it never claims to switch an in-flight agent. Routed launches record the exact Paseo agent ID and working directory, so duplicate-account rows show which agent last consumed that shared quota. If every target is parked, the launch stops cleanly instead of silently falling onto a known-exhausted primary.
 
@@ -79,7 +81,7 @@ The control-plane vocabulary is inspired by [Plexus](https://github.com/mcowger/
 
 ![The MCP tab: servers listed with coverage and live health, plus actions to add, import and sync definitions](docs/screenshots/mcp.png)
 
-Each server now owns its definition, automatic health result, destinations and account OAuth actions in one full-width view. There is no separate Connections, Diagnostics or Transfer maze: import and sync are actions on the server list, and health runs when the surface opens and every 15 minutes while it stays open.
+Each server now owns its automatic health result and destination/account rows in one full-width view. There is no separate OAuth destination list: a destination owns both its definition and, only when the provider reports it, its account OAuth action. Header/env values, credential-bearing URL queries and secret command arguments are classified as inline credentials instead of being mislabeled OAuth.
 
 - Add, remove or **rename a server everywhere at once**
 - **Edit the raw JSON** for one destination, with a dry-run preview before anything is written (TOML destinations are translated both ways, so you never type TOML and never need to know that Codex spells headers `http_headers`)
@@ -145,10 +147,10 @@ An account can be signed in and healthy yet still refuse a specific model — a 
 agent-link probe claude claude-fable-5 --park
 #   you@work.com     ok
 #   you@side.com     CANNOT SERVE claude-fable-5
-#       parked for 180m — routing will skip it
+#       HELD — routing skips it until a probe actually serves
 ```
 
-Each account answers one token on that model; `--park` sidelines the ones that refuse, so rotation stops sending them work. Re-run it when limits reset.
+Each account answers one token on that model; `--park` holds the ones that refuse out of rotation. Re-run it after a reset; only a passing call releases the hold.
 
 Two guarantees that make this safe:
 
@@ -179,7 +181,7 @@ This wires the two signals Claude Code actually emits, per account:
 
 Claude exposes those quota fields only to an **interactive** statusline after its first response. Paseo runs Claude non-interactively, so Agent Link also reads Claude's token-free cached `/usage` result from `.claude.json` when available. If a routed Claude account still says “no report,” run `agent-link run claude <email> claude`, send one message, and refresh. Codex does not need this step because every rollout persists its quota windows.
 
-So the full lifecycle is hands-off: drain at 85% → park at 99% or on the refusal → dead chats continue on the next `--resume` → a *window* park expires at the real reset, while a **monthly spend limit becomes a HOLD** — no expiry, because time cannot prove it over; a passing `agent-link probe` or `agent-link cooldown <prov> <email> clear` releases it (and `cooldown <prov> <email> hold` parks by hand the same way).
+So the full lifecycle is hands-off: drain at 85% → park at 99% or on the refusal → dead chats continue on the next `--resume` → a *window* park expires at the provider's exact reset. A refusal with no verified reset becomes a **HOLD**, not a guessed timer; a small hourly recheck or an explicit `agent-link probe` releases it only after it serves. `agent-link cooldown <prov> <email> clear` remains the manual override.
 
 `agent-link usage` is `/usage` across every account: live 5-hour/weekly percentages with reset times, captured from each account's own sessions, plus park/hold state — the same meters render per account in the Paseo panel. And `agent-link prefer <prov> <email> first|last` biases routing toward or away from an account (health still wins: a preferred account that is parked or nearing loses to a healthy ordinary one). `agent-link pools` shows the *nearing limit* tier; `agent-link hooks remove` undoes everything.
 

@@ -183,7 +183,14 @@ function collectSlots(): Array<Omit<Slot, "wiredProviderId" | "cooldownUntil" | 
 
 type ProviderOverrides = Record<
   string,
-  { extends?: string; env?: Record<string, string>; enabled?: boolean; label?: string } | undefined
+  {
+    extends?: string;
+    env?: Record<string, string>;
+    enabled?: boolean;
+    label?: string;
+    command?: string[];
+    models?: Array<{ id: string; label?: string; description?: string; isDefault?: boolean }>;
+  } | undefined
 >;
 
 // The daemon returns config FLATTENED — providers live at config.providers,
@@ -528,6 +535,19 @@ function tomlMcpWrite(path: string, name: string, def: McpDef | null): void {
 // --api-key …) and in URL query strings.
 const SECRETISH = /(token|secret|key|password|auth|bearer|credential)/i;
 
+export function hasInlineCredentials(def: McpDef | null): boolean {
+  if (!def) return false;
+  if ((def.env && Object.keys(def.env).length > 0) || (def.headers && Object.keys(def.headers).length > 0)) return true;
+  if ((def.args ?? []).some((arg) => SECRETISH.test(arg))) return true;
+  if (!def.url) return false;
+  try {
+    return [...new URL(def.url).searchParams.keys()].some((key) => SECRETISH.test(key));
+  } catch {
+    // A malformed URL is already surfaced by health/editing. Do not infer auth.
+    return false;
+  }
+}
+
 export function redactDetail(def: McpDef | null): string {
   if (!def) return "";
   if (def.url) return def.url.replace(/\?.*/, "?…");
@@ -783,7 +803,7 @@ export async function handleProbeAccounts({
       finish({
         ok: code === 0,
         message: refused
-          ? "Probe complete. Refusing accounts were cooled down; passing accounts were released."
+          ? "Probe complete. Refusing accounts are held out; passing accounts were released."
           : "Probe complete. Every checked account served the model.",
         log,
       });
@@ -953,63 +973,90 @@ export async function handleWireAuto({ provider }: { provider: "claude" | "codex
   return { ok: true, message: `'${providerId}' wired — restart the Paseo daemon to load it` };
 }
 
-// AgentRouter: an on-demand orchestrating agent — a cheap base model that
-// triages the task and delegates to the right provider/model through Paseo's
-// own tools, naming its choice in every reply. It is an AGENT, not a provider:
-// Paseo's adapter owns a provider command's CLI arguments (an injected
-// --append-system-prompt-file never reached the session — measured), while
-// agents.create carries a real per-agent systemPrompt.
-const ROUTER_FALLBACK_PROMPT = `You are AgentRouter: a routing layer over the coding agents on this machine.
-You run on a cheap base model. On EVERY user message: answer directly when the
-task is small, otherwise delegate via your Paseo tools (create_agent in THIS
-workspace with the best provider, e.g. "claude-auto" or "codex-auto", or
-"provider/model"), relay the result faithfully, and reuse a subagent for
-follow-ups. Account choice under a provider is automatic — never pick accounts.
-MANDATORY: end EVERY response with exactly one line:
-Routed: <provider/model> — <short reason>`;
+const ROUTER_PROVIDER_ID = "agent-router";
+const ROUTER_BASE_MODEL = "claude-haiku-4-5";
 
-function routerSystemPrompt(): string {
-  try {
-    const dir = join(AGENT_LINK_HOME_DIR, "router");
-    const prompt = readFileSync(join(dir, "prompt.md"), "utf8");
-    let rules = "";
-    try {
-      rules = readFileSync(join(dir, "rules.md"), "utf8");
-    } catch {
-      // rules are optional
-    }
-    return rules ? `${prompt}\n----- ROUTING RULES (user-edited) -----\n${rules}` : prompt;
-  } catch {
-    return ROUTER_FALLBACK_PROMPT;
-  }
+function agentLinkBinary(): string | null {
+  return searchPath()
+    .flatMap((directory) => [join(directory, "agent-link"), join(directory, "agent-auth")])
+    .find(existsSync) ?? null;
 }
 
-export async function handleRouterLaunch({ prompt }: { prompt: string }, { paseo }: PluginHandlerContext) {
-  let model = "";
-  try {
-    const models = (await paseo.providers.listModels("claude" as never)) as { models?: Array<{ id?: string }> };
-    model = models.models?.map((m) => m.id ?? "").find((id) => /haiku/i.test(id)) ?? "";
-  } catch {
-    // Without a model id the provider default serves; dearer, still correct.
-  }
+async function routerProviderStatus(paseo: PluginHandlerContext["paseo"], message = "") {
+  const launcherPath = join(AGENT_LINK_HOME_DIR, "bin", ROUTER_PROVIDER_ID);
+  const rulesPath = join(AGENT_LINK_HOME_DIR, "router", "rules.md");
   const overrides = await providerOverrides(paseo);
-  const base = overrides["claude-auto"] ? "claude-auto" : "claude";
-  const provider = model ? `${base}/${model}` : base;
-  const workspaces = await paseo.workspaces.list();
-  const workspace = (workspaces as { entries?: Array<{ id: string; name?: string | null }> }).entries?.[0];
-  if (!workspace) return { ok: false, message: "no workspace to run in — open one in Paseo first" };
+  let loaded = false;
   try {
-    await paseo.workspaces.ref(workspace.id).agents.create({
-      config: { provider, systemPrompt: routerSystemPrompt() },
-      title: "AgentRouter",
-      prompt,
+    const available = await paseo.providers.listAvailable();
+    loaded = available.providers.some((entry: { provider: string }) => entry.provider === ROUTER_PROVIDER_ID);
+  } catch {
+    // Configured remains useful when an older daemon cannot report availability.
+  }
+  const installed = existsSync(launcherPath) && existsSync(rulesPath);
+  const configured = Boolean(overrides[ROUTER_PROVIDER_ID]);
+  return {
+    installed,
+    configured,
+    loaded,
+    launcherPath,
+    rulesPath,
+    baseProvider: "Claude (Dynamic Agent Link)",
+    baseModel: "Haiku 4.5",
+    message:
+      message ||
+      (loaded
+        ? "AgentRouter is available in Paseo's provider picker."
+        : configured
+          ? "AgentRouter is configured; reload Paseo to publish it."
+          : installed
+            ? "The router launcher is ready; add its Paseo provider profile."
+            : "AgentRouter is not installed."),
+  };
+}
+
+export async function handleRouterStatus(_input: Record<string, never>, { paseo }: PluginHandlerContext) {
+  return routerProviderStatus(paseo);
+}
+
+export async function handleRouterInstall(_input: Record<string, never>, { paseo }: PluginHandlerContext) {
+  const binary = agentLinkBinary();
+  if (!binary) return routerProviderStatus(paseo, "Install the AgentLink CLI first.");
+  try {
+    execFileSync(binary, ["router", "install"], {
+      encoding: "utf8",
+      timeout: 15_000,
+      env: { ...process.env, AGENT_LINK_HOME: AGENT_LINK_HOME_DIR },
     });
-    return {
-      ok: true,
-      message: `AgentRouter started in "${workspace.name ?? workspace.id}" on ${provider} — every reply names its routing choice`,
-    };
+    const launcherPath = join(AGENT_LINK_HOME_DIR, "bin", ROUTER_PROVIDER_ID);
+    if (!existsSync(launcherPath)) return routerProviderStatus(paseo, "AgentRouter launcher was not created.");
+    await paseo.config.patch({
+      agents: {
+        providers: {
+          [ROUTER_PROVIDER_ID]: {
+            extends: "claude",
+            label: "AgentRouter (Dynamic Agent Link)",
+            description: "Cheap task triage that delegates complex work through Paseo while account choice stays health-routed",
+            command: [launcherPath],
+            models: [
+              {
+                id: ROUTER_BASE_MODEL,
+                label: "Haiku 4.5 (router)",
+                description: "Fast base model for triage and delegation",
+                isDefault: true,
+              },
+            ],
+          },
+        },
+      },
+    } as never);
+    needsRestart = true;
+    return routerProviderStatus(paseo, "AgentRouter installed. Reload Paseo, then choose it like any other provider.");
   } catch (caught) {
-    return { ok: false, message: `could not start: ${caught instanceof Error ? caught.message.split("\n")[0] : String(caught)}` };
+    return routerProviderStatus(
+      paseo,
+      `AgentRouter install failed: ${caught instanceof Error ? caught.message.split("\n")[0] : String(caught)}`,
+    );
   }
 }
 
@@ -1179,6 +1226,8 @@ export async function handleSetCooldown({
   try {
     if (minutes <= 0) {
       rmSync(file, { force: true });
+      rmSync(join(poolsDir(), `hold-${provider}-${email}`), { force: true });
+      rmSync(join(poolsDir(), `reason-${provider}-${email}`), { force: true });
       return { ok: true, message: `${email} is back in rotation` };
     }
     mkdirSync(poolsDir(), { recursive: true });
@@ -1877,15 +1926,16 @@ export async function handleMcpMatrix(_input: Record<string, never>, { paseo }: 
     }
     const transport: "stdio" | "http" | "unknown" = def?.command ? "stdio" : def?.url ? "http" : "unknown";
     // Key names only — env/header VALUES never leave the handler.
-    const hasInline = Boolean(
-      (def?.env && Object.keys(def.env).length > 0) || (def?.headers && Object.keys(def.headers).length > 0),
-    );
+    const inlineCredentialsIn = destinations
+      .filter((dest) => hasInlineCredentials(defsByDest.get(dest.id)?.[name] ?? null))
+      .map((dest) => dest.id);
     const detail = redactDetail(def).slice(0, 80);
     return {
       name,
       transport,
       detail,
-      authStyle: hasInline ? ("inline-credentials" as const) : ("oauth-or-none" as const),
+      authStyle: inlineCredentialsIn.length > 0 ? ("inline-credentials" as const) : ("oauth-or-none" as const),
+      inlineCredentialsIn,
       presentIn,
     };
   });
@@ -2404,9 +2454,7 @@ export async function handleMcpWorkspace(
   const definitions = configPath ? jsonMcpRead(configPath) : {};
   const servers = Object.entries(definitions)
     .map(([name, def]) => {
-      const hasInline = Boolean(
-        (def.env && Object.keys(def.env).length > 0) || (def.headers && Object.keys(def.headers).length > 0),
-      );
+      const hasInline = hasInlineCredentials(def);
       return {
         name,
         transport: def.command ? ("stdio" as const) : def.url ? ("http" as const) : ("unknown" as const),
