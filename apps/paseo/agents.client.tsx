@@ -1,4 +1,4 @@
-import type { PluginSurfaceProps } from "@getpaseo/plugin";
+import type { PluginAgentPanelProps, PluginSurfaceProps } from "@getpaseo/plugin";
 import { useRpc } from "@getpaseo/plugin";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import React, { useEffect, useState } from "react";
@@ -19,6 +19,7 @@ import {
   setPreference,
   routerInstall,
   routerStatus,
+  routerTrace,
   wireAuto,
   wireProvider,
   type AccountUsage,
@@ -1399,19 +1400,19 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
       {panelTab === "router" && routerProviderQuery.data ? (
         <Card padded={false}>
           <View style={{ padding: pad, gap: t.space.xs }}>
-            <Text style={t.text.heading}>AgentRouter provider</Text>
+            <Text style={t.text.heading}>AgentRouter</Text>
             <Text style={t.text.caption}>
-              Choose AgentRouter from Paseo's normal provider picker in any workspace. Haiku handles triage; larger tasks delegate through Paseo.
+              A virtual route across ordered provider/model targets. Haiku selects the route; a concrete Paseo child performs every answer.
             </Text>
           </View>
           <Row
             first
-            title="AgentRouter (Dynamic Agent Link)"
-            subtitle="Provider choice happens inside AgentRouter; Claude account choice still passes through the existing health router."
+            title="Plexus-style target routing"
+            subtitle="Targets are tried in order. Unavailable providers are skipped; AgentLink applies account health and cooldown inside Claude and Codex."
             meta={
               <Facts
                 items={[
-                  { value: `base: ${routerProviderQuery.data.baseModel}` },
+                  { value: `control: ${routerProviderQuery.data.baseModel}` },
                   { value: routerProviderQuery.data.loaded ? "available in Paseo" : routerProviderQuery.data.configured ? "reload required" : "not configured", tone: routerProviderQuery.data.loaded ? "ok" : "attention" },
                 ]}
               />
@@ -1429,8 +1430,22 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
               )
             }
             expanded={
-              <View style={{ gap: t.space.xs }}>
+              <View style={{ gap: t.space.md }}>
                 <Text style={t.text.caption}>{routerProviderQuery.data.message}</Text>
+                {routerProviderQuery.data.targetGroups.map((group) => (
+                  <View key={group.name} style={{ gap: t.space.xs }}>
+                    <Facts items={[{ value: group.name }, { value: group.purpose }, { value: group.selector }]} />
+                    {group.targets.map((target, index) => (
+                      <View key={`${group.name}-${target.provider}-${target.model}`} style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: t.space.sm }}>
+                        <Text style={t.text.caption}>{`${index + 1}. ${target.provider} / ${target.model}`}</Text>
+                        <StatusPill
+                          status={target.available === true ? "ok" : target.available === false ? "attention" : "neutral"}
+                          label={target.available === true ? "available" : target.available === false ? "unavailable" : "unknown"}
+                        />
+                      </View>
+                    ))}
+                  </View>
+                ))}
                 <CodeBlock>{routerProviderQuery.data.rulesPath}</CodeBlock>
               </View>
             }
@@ -1456,6 +1471,61 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
           ) : null}
         </Card>
       ) : null}
+    </Screen>
+  );
+}
+
+function routeNodeStatus(status: string): Status {
+  const normalized = status.toLowerCase();
+  if (normalized.includes("error") || normalized.includes("fail")) return "error";
+  if (normalized.includes("run") || normalized.includes("work") || normalized.includes("start")) return "busy";
+  if (normalized.includes("complete") || normalized.includes("finish") || normalized.includes("close")) return "ok";
+  if (normalized.includes("cancel") || normalized.includes("archive")) return "neutral";
+  return "attention";
+}
+
+export function AgentRoutingPanel({ theme, layout, agentId }: PluginAgentPanelProps) {
+  const t = useUi(theme, layout.compact);
+  const callRouterTrace = useRpc(routerTrace);
+  const trace = useQuery({
+    queryKey: ["agent-link", "router-trace", agentId],
+    queryFn: () => callRouterTrace({ agentId }),
+    refetchInterval: 15_000,
+  });
+
+  if (trace.isLoading) return <Screen t={t}><Loading label="Reading routing evidence…" /></Screen>;
+  if (trace.error) return <Screen t={t}><ErrorText>{trace.error instanceof Error ? trace.error.message : String(trace.error)}</ErrorText></Screen>;
+  if (!trace.data) return null;
+
+  return (
+    <Screen t={t}>
+      <Toolbar
+        title="Routing evidence"
+        subtitle="Control and answer models are shown separately. Provider-internal work is never presented as an auditable route."
+      />
+      <Notice tone={trace.data.isAgentRouter && !trace.data.nodes.some((node) => node.source === "paseo") ? "attention" : "neutral"}>
+        {trace.data.summary}
+      </Notice>
+      <Card padded={false}>
+        {trace.data.nodes.map((node, index) => (
+          <Row
+            key={`${node.source}-${node.id}`}
+            first={index === 0}
+            title={node.title}
+            subtitle={node.note}
+            meta={
+              <Facts
+                items={[
+                  { value: node.source === "control" ? "control plane" : node.source === "paseo" ? "answer model" : "model hidden" },
+                  { value: `${node.provider} / ${node.model}` },
+                  { value: `agent: ${node.id}` },
+                ]}
+              />
+            }
+            trailing={<StatusPill status={routeNodeStatus(node.status)} label={node.status} />}
+          />
+        ))}
+      </Card>
     </Screen>
   );
 }

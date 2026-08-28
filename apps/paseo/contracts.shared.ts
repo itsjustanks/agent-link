@@ -78,6 +78,20 @@ export const RouterProviderStatusSchema = z.object({
   rulesPath: z.string(),
   baseProvider: z.string(),
   baseModel: z.string(),
+  targetGroups: z.array(
+    z.object({
+      name: z.string(),
+      purpose: z.string(),
+      selector: z.literal("in_order"),
+      targets: z.array(
+        z.object({
+          provider: z.string(),
+          model: z.string(),
+          available: z.boolean().nullable(),
+        }),
+      ),
+    }),
+  ),
   message: z.string(),
 });
 export type RouterProviderStatus = z.infer<typeof RouterProviderStatusSchema>;
@@ -92,6 +106,27 @@ export const routerInstall = defineRpc({
   name: "agent-link.router-install",
   input: z.object({}),
   output: RouterProviderStatusSchema,
+});
+
+export const RouterTraceNodeSchema = z.object({
+  source: z.enum(["control", "paseo", "provider-internal"]),
+  id: z.string(),
+  title: z.string(),
+  provider: z.string(),
+  model: z.string(),
+  status: z.string(),
+  note: z.string(),
+});
+export type RouterTraceNode = z.infer<typeof RouterTraceNodeSchema>;
+
+export const routerTrace = defineRpc({
+  name: "agent-link.router-trace",
+  input: z.object({ agentId: z.string().min(1) }),
+  output: z.object({
+    isAgentRouter: z.boolean(),
+    summary: z.string(),
+    nodes: z.array(RouterTraceNodeSchema),
+  }),
 });
 
 export const wireAuto = defineRpc({

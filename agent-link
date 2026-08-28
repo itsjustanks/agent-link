@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.5.23"
+VERSION="0.5.24"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -901,48 +901,96 @@ router_dir() { echo "$ROOT/router"; }
 
 router_write_files() {
   mkdir -p "$(router_dir)"
-  if [ ! -f "$(router_dir)/rules.md" ]; then
+  # Migrate only the stock pre-Plexus rules. A genuinely edited file remains
+  # user-owned and is composed after the managed policy below.
+  if [ ! -f "$(router_dir)/rules.md" ] || {
+    grep -q "Stay on the base (cheap) model" "$(router_dir)/rules.md" 2>/dev/null &&
+    grep -q "long autonomous builds, wide refactors" "$(router_dir)/rules.md" 2>/dev/null
+  }; then
     cat > "$(router_dir)/rules.md" <<'EOF'
 # AgentRouter rules — edit freely; read at every launch.
-# The router follows these before its own judgment.
+# These refine target choice; they cannot disable route evidence.
 
-## Stay on the base (cheap) model for
-- triage, short answers, explanations, summaries, formatting
-- single-file edits under ~40 lines, quick lookups
-
-## Delegate
-- heavy coding, multi-file changes, debugging, reviews -> claude-auto (its default model)
-- long autonomous builds, wide refactors, migrations   -> codex-auto
+## Overrides
 - if the user names a provider or model, use exactly that
+- prefer subscription-backed auto pools before independent backups
+- pair implementation and verification on different provider families
 
 ## Never
 - delegate anything the user asked you to keep private
-- spawn more than 2 subagents for one request unless asked
+- run more than 2 concrete targets for one request unless asked
 EOF
   fi
+  cat > "$(router_dir)/policy.md" <<'EOF'
+# AgentRouter managed policy — Plexus-style virtual model alias
+
+Every user request resolves to one concrete Paseo provider/model target. Target
+groups are ordered and use `in_order`: skip unavailable targets, try the first
+healthy target, and move to the next target only after a real launch failure.
+Account selection inside `claude-auto` and `codex-auto` remains AgentLink's job.
+
+## fast — explanations, summaries, formatting, tiny edits
+1. claude-auto/claude-haiku-4-5
+2. codex-auto/gpt-5.6-luna
+3. kimi/kimi-code/kimi-for-coding-highspeed
+4. grok/grok-4.5
+
+## planning — product or implementation plans
+1. claude-auto/claude-fable-5
+2. codex-auto/gpt-5.6-terra
+3. grok/grok-4.6
+
+## judgment — architecture, UI/UX, audit, final review
+1. claude-auto/claude-opus-5
+2. grok/grok-4.6
+3. codex-auto/gpt-5.6-sol
+
+## build — multi-file implementation, debugging, migrations, refactors
+1. codex-auto/gpt-5.6-sol
+2. kimi/kimi-code/k3
+3. claude-auto/claude-opus-5
+
+## browser — browser-driving verification
+1. codex-auto/gpt-5.6-sol
+
+Model-specific quota may be unknowable until a target answers. A refusal is a
+failed target, never success; record it, let Limit Sentry cool its account, and
+try the next target. If the group is exhausted, fail closed and name every
+target attempted.
+EOF
   cat > "$(router_dir)/prompt.md" <<'EOF'
-You are AgentRouter: a routing layer over every coding agent on this machine.
-You run on a deliberately cheap base model. Your job on EVERY user message:
+You are AgentRouter, the control plane for a Plexus-style virtual model alias.
+The Claude Haiku process hosting you is NOT the answer model. On EVERY user
+message you must resolve and run one concrete Paseo provider/model target.
 
-1. Read the routing rules included below. They outrank your own judgment.
-2. Decide: answer directly on the base model (default — it is free-tier cheap),
-   or delegate to a better-suited provider/model.
-3. To delegate, use your Paseo tools: create_agent in THIS workspace with the
-   chosen provider (e.g. "claude-auto" or "codex-auto", optionally
-   "provider/model"), send it the task with full context, wait, then relay its
-   result faithfully. Reuse an existing subagent for follow-ups on the same
-   thread of work instead of spawning a new one.
-4. If Paseo tools are unavailable, say so and answer directly.
+1. Read the managed target policy and user rules below.
+2. Classify the request into one target group. If the user named a model, that
+   exact target wins.
+3. Use Paseo's provider/profile discovery to skip unavailable targets. Do not
+   claim quota health when the runtime does not expose it.
+4. Before launch, call Paseo `inspect_provider` for the target and select a mode
+   ID it actually reports. Then delegate only with the Paseo MCP `create_agent`
+   tool in THIS workspace. Pass the exact `provider/model`, compatible mode in
+   `settings`, full task context, and a title beginning `AgentRouter ·`. NEVER
+   use Claude's built-in Agent/Task subagent tool: Paseo cannot expose that
+   subagent's actual model, routing, or account evidence.
+5. Wait for the Paseo child and relay its result. On a real auth/quota/provider
+   failure, record the failed target and try the next healthy target in the
+   same group. Reuse the same Paseo child for follow-ups when it still fits.
+6. Do not inspect repositories, edit files, or answer the task on this control
+   model. If Paseo tools are unavailable or every target fails, fail closed.
 
-Account routing below the provider level (which login serves the call) is
-handled automatically by agent-link — never pick accounts.
-
-MANDATORY: end EVERY response with exactly one line:
-`Routed: <provider/model> — <short reason>`
-Use your own provider/model on that line when you answered directly.
+Before delegation, say `Routing: <group> -> <provider/model>`.
+End every final response with exactly:
+`Routed: <actual provider/model> · Paseo agent <id> — <short reason>`
+If no Paseo child ran, use:
+`Routed: none — routing failed; no answer model ran`
 EOF
   {
     cat "$(router_dir)/prompt.md"
+    echo
+    echo "----- MANAGED TARGET POLICY -----"
+    cat "$(router_dir)/policy.md"
     echo
     echo "----- ROUTING RULES (user-edited) -----"
     cat "$(router_dir)/rules.md"
@@ -1110,6 +1158,7 @@ cmd_router() { # [install|status]
       router_write_files
       echo "AgentRouter brain written."
       echo "  rules:  $(router_dir)/rules.md   (edit freely — read at every launch)"
+      echo "  policy: $(router_dir)/policy.md  (managed ordered target groups)"
       echo "  prompt: $(router_dir)/prompt.md"
       echo "  launcher: $SHIM_BIN/agent-router"
       echo "Install the AgentRouter provider from the Paseo Agent Link panel."
@@ -1118,6 +1167,7 @@ cmd_router() { # [install|status]
       if [ -f "$(router_dir)/rules.md" ] && [ -x "$SHIM_BIN/agent-router" ]; then
         echo "ready: $SHIM_BIN/agent-router"
         echo "rules: $(router_dir)/rules.md"
+        echo "policy: $(router_dir)/policy.md"
       else
         echo "not installed — agent-link router install"
       fi
@@ -2912,7 +2962,7 @@ usage:
   agent-link cooldown <prov> <email> [min|clear]   park an exhausted account
   agent-link nearing <prov> [email|primary] [clear]  soft-flag an account nearing its limit
   agent-link usage                 /usage across accounts: live window %%, resets, park state
-  agent-link router [install|status]   optional AgentRouter provider: cheap triage, task-based delegation
+  agent-link router [install|status]   AgentRouter virtual route: ordered cross-provider Paseo targets
   agent-link switch [prov] [sid]   move this conversation to a healthy account and print the resume
   agent-link evict [prov]          end processes stuck on a held account so their next message re-routes
   agent-link revalidate [prov]     re-prove HELD accounts; release any that serve again

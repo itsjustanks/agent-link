@@ -1,5 +1,5 @@
 import type { PluginContext } from "@getpaseo/plugin";
-import { AgentSyncSurface } from "./agents.client";
+import { AgentRoutingPanel, AgentSyncSurface } from "./agents.client";
 import { cliInstall, cliStatus, cliUpdateApply, cliUpdateCheck } from "./cli.shared";
 import { handleCliInstall, handleCliStatus, handleCliUpdateApply, handleCliUpdateCheck } from "./cli.server";
 import {
@@ -23,6 +23,7 @@ import {
   removeAccount,
   routerInstall,
   routerStatus,
+  routerTrace,
   scan,
   setCooldown,
   setPreference,
@@ -50,6 +51,7 @@ import {
   handleRemoveAccount,
   handleRouterInstall,
   handleRouterStatus,
+  handleRouterTrace,
   handleScan,
   handleSetCooldown,
   handleSetPreference,
@@ -98,6 +100,7 @@ export default function contribute(plugin: PluginContext) {
   plugin.handle(wireAuto, handleWireAuto);
   plugin.handle(routerStatus, handleRouterStatus);
   plugin.handle(routerInstall, handleRouterInstall);
+  plugin.handle(routerTrace, handleRouterTrace);
   plugin.handle(setCooldown, handleSetCooldown);
   plugin.handle(addAccount, handleAddAccount);
   plugin.handle(removeAccount, handleRemoveAccount);
@@ -147,6 +150,13 @@ export default function contribute(plugin: PluginContext) {
     icon: "Plug",
     context: "workspace",
     Component: McpWorkspacePanel,
+  });
+  plugin.addWorkspacePanel({
+    id: "agent-routing",
+    title: "Routing",
+    icon: "Route",
+    context: "agent",
+    Component: AgentRoutingPanel,
   });
   plugin.addSidebarItem({ id: "agent-sync", title: "Agent Link", icon: "Users", surface: "agent-sync" });
   plugin.addSidebarItem({ id: "mcp", title: "MCP", icon: "Plug", surface: "mcp" });

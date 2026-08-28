@@ -4,7 +4,7 @@ import { copyFileSync, createReadStream, existsSync, mkdirSync, readFileSync, re
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
-import type { Destination, RouteEvent, Slot } from "./contracts.shared";
+import type { Destination, RouteEvent, RouterTraceNode, Slot } from "./contracts.shared";
 import { onStart } from "./lifecycle.shared";
 import { ensureLimitSentry } from "./limits.server";
 import type { Dialect } from "./mcpjson.shared";
@@ -975,6 +975,55 @@ export async function handleWireAuto({ provider }: { provider: "claude" | "codex
 
 const ROUTER_PROVIDER_ID = "agent-router";
 const ROUTER_BASE_MODEL = "claude-haiku-4-5";
+const ROUTER_TARGET_GROUPS = [
+  {
+    name: "fast",
+    purpose: "Explanations, summaries, formatting and tiny edits",
+    selector: "in_order" as const,
+    targets: [
+      { provider: "claude-auto", model: "claude-haiku-4-5" },
+      { provider: "codex-auto", model: "gpt-5.6-luna" },
+      { provider: "kimi", model: "kimi-code/kimi-for-coding-highspeed" },
+      { provider: "grok", model: "grok-4.5" },
+    ],
+  },
+  {
+    name: "planning",
+    purpose: "Product and implementation plans",
+    selector: "in_order" as const,
+    targets: [
+      { provider: "claude-auto", model: "claude-fable-5" },
+      { provider: "codex-auto", model: "gpt-5.6-terra" },
+      { provider: "grok", model: "grok-4.6" },
+    ],
+  },
+  {
+    name: "judgment",
+    purpose: "Architecture, UI/UX, audit and final review",
+    selector: "in_order" as const,
+    targets: [
+      { provider: "claude-auto", model: "claude-opus-5" },
+      { provider: "grok", model: "grok-4.6" },
+      { provider: "codex-auto", model: "gpt-5.6-sol" },
+    ],
+  },
+  {
+    name: "build",
+    purpose: "Multi-file implementation, debugging, migrations and refactors",
+    selector: "in_order" as const,
+    targets: [
+      { provider: "codex-auto", model: "gpt-5.6-sol" },
+      { provider: "kimi", model: "kimi-code/k3" },
+      { provider: "claude-auto", model: "claude-opus-5" },
+    ],
+  },
+  {
+    name: "browser",
+    purpose: "Browser-driving verification",
+    selector: "in_order" as const,
+    targets: [{ provider: "codex-auto", model: "gpt-5.6-sol" }],
+  },
+] as const;
 
 function agentLinkBinary(): string | null {
   return searchPath()
@@ -987,9 +1036,11 @@ async function routerProviderStatus(paseo: PluginHandlerContext["paseo"], messag
   const rulesPath = join(AGENT_LINK_HOME_DIR, "router", "rules.md");
   const overrides = await providerOverrides(paseo);
   let loaded = false;
+  const availability = new Map<string, boolean>();
   try {
     const available = await paseo.providers.listAvailable();
-    loaded = available.providers.some((entry: { provider: string }) => entry.provider === ROUTER_PROVIDER_ID);
+    for (const entry of available.providers) availability.set(entry.provider, entry.available);
+    loaded = availability.get(ROUTER_PROVIDER_ID) === true;
   } catch {
     // Configured remains useful when an older daemon cannot report availability.
   }
@@ -1001,8 +1052,15 @@ async function routerProviderStatus(paseo: PluginHandlerContext["paseo"], messag
     loaded,
     launcherPath,
     rulesPath,
-    baseProvider: "Claude (Dynamic Agent Link)",
-    baseModel: "Haiku 4.5",
+    baseProvider: "AgentRouter control plane · Claude Dynamic Agent Link",
+    baseModel: "Haiku 4.5 (control only)",
+    targetGroups: ROUTER_TARGET_GROUPS.map((group) => ({
+      ...group,
+      targets: group.targets.map((target) => ({
+        ...target,
+        available: availability.has(target.provider) ? availability.get(target.provider) ?? false : null,
+      })),
+    })),
     message:
       message ||
       (loaded
@@ -1035,14 +1093,14 @@ export async function handleRouterInstall(_input: Record<string, never>, { paseo
         providers: {
           [ROUTER_PROVIDER_ID]: {
             extends: "claude",
-            label: "AgentRouter (Dynamic Agent Link)",
-            description: "Cheap task triage that delegates complex work through Paseo while account choice stays health-routed",
+            label: "AgentRouter",
+            description: "Plexus-style virtual route across healthy Paseo provider/model targets",
             command: [launcherPath],
             models: [
               {
                 id: ROUTER_BASE_MODEL,
-                label: "Haiku 4.5 (router)",
-                description: "Fast base model for triage and delegation",
+                label: "Automatic route",
+                description: "AgentRouter selects and records the concrete answer model; Haiku is control-plane only",
                 isDefault: true,
               },
             ],
@@ -1058,6 +1116,97 @@ export async function handleRouterInstall(_input: Record<string, never>, { paseo
       `AgentRouter install failed: ${caught instanceof Error ? caught.message.split("\n")[0] : String(caught)}`,
     );
   }
+}
+
+type ListedAgentRecord = {
+  id?: string;
+  provider?: string;
+  title?: string | null;
+  status?: string;
+  model?: string | null;
+  archivedAt?: string | null;
+  labels?: Record<string, string>;
+};
+
+async function listedAgentChildren(parentAgentId: string, paseo: PluginHandlerContext["paseo"]): Promise<ListedAgentRecord[]> {
+  const page = await paseo.agents.list({
+    filter: { labels: { "paseo.parent-agent-id": parentAgentId }, includeArchived: true },
+    page: { limit: 100 },
+  });
+  return page.entries.map((entry: unknown) => {
+    const raw = entry as unknown as Record<string, unknown>;
+    return ((raw.agent as ListedAgentRecord | undefined) ?? raw) as ListedAgentRecord;
+  });
+}
+
+export async function handleRouterTrace({ agentId }: { agentId: string }, { paseo }: PluginHandlerContext) {
+  const handle = paseo.agents.ref(agentId);
+  const refreshed = await handle.refresh();
+  const agent = refreshed?.agent;
+  if (!agent) return { isAgentRouter: false, summary: "Agent is no longer available.", nodes: [] };
+
+  const nodes: RouterTraceNode[] = [
+    {
+      source: "control" as const,
+      id: agent.id,
+      title: agent.title ?? "Agent",
+      provider: agent.provider,
+      model: agent.model ?? "Unknown (runtime not exposed)",
+      status: agent.status,
+      note: agent.provider === ROUTER_PROVIDER_ID ? "Control plane only; this should nominate a Paseo child." : "Direct Paseo agent.",
+    },
+  ];
+
+  let children: ListedAgentRecord[] = [];
+  try {
+    children = await listedAgentChildren(agentId, paseo);
+  } catch {
+    // A legacy daemon may not support label filters; the control row still loads.
+  }
+  for (const child of children) {
+    nodes.push({
+      source: "paseo" as const,
+      id: child.id ?? "unknown",
+      title: child.title ?? "Paseo child",
+      provider: child.provider ?? "Unknown",
+      model: child.model ?? "Unknown (runtime not exposed)",
+      status: child.archivedAt ? "archived" : child.status ?? "unknown",
+      note: "Concrete Paseo delegation; provider and model are auditable.",
+    });
+  }
+
+  if (children.length === 0) {
+    try {
+      const timeline = await handle.timeline.refetch({ direction: "tail", limit: 300, projection: "canonical" });
+      for (const row of timeline.rows) {
+        const item = row.item;
+        if (item.type !== "tool_call" || item.detail.type !== "sub_agent") continue;
+        if (nodes.some((node) => node.id === item.callId)) continue;
+        nodes.push({
+          source: "provider-internal" as const,
+          id: item.callId,
+          title: item.detail.description ?? item.detail.subAgentType ?? "Provider subagent",
+          provider: `${agent.provider} internal`,
+          model: "Unknown (runtime not exposed)",
+          status: item.status,
+          note: "Provider-internal subagent; this bypasses auditable AgentRouter target selection.",
+        });
+      }
+    } catch {
+      // An archived timeline may no longer be available.
+    }
+  }
+
+  const concrete = nodes.filter((node) => node.source === "paseo");
+  const internal = nodes.filter((node) => node.source === "provider-internal");
+  const summary = concrete.length > 0
+    ? `${concrete.length} concrete Paseo route${concrete.length === 1 ? "" : "s"} recorded.`
+    : internal.length > 0
+      ? "No concrete Paseo route was recorded; a provider-internal subagent hid its model."
+      : agent.provider === ROUTER_PROVIDER_ID
+        ? "No answer-model delegation is recorded; only the control model ran."
+        : "This agent runs directly; its provider and model are shown below.";
+  return { isAgentRouter: agent.provider === ROUTER_PROVIDER_ID, summary, nodes };
 }
 
 // Create the slot and kick off that CLI's own browser login. The flow opens a
