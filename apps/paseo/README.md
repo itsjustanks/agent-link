@@ -124,7 +124,7 @@ The sidebar MCP surface manages **user-level** servers available across projects
 
 ## About rate limits and failover
 
-Paseo has no automatic provider failover: an agent that hits a usage limit stops with an error and keeps its workspace — it does not move itself to another account. Three things reduce the pain, and the tab exposes all of them:
+Paseo alone has no automatic account failover. Agent Link adds restart-based recovery for routed agents: the failed turn ends, the exact account/model refusal is recorded, and the same conversation is relaunched through the next eligible account. Claude's durable hook can hand this to a host watchdog before the panel has opened; the panel's limit sentry is the fallback path.
 
 - **Limits** — provider quota percentage used and available, named window, reset countdown, freshness, credits, and routing state per account, captured from that account's own CLI session state without reading its access token.
 - **Activity · 7 days** — an on-request Claude and Codex transcript scan for sessions, tokens, cache rate, context window, projects, and models actually used.
@@ -135,7 +135,7 @@ Paseo has no automatic provider failover: an agent that hits a usage limit stops
 - **Park / Resume** — account-wide limits stop every model; a named-model refusal excludes only that account/model pair, visibly on the account row
 - **Pool count** — see how many *independent* limits you actually have, with duplicates flagged
 
-A running agent still keeps the account it started on; nothing re-routes mid-task (that is what breaks sessions).
+A running turn still keeps the account it started on. Recovery starts only after that turn has stopped, then preserves the transcript while changing the account-backed process.
 
 Paseo's built-in usage figure reads the primary accounts only (`~/.claude`, `~/.codex`). Agent Link's **Available capacity** also covers per-account slots by reading the small quota snapshots its session hooks already capture; it never reads access tokens.
 

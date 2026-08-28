@@ -1313,7 +1313,9 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                 }
                 trailing={
                   event.action === "auto-resumed" ? (
-                    <StatusPill status="ok" label="resumed" />
+                    <StatusPill status="ok" label="retry sent" />
+                  ) : event.action === "recovery-queued" ? (
+                    <StatusPill status="busy" label="recovery queued" />
                   ) : event.action === "resume-failed" ? (
                     <StatusPill status="error" label="resume failed" />
                   ) : (

@@ -33,6 +33,7 @@ const STATE_PATH = (() => {
   return join(root, "state", "paseo-limit-sentry.json");
 })();
 const ROUTES_PATH = join(dirname(STATE_PATH), "pools", "routes.log");
+const RECOVERY_ROOT = join(dirname(STATE_PATH), "paseo-recovery");
 
 const LIMIT_ERROR = /usage limit|rate limit|spend limit|limit reached|billing|out of credits|quota exceeded|you(?:'|’)ve\s+(?:hit|reached)\s+[^.!\n]{0,80}\blimit\b/i;
 // Every provider's limit-death is worth SHOWING; only providers with an
@@ -91,6 +92,30 @@ function continuationNudge(route: AgentRoute | null, matched: string, fallbackMo
   const modelName = route?.model || fallbackModel;
   const model = modelName ? ` on ${modelName}` : "";
   return `AgentLink: ${account} hit ${matched}${model}. Relaunch through the next eligible account, then continue exactly where you stopped without redoing completed work.`;
+}
+
+function externalRecoveryState(agentId: string): "pending" | "accepted" | null {
+  const now = Date.now() / 1000;
+  for (const [directory, state] of [["pending", "pending"], ["done", "accepted"]] as const) {
+    const root = join(RECOVERY_ROOT, directory);
+    try {
+      for (const name of readdirSync(root)) {
+        if (!name.startsWith(`${agentId}-`) || !name.endsWith(".json")) continue;
+        const request = JSON.parse(readFileSync(join(root, name), "utf8")) as {
+          createdAt?: number;
+          completedAt?: number;
+          outcome?: string;
+        };
+        const at = state === "pending" ? request.createdAt : request.completedAt;
+        if (!at || now - at > 5 * 60) continue;
+        if (state === "accepted" && request.outcome !== "continuation-accepted" && !request.outcome?.startsWith("already-routed")) continue;
+        return state;
+      }
+    } catch {
+      // Queue is optional; direct plugin recovery remains the fallback.
+    }
+  }
+  return null;
 }
 
 function loadState(): Persisted {
@@ -296,6 +321,22 @@ async function actOnLimitDeath(
     return;
   }
   try {
+    // Claude's provider hook can hand recovery to the launchd watchdog, which
+    // lives outside the dying process tree. If it already owns this incident,
+    // do not post a second continuation from the plugin watcher.
+    if (routed) {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const external = externalRecoveryState(snap.id);
+      if (external) {
+        record({
+          ...base,
+          ...evidence,
+          action: external === "accepted" ? "auto-resumed" : "recovery-queued",
+          detail: `${detail} (${external === "accepted" ? "watchdog accepted continuation" : "watchdog recovery queued"})`,
+        });
+        return;
+      }
+    }
     // Retire the pinned process first, then nudge: the nudge is what makes
     // Paseo relaunch, and only a relaunch consults the account router.
     const retired = retirePinnedProcess(snap.id);

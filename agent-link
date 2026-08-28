@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.5.27"
+VERSION="0.5.28"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -363,9 +363,244 @@ slot_nearing() { # $1 provider, $2 key (email or "primary") — 0 if marked and 
 # Claude's parsed reset time when the transcript has one. Without this the park
 # happens lazily at the next pick; with it, even a launch racing the failure
 # avoids the account.
+recovery_queue_dir() { echo "$STATE/paseo-recovery"; }
+
+enqueue_paseo_recovery() { # agent-id provider account model limit
+  [ -n "${1:-}" ] || return 0
+  local queued label uid
+  queued="$(python3 - "$(recovery_queue_dir)" "$1" "$2" "$3" "${4:-}" "${5:-usage limit}" "${PASEO_AGENT_CWD:-$PWD}" <<'PY2' 2>/dev/null
+import glob, json, os, re, sys, time
+root, agent, provider, account, model, limit, cwd = sys.argv[1:8]
+if not re.fullmatch(r"[A-Za-z0-9_-]{8,100}", agent):
+    sys.exit(0)
+pending = os.path.join(root, "pending")
+os.makedirs(pending, exist_ok=True)
+now = time.time()
+for path in glob.glob(os.path.join(pending, f"{agent}-*.json")):
+    try:
+        prior = json.load(open(path))
+        if now - float(prior.get("createdAt", 0)) < 30 and prior.get("account") == account and prior.get("model") == model:
+            print(path)
+            sys.exit(0)
+    except Exception:
+        pass
+request_id = f"{agent}-{int(now * 1000)}-{os.getpid()}"
+path = os.path.join(pending, request_id + ".json")
+tmp = path + ".tmp"
+with open(tmp, "w") as f:
+    json.dump({
+        "id": request_id,
+        "agentId": agent,
+        "provider": provider,
+        "account": account,
+        "model": model,
+        "limit": limit,
+        "cwd": cwd,
+        "createdAt": now,
+        "notBefore": now + 2,
+        "attempts": 0,
+    }, f)
+os.replace(tmp, path)
+print(path)
+PY2
+)"
+  [ -n "$queued" ] || return 0
+  # On this Mac the daemon watchdog is a launchd one-shot. Kick it immediately
+  # instead of waiting for its next 60-second health interval. Other installs
+  # still retain the request for `agent-link recover`.
+  if [ "${AGENT_LINK_SKIP_RECOVERY_KICKSTART:-}" != 1 ] && [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    uid="$(id -u)"
+    for label in com.agent-link.paseo-watchdog com.ankit.paseo-watchdog; do
+      if launchctl print "gui/$uid/$label" >/dev/null 2>&1; then
+        launchctl kickstart "gui/$uid/$label" >/dev/null 2>&1 || true
+        break
+      fi
+    done
+  fi
+}
+
+write_recovery_helper() {
+  mkdir -p "$SHIM_BIN"
+  cat > "$SHIM_BIN/paseo-recover" <<'PY2'
+#!/usr/bin/env python3
+import fcntl, glob, json, os, re, signal, subprocess, sys, time
+
+root, routes_path, paseo = sys.argv[1:4]
+pending = os.path.join(root, "pending")
+done = os.path.join(root, "done")
+os.makedirs(pending, exist_ok=True)
+os.makedirs(done, exist_ok=True)
+lock = open(os.path.join(root, ".lock"), "a+")
+try:
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    print("Paseo recovery: already running")
+    sys.exit(0)
+
+def run(args, timeout=30):
+    try:
+        p = subprocess.run(args, capture_output=True, text=True, timeout=timeout, start_new_session=True)
+        return p.returncode, p.stdout, p.stderr
+    except subprocess.TimeoutExpired:
+        return -1, "", "timed out"
+    except Exception as exc:
+        return -2, "", str(exc)
+
+def load_json(text):
+    try: return json.loads(text)
+    except Exception: return None
+
+def latest_route(agent_id):
+    try: lines = open(routes_path).read().splitlines()
+    except OSError: return None
+    for line in reversed(lines):
+        parts = line.split("\t")
+        if len(parts) < 6 or parts[5] != agent_id or parts[2] in {"", "-"}: continue
+        try: at = float(parts[0])
+        except ValueError: continue
+        return {"at": at, "account": parts[2], "model": parts[7] if len(parts) > 7 else ""}
+    return None
+
+def session_id_for(agent_id):
+    paseo_home = os.environ.get("PASEO_HOME") or os.path.join(os.path.expanduser("~"), ".paseo")
+    for path in glob.glob(os.path.join(paseo_home, "agents", "*", f"{agent_id}.json")):
+        try:
+            stored = json.load(open(path))
+            session_id = (stored.get("persistence") or {}).get("sessionId")
+            if session_id: return str(session_id)
+        except Exception:
+            pass
+    return None
+
+def retire_pinned_process(agent_id):
+    session_id = session_id_for(agent_id)
+    if not session_id: return False
+    rc, output, _ = run(["/bin/ps", "-axo", "pid=,command="], 5)
+    if rc != 0: return False
+    for line in output.splitlines():
+        if session_id not in line: continue
+        match = re.match(r"\s*(\d+)\s+(.*)", line)
+        if not match: continue
+        pid, command = int(match.group(1)), match.group(2)
+        if pid == os.getpid(): continue
+        is_provider = re.search(r"(^|/)(claude|codex)(\s|$)", command)
+        is_resume = re.search(rf"--resume(?:=|\s+){re.escape(session_id)}|resume\s+{re.escape(session_id)}", command)
+        if not is_provider or not is_resume: continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+            return True
+        except OSError:
+            return False
+    return False
+
+def write(path, data):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f: json.dump(data, f)
+    os.replace(tmp, path)
+
+def finish(path, request, outcome):
+    request["completedAt"] = time.time()
+    request["outcome"] = outcome
+    write(os.path.join(done, os.path.basename(path)), request)
+    try: os.remove(path)
+    except OSError: pass
+
+accepted = deferred = failed = 0
+for path in sorted(glob.glob(os.path.join(pending, "*.json")))[:8]:
+    try: request = json.load(open(path))
+    except Exception:
+        finish(path, {"id": os.path.basename(path)}, "invalid-request")
+        failed += 1
+        continue
+    agent_id = str(request.get("agentId") or "")
+    created = float(request.get("createdAt", 0))
+    if not agent_id or not created or time.time() - created > 15 * 60:
+        finish(path, request, "expired-or-invalid")
+        failed += 1
+        continue
+    not_before = float(request.get("notBefore", 0))
+    if not_before > time.time(): time.sleep(min(not_before - time.time(), 4))
+    if float(request.get("notBefore", 0)) > time.time():
+        deferred += 1
+        continue
+    route = latest_route(agent_id)
+    if route and route["at"] > created and route.get("account") != request.get("account"):
+        finish(path, request, f"already-routed-to-{route.get('account')}")
+        accepted += 1
+        continue
+    rc, output, error = run([paseo, "inspect", agent_id, "--json"], 15)
+    detail = load_json(output) if rc == 0 else None
+    if not isinstance(detail, dict):
+        attempts = int(request.get("attempts", 0)) + 1
+        request.update(attempts=attempts, lastError=(error or "inspect failed")[-1000:])
+        if attempts >= 3:
+            finish(path, request, "inspect-failed-3-times")
+            failed += 1
+        else:
+            request["notBefore"] = time.time() + 30 * attempts
+            write(path, request)
+            deferred += 1
+        continue
+    status = str(detail.get("Status") or detail.get("status") or "").lower()
+    if status == "running":
+        request["notBefore"] = time.time() + 20
+        write(path, request)
+        deferred += 1
+        continue
+    if status not in {"idle", "error", "closed"}:
+        finish(path, request, f"agent-{status or 'unavailable'}")
+        failed += 1
+        continue
+    if retire_pinned_process(agent_id): time.sleep(1.5)
+    account = request.get("account") or "unknown account"
+    model = request.get("model") or "unknown model"
+    limit = request.get("limit") or "usage limit"
+    prompt = (
+        f"AgentLink automatic recovery: account {account} hit {limit} on {model}. "
+        "This same conversation is relaunching through the next eligible account; the user does not need to type continue. "
+        "continue the original task from its first incomplete step, and do not redo completed work. "
+        "Run `agent-link whoami` if available, then begin with one short line naming the actual account/model and next action."
+    )
+    rc, output, error = run([paseo, "send", agent_id, "--no-wait", "--json", "--prompt", prompt])
+    if rc == 0:
+        request["acceptedOutput"] = output[-2000:]
+        finish(path, request, "continuation-accepted")
+        accepted += 1
+    else:
+        attempts = int(request.get("attempts", 0)) + 1
+        request.update(attempts=attempts, lastError=(error or output)[-1000:])
+        if attempts >= 3:
+            finish(path, request, "send-failed-3-times")
+            failed += 1
+        else:
+            request["notBefore"] = time.time() + 30 * attempts
+            write(path, request)
+            deferred += 1
+
+history = sorted(glob.glob(os.path.join(done, "*.json")), key=os.path.getmtime, reverse=True)
+for old in history[100:]:
+    try: os.remove(old)
+    except OSError: pass
+print(f"Paseo recovery: {accepted} accepted, {deferred} pending, {failed} failed")
+sys.exit(1 if failed else 0)
+PY2
+  chmod +x "$SHIM_BIN/paseo-recover"
+}
+
+cmd_recover() {
+  local paseo_bin
+  # Always rewrite it: the helper is managed code and must upgrade with the
+  # CLI, even on machines that already generated an older copy.
+  write_recovery_helper
+  paseo_bin="$(command -v paseo 2>/dev/null || true)"
+  [ -n "$paseo_bin" ] || paseo_bin="$HOME/.local/bin/paseo"
+  [ -x "$paseo_bin" ] || { echo "paseo CLI not found — recovery requests remain queued" >&2; return 1; }
+  "$SHIM_BIN/paseo-recover" "$(recovery_queue_dir)" "$(pools_dir)/routes.log" "$paseo_bin"
+}
+
 cmd_refused() { # $1 provider
   prov_valid "${1:-}" || { echo "usage: agent-link refused <claude|codex>" >&2; return 1; }
-  local p="$1" d key e until
+  local p="$1" d key e until model limit
   d="$(eval "printf '%s' \"\${$(prov_env_var "$p"):-}\"")"
   if [ -z "$d" ]; then key=primary; d="$(primary_dir "$p")"
   else
@@ -377,6 +612,13 @@ cmd_refused() { # $1 provider
   fi
   until="$(recently_refused "$p" "$d" 2>/dev/null || true)"
   autopark "$p" "$key" "${until:-}"
+  model="${AGENT_LINK_ROUTE_MODEL:-}"
+  case "${until:-}" in
+    hold:spend) limit="monthly spend limit" ;;
+    hold:model:*) limit="${until#hold:model:} limit" ;;
+    *) limit="usage limit" ;;
+  esac
+  enqueue_paseo_recovery "${PASEO_AGENT_ID:-}" "$p" "$key" "$model" "$limit"
   rm -f "$(pools_dir)/nearing-$p-$key"
   echo "$p · $key: parked (limit hit)"
 }
@@ -600,11 +842,18 @@ settings["statusLine"] = {"type": "command", "command": wrapper}
 hooks = settings.setdefault("hooks", {})
 entries = hooks.setdefault("StopFailure", [])
 marker = f"{self_bin} refused claude"
-if not any(marker in json.dumps(e) for e in entries):
-    entries.append({
-        "matcher": "rate_limit|billing_error",
-        "hooks": [{"type": "command", "command": marker}],
-    })
+# Paths change between a checkout and ~/.local/bin. Keeping both registrations
+# executes the same refusal twice, races recovery and can globally park an
+# account before the newer model-scoped hook runs. Replace every AgentLink
+# refusal registration with exactly the current one.
+entries[:] = [
+    entry for entry in entries
+    if not ("agent-link" in json.dumps(entry) and " refused claude" in json.dumps(entry))
+]
+entries.append({
+    "matcher": "rate_limit|billing_error",
+    "hooks": [{"type": "command", "command": marker}],
+})
 tmp = path + ".tmp"
 with open(tmp, "w") as f:
     json.dump(settings, f, indent=2)
@@ -1840,6 +2089,7 @@ EOF
 cmd_auto() { # write auto launchers and print the provider snippet
   local p
   for p in $PROVIDERS; do write_auto_launcher "$p"; done
+  write_recovery_helper
   cat <<EOF
 
 Point ONE provider at each launcher and it spreads new agents across your
@@ -2570,7 +2820,7 @@ install_paseo_plugin() { # $1 source dir, $2 plugin id, $3 "link" to run from so
 
 cmd_app() { # list|install|status|remove [id] [--link]
   local action="${1:-list}" id="${2:-}" mode=copy base d state kind pid dest
-  case "${3:-}" in --link|--dev) mode=link ;; esac
+  case "${3:-}" in --link|--dev) mode="link" ;; esac
   base="$(apps_dir)" || { echo "no apps/ directory found and could not fetch it" >&2; return 1; }
   case "$action" in
     list|status)
@@ -3204,6 +3454,7 @@ usage:
   agent-link style [install|status] install/check the concise contract across Claude/Codex accounts
   agent-link app [list|install|remove] [id] [--link]  optional integrations (Paseo panel, editors)
   agent-link update                update the CLI and reinstall the apps you have
+  agent-link recover               process queued Paseo limit continuations once
   agent-link fix [model]           test accounts, rescue stuck chats, resync — the one-shot cleanup
   agent-link doctor                sanity checks
 
@@ -3243,6 +3494,7 @@ main() {
     update)  cmd_update ;;
     insights) shift; cmd_insights "$@" ;;
     rescue)  shift; cmd_rescue "$@" ;;
+    recover) cmd_recover ;;
     probe)   shift; cmd_probe "$@" ;;
     next)    shift; prov_valid "${1:-claude}" && pick_slot "${1:-claude}" dry ;;
     cooldown) shift; cmd_cooldown "$@" ;;

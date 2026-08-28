@@ -12,7 +12,7 @@ export const LimitEventSchema = z.object({
   title: z.string().nullable(),
   provider: z.string(),
   at: z.string(),
-  action: z.enum(["auto-resumed", "needs-resume", "resume-failed"]),
+  action: z.enum(["auto-resumed", "recovery-queued", "needs-resume", "resume-failed"]),
   detail: z.string(),
   account: z.string().optional(),
   model: z.string().optional(),
