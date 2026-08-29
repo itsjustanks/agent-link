@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.5.33"
+VERSION="0.5.34"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -3105,6 +3105,9 @@ toolchain_plist() { echo "$HOME/Library/LaunchAgents/com.agent-link.toolchain-up
 toolchain_log() { echo "$STATE/toolchain-updater.log"; }
 toolchain_state() { echo "$STATE/toolchain-updates.json"; }
 toolchain_cron_marker() { echo "# agent-link-toolchain-updater"; }
+toolchain_runtime_path() {
+  printf '%s\n' "$HOME/.local/bin:$HOME/.kimi-code/bin:$HOME/.grok/bin:$HOME/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+}
 
 toolchain_cron_enabled() {
   command -v crontab >/dev/null 2>&1 || return 1
@@ -3116,10 +3119,12 @@ toolchain_install_cron() { # $1 executable
   command -v crontab >/dev/null 2>&1 || return 1
   marker="$(toolchain_cron_marker)"
   existing="$(crontab -l 2>/dev/null || true)"
-  line="$(python3 - "$executable" "$(toolchain_log)" "$marker" <<'PY2'
+  line="$(python3 - "$executable" "$(toolchain_log)" "$marker" "$HOME" "$(toolchain_runtime_path)" <<'PY2'
 import shlex, sys
-executable, log, marker = sys.argv[1:]
-print(f"15 4 * * * {shlex.quote(executable)} toolchain update --scheduled >> {shlex.quote(log)} 2>&1 {marker}")
+executable, log, marker, home, runtime_path = sys.argv[1:]
+args = ["/usr/bin/env", f"HOME={home}", f"PATH={runtime_path}", executable, "toolchain", "update", "--scheduled"]
+command = " ".join(shlex.quote(arg) for arg in args)
+print(f"15 4 * * * {command} >> {shlex.quote(log)} 2>&1 {marker}")
 PY2
 )"
   {
@@ -3376,26 +3381,29 @@ PY2
 
 toolchain_enable() {
   local plist self uid target_dir
-  command -v launchctl >/dev/null 2>&1 || { echo "launchd is unavailable on this machine" >&2; return 1; }
   self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+  if ! command -v launchctl >/dev/null 2>&1; then
+    if toolchain_install_cron "$self"; then
+      echo "automatic provider CLI updates enabled via cron — daily at 04:15"
+      echo "live providers are skipped and retried on the next daily run"
+      return 0
+    fi
+    echo "neither launchd nor cron is available on this machine" >&2
+    return 1
+  fi
   plist="$(toolchain_plist)"
   target_dir="$(dirname "$plist")"
   uid="$(id -u)"
   mkdir -p "$target_dir" "$STATE"
-  python3 - "$plist" "$self" "$(toolchain_log)" "$HOME" <<'PY2'
+  python3 - "$plist" "$self" "$(toolchain_log)" "$HOME" "$(toolchain_runtime_path)" <<'PY2'
 import os, plistlib, sys
-path, executable, log, home = sys.argv[1:]
+path, executable, log, home, runtime_path = sys.argv[1:]
 payload = {
     "Label": "com.agent-link.toolchain-updater",
     "ProgramArguments": [executable, "toolchain", "update", "--scheduled"],
     "EnvironmentVariables": {
         "HOME": home,
-        "PATH": ":".join([
-            os.path.join(home, ".local/bin"),
-            os.path.join(home, ".kimi-code/bin"),
-            os.path.join(home, ".grok/bin"),
-            "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin",
-        ]),
+        "PATH": runtime_path,
     },
     "RunAtLoad": True,
     "StartCalendarInterval": {"Hour": 4, "Minute": 15},

@@ -92,6 +92,7 @@ LAUNCHCTL_FAIL=1 PATH="$fixture_root/provider-bin:/usr/bin:/bin" HOME="$fixture_
   AGENT_LINK_HOME="$fixture_root" "$repo_root/agent-link" toolchain enable >/dev/null 2>&1
 test ! -e "$fixture_root/Library/LaunchAgents/com.agent-link.toolchain-updater.plist"
 grep -q 'agent-link-toolchain-updater' "$fixture_root/crontab.txt"
+grep -q 'PATH=.*/\.local/bin:.*\.kimi-code/bin:.*\.grok/bin' "$fixture_root/crontab.txt"
 status_output="$(PATH="$fixture_root/provider-bin:/usr/bin:/bin" HOME="$fixture_root" \
   AGENT_LINK_HOME="$fixture_root" "$repo_root/agent-link" toolchain status)"
 grep -q 'enabled via cron daily at 04:15' <<< "$status_output"
