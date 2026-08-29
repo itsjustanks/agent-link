@@ -59,6 +59,20 @@ agent-link claude                       # Claude Code on the next account in rot
 agent-link update
 ```
 
+Keep the provider CLIs current automatically:
+
+```sh
+agent-link toolchain enable   # daily at 04:15, plus one safe run now
+agent-link toolchain status   # installed versions and the last update result
+```
+
+The updater handles Claude Code, Codex, Kimi Code and Grok. It checks both
+Paseo and the process table before each update; a live provider, or an
+unreadable runtime state, is skipped until the next day. It never kills or
+restarts an agent and never changes credentials. Paseo itself remains managed
+by the desktop app. Unknown providers are left untouched rather than invoking
+an unverified update command.
+
 ---
 
 ## In Paseo

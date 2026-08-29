@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.5.31"
+VERSION="0.5.32"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -3055,7 +3055,8 @@ apps_dir() { # find the apps/ directory, fetching or refreshing the repo
 
 # Updating is two things — this file, and the app sources it installs from.
 cmd_update() {
-  local self target
+  local self target cli_only="" update_rc=0
+  [ "${1:-}" = "--cli-only" ] && cli_only=1
   self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
   echo
   if [ -d "$(dirname "$self")/.git" ] || [ -d "$(dirname "$self")/../.git" ]; then
@@ -3075,8 +3076,10 @@ cmd_update() {
     else
       rm -f "$self.new"
       echo "${C_RED}failed${C_OFF} — check your connection, or re-run the curl from the README"
+      update_rc=1
     fi
   fi
+  [ -n "$cli_only" ] && return "$update_rc"
   # Anything installed from this repo gets the new source too, or the CLI and
   # its Paseo panel drift apart.
   local base d id
@@ -3088,6 +3091,314 @@ cmd_update() {
     echo "  reinstalling the '${id}' app (this repo's panel — Paseo itself is untouched)…"
     cmd_app install "$id"
   done
+  return "$update_rc"
+}
+
+# ---------------------------------------------------------------- toolchain updates
+#
+# Provider CLIs are executable code, not account state. Replacing an idle
+# binary is safe, but asking an updater to mutate files beneath a live provider
+# is needlessly risky. Scheduled updates therefore prove a provider family is
+# idle through both Paseo and the process table. Any uncertainty is a skip.
+
+toolchain_plist() { echo "$HOME/Library/LaunchAgents/com.agent-link.toolchain-updater.plist"; }
+toolchain_log() { echo "$STATE/toolchain-updater.log"; }
+toolchain_state() { echo "$STATE/toolchain-updates.json"; }
+
+toolchain_binary_path() { # $1 provider
+  local resolved=""
+  case "$1" in
+    claude|codex) resolved="$(prov_real_binary "$1" 2>/dev/null || true)" ;;
+    kimi)
+      resolved="$(command -v kimi 2>/dev/null || true)"
+      [ -n "$resolved" ] || [ ! -x "$HOME/.kimi-code/bin/kimi" ] || resolved="$HOME/.kimi-code/bin/kimi"
+      ;;
+    grok)
+      resolved="$(command -v grok 2>/dev/null || true)"
+      [ -n "$resolved" ] || [ ! -x "$HOME/.grok/bin/grok" ] || resolved="$HOME/.grok/bin/grok"
+      ;;
+    paseo) resolved="$(command -v paseo 2>/dev/null || true)" ;;
+  esac
+  [ -n "$resolved" ] && printf '%s\n' "$resolved"
+}
+
+toolchain_version() { # $1 provider, $2 binary
+  local value
+  value="$("$2" --version 2>/dev/null | head -1 || true)"
+  [ -n "$value" ] || value="unknown"
+  printf '%s\n' "$value"
+}
+
+toolchain_record() { # provider result before after detail
+  local state_file; state_file="$(toolchain_state)"
+  python3 - "$state_file" "$1" "$2" "$3" "$4" "$5" <<'PY2'
+import datetime, json, os, sys
+
+path, provider, result, before, after, detail = sys.argv[1:]
+try:
+    data = json.load(open(path))
+except Exception:
+    data = {"providers": {}}
+if not isinstance(data.get("providers"), dict):
+    data["providers"] = {}
+data["lastRunAt"] = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+data["providers"][provider] = {
+    "result": result,
+    "before": before or None,
+    "after": after or None,
+    "detail": detail,
+    "checkedAt": data["lastRunAt"],
+}
+os.makedirs(os.path.dirname(path), exist_ok=True)
+tmp = path + ".tmp"
+with open(tmp, "w") as handle:
+    json.dump(data, handle, indent=2)
+os.replace(tmp, path)
+PY2
+}
+
+toolchain_snapshot_runtime() {
+  TOOLCHAIN_PASEO_STATE=absent
+  TOOLCHAIN_PASEO_RUNNING=""
+  local paseo_bin payload
+  paseo_bin="$(toolchain_binary_path paseo)"
+  [ -n "$paseo_bin" ] || return 0
+  if ! payload="$("$paseo_bin" ls --global --json 2>/dev/null)"; then
+    TOOLCHAIN_PASEO_STATE=unavailable
+    return 0
+  fi
+  TOOLCHAIN_PASEO_STATE=ok
+  TOOLCHAIN_PASEO_RUNNING="$(printf '%s' "$payload" | python3 -c '
+import json, sys
+try:
+    rows = json.load(sys.stdin)
+except Exception:
+    sys.exit(2)
+families = set()
+for row in rows if isinstance(rows, list) else []:
+    if str(row.get("status") or "").lower() != "running":
+        continue
+    provider = str(row.get("provider") or "").lower().split("/", 1)[0]
+    if "agent-router" in provider or "agentrouter" in provider:
+        families.add("all")
+    for family in ("claude", "codex", "kimi", "grok"):
+        if provider.startswith(family) or family in provider:
+            families.add(family)
+print(" ".join(sorted(families)))
+' 2>/dev/null)" || TOOLCHAIN_PASEO_STATE=unavailable
+}
+
+toolchain_idle() { # $1 provider; 0 idle, 1 active, 2 unknown
+  local provider="$1" pattern rc
+  [ "$TOOLCHAIN_PASEO_STATE" != unavailable ] || return 2
+  case " $TOOLCHAIN_PASEO_RUNNING " in
+    *" all "*|*" $provider "*) return 1 ;;
+  esac
+  command -v pgrep >/dev/null 2>&1 || return 2
+  case "$provider" in
+    claude) pattern='(^|/)(claude|claude-auto)( |$)' ;;
+    codex)  pattern='(^|/)(codex|codex-auto)( |$)' ;;
+    kimi)   pattern='(^|/)(kimi)( |$)' ;;
+    grok)   pattern='(^|/)(grok)( |$)' ;;
+    *) return 2 ;;
+  esac
+  pgrep -f "$pattern" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 1 ] && return 0
+  [ "$rc" -eq 0 ] && return 1
+  return 2
+}
+
+toolchain_update_one() { # $1 provider
+  local provider="$1" binary before after output detail result rc tmp_file
+  binary="$(toolchain_binary_path "$provider")"
+  if [ -z "$binary" ]; then
+    printf '  %-8s not installed\n' "$provider"
+    toolchain_record "$provider" missing "" "" "binary not installed"
+    return 0
+  fi
+  before="$(toolchain_version "$provider" "$binary")"
+  toolchain_idle "$provider"
+  rc=$?
+  if [ "$rc" -eq 1 ]; then
+    printf '  %-8s skipped — live session or process (%s)\n' "$provider" "$before"
+    toolchain_record "$provider" skipped "$before" "$before" "live session or process"
+    return 0
+  fi
+  if [ "$rc" -ne 0 ]; then
+    printf '  %-8s skipped — could not prove idle (%s)\n' "$provider" "$before"
+    toolchain_record "$provider" skipped "$before" "$before" "could not prove idle"
+    return 0
+  fi
+
+  output=""
+  rc=0
+  case "$provider" in
+    claude) output="$("$binary" update 2>&1)" || rc=$? ;;
+    codex) output="$("$binary" update 2>&1)" || rc=$? ;;
+    grok) output="$("$binary" update --stable 2>&1)" || rc=$? ;;
+    kimi)
+      tmp_file="$(mktemp "${TMPDIR:-/tmp}/agent-link-kimi-installer.XXXXXX")" || rc=$?
+      if [ "$rc" -eq 0 ]; then
+        curl -fsSL --connect-timeout 10 --max-time 120 \
+          https://code.kimi.com/kimi-code/install.sh -o "$tmp_file" 2>/dev/null || rc=$?
+      fi
+      if [ "$rc" -eq 0 ]; then
+        output="$(KIMI_NO_MODIFY_PATH=1 /bin/bash "$tmp_file" 2>&1)" || rc=$?
+      fi
+      [ -z "${tmp_file:-}" ] || rm -f "$tmp_file"
+      ;;
+  esac
+  after="$(toolchain_version "$provider" "$binary")"
+  detail="$(printf '%s' "$output" | tr '\n\t' '  ' | cut -c1-500)"
+  if [ "$rc" -eq 0 ]; then
+    result=updated
+    [ "$before" = "$after" ] && result=current
+    printf '  %-8s %s — %s\n' "$provider" "$result" "$after"
+  else
+    result=failed
+    [ -n "$detail" ] || detail="updater exited $rc"
+    printf '  %-8s failed — %s\n' "$provider" "$detail"
+  fi
+  toolchain_record "$provider" "$result" "$before" "$after" "$detail"
+  [ "$rc" -eq 0 ]
+}
+
+toolchain_update() {
+  local lock="$STATE/toolchain-update.lock" provider failures=0 lock_age self before after result detail
+  if ! mkdir "$lock" 2>/dev/null; then
+    lock_age="$(python3 - "$lock" <<'PY2'
+import os, sys, time
+try: print(int(time.time() - os.path.getmtime(sys.argv[1])))
+except OSError: print(0)
+PY2
+)"
+    if [ "$lock_age" -gt 21600 ] && rmdir "$lock" 2>/dev/null && mkdir "$lock" 2>/dev/null; then
+      echo "cleared stale provider-update lock"
+    else
+      echo "provider update already running — skipped"
+      return 0
+    fi
+  fi
+  trap 'rmdir "$lock" 2>/dev/null || true' EXIT INT TERM
+  toolchain_snapshot_runtime
+  echo "Provider CLI updates (live sessions are never touched):"
+  for provider in claude codex kimi grok; do
+    toolchain_update_one "$provider" || failures=$((failures + 1))
+  done
+  self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+  before="$VERSION"
+  echo "  agent-link checking latest released CLI…"
+  if cmd_update --cli-only; then
+    after="$("$self" --version 2>/dev/null || echo unknown)"
+    result=updated; [ "$before" = "$after" ] && result=current
+    detail="release updater completed"
+  else
+    after="$("$self" --version 2>/dev/null || echo "$before")"
+    result=failed; detail="release updater failed"
+    failures=$((failures + 1))
+  fi
+  toolchain_record agent-link "$result" "$before" "$after" "$detail"
+  rmdir "$lock" 2>/dev/null || true
+  trap - EXIT INT TERM
+  [ "$failures" -eq 0 ]
+}
+
+toolchain_status() {
+  local provider binary current schedule="disabled" state_file
+  [ -f "$(toolchain_plist)" ] && schedule="enabled daily at 04:15"
+  echo "Automatic provider CLI updates: $schedule"
+  for provider in claude codex kimi grok; do
+    binary="$(toolchain_binary_path "$provider")"
+    if [ -n "$binary" ]; then
+      current="$(toolchain_version "$provider" "$binary")"
+      printf '  %-8s %s  %s\n' "$provider" "$current" "$binary"
+    else
+      printf '  %-8s not installed\n' "$provider"
+    fi
+  done
+  binary="$(toolchain_binary_path paseo)"
+  if [ -n "$binary" ]; then
+    current="$(toolchain_version paseo "$binary")"
+    printf '  %-8s %s  %s (desktop app-managed)\n' paseo "$current" "$binary"
+  else
+    echo "  paseo    not installed (desktop app-managed)"
+  fi
+  state_file="$(toolchain_state)"
+  [ ! -f "$state_file" ] || python3 - "$state_file" <<'PY2'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+print("Last run: " + str(data.get("lastRunAt") or "unknown"))
+for provider, row in sorted((data.get("providers") or {}).items()):
+    print(f"  {provider:<8} {row.get('result', 'unknown')} — {row.get('detail') or row.get('after') or ''}")
+PY2
+}
+
+toolchain_enable() {
+  local plist self uid target_dir
+  command -v launchctl >/dev/null 2>&1 || { echo "launchd is unavailable on this machine" >&2; return 1; }
+  self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+  plist="$(toolchain_plist)"
+  target_dir="$(dirname "$plist")"
+  uid="$(id -u)"
+  mkdir -p "$target_dir" "$STATE"
+  python3 - "$plist" "$self" "$(toolchain_log)" "$HOME" <<'PY2'
+import os, plistlib, sys
+path, executable, log, home = sys.argv[1:]
+payload = {
+    "Label": "com.agent-link.toolchain-updater",
+    "ProgramArguments": [executable, "toolchain", "update", "--scheduled"],
+    "EnvironmentVariables": {
+        "HOME": home,
+        "PATH": ":".join([
+            os.path.join(home, ".local/bin"),
+            os.path.join(home, ".kimi-code/bin"),
+            os.path.join(home, ".grok/bin"),
+            "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin",
+        ]),
+    },
+    "RunAtLoad": True,
+    "StartCalendarInterval": {"Hour": 4, "Minute": 15},
+    "ProcessType": "Background",
+    "LowPriorityIO": True,
+    "Nice": 10,
+    "ThrottleInterval": 3600,
+    "StandardOutPath": log,
+    "StandardErrorPath": log,
+}
+tmp = path + ".tmp"
+with open(tmp, "wb") as handle:
+    plistlib.dump(payload, handle)
+os.replace(tmp, path)
+PY2
+  launchctl bootout "gui/$uid/com.agent-link.toolchain-updater" >/dev/null 2>&1 || true
+  if ! launchctl bootstrap "gui/$uid" "$plist"; then
+    echo "schedule file written, but launchd could not load it: $plist" >&2
+    return 1
+  fi
+  echo "automatic provider CLI updates enabled — daily at 04:15 and once now"
+  echo "live providers are skipped and retried on the next daily run"
+}
+
+toolchain_disable() {
+  local plist uid
+  plist="$(toolchain_plist)"; uid="$(id -u)"
+  launchctl bootout "gui/$uid/com.agent-link.toolchain-updater" >/dev/null 2>&1 || true
+  [ ! -f "$plist" ] || rm -f "$plist"
+  echo "automatic provider CLI updates disabled"
+}
+
+cmd_toolchain() { # status|update|enable|disable
+  case "${1:-status}" in
+    status) toolchain_status ;;
+    update) toolchain_update ;;
+    enable) toolchain_enable ;;
+    disable) toolchain_disable ;;
+    *) echo "usage: agent-link toolchain [status|update|enable|disable]" >&2; return 1 ;;
+  esac
 }
 
 app_field() { # $1 app dir, $2 key
@@ -3825,6 +4136,7 @@ usage:
   agent-link style [install|status] install/check the concise contract across Claude/Codex accounts
   agent-link app [list|install|remove] [id] [--link]  optional integrations (Paseo panel, editors)
   agent-link update                update the CLI and reinstall the apps you have
+  agent-link toolchain [status|update|enable|disable]  safely keep provider CLIs current
   agent-link recover [--scan]      detect provider limits and process queued Paseo continuations
   agent-link fix [model]           test accounts, rescue stuck chats, resync — the one-shot cleanup
   agent-link doctor                sanity checks
@@ -3863,6 +4175,7 @@ main() {
     plugin)  shift; cmd_plugin "$@" ;;
     app)     shift; cmd_app "$@" ;;
     update)  cmd_update ;;
+    toolchain) shift; cmd_toolchain "$@" ;;
     insights) shift; cmd_insights "$@" ;;
     rescue)  shift; cmd_rescue "$@" ;;
     recover) shift; cmd_recover "$@" ;;
