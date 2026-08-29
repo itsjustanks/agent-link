@@ -72,7 +72,9 @@ unreadable runtime state, is skipped until the next day. It never kills or
 restarts an agent and never changes credentials. Paseo itself remains managed
 by the desktop app. Unknown providers are left untouched rather than invoking
 an unverified update command. macOS launchd is preferred; if registration is
-unavailable, AgentLink installs the same daily job through cron instead.
+unavailable, AgentLink installs the same daily job through cron instead. On a
+Paseo host where both registration paths are restricted, the already-loaded
+Paseo watchdog triggers the low-priority daily run.
 
 ---
 

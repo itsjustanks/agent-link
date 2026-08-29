@@ -42,13 +42,17 @@ EOF
 cat > "$fixture_root/provider-bin/launchctl" <<EOF
 #!/usr/bin/env bash
 echo "launchctl \$*" >> "$fixture_root/launchctl.log"
-if [ "\${1:-}" = print ]; then exit 1; fi
+if [ "\${1:-}" = print ]; then
+  if [ "\${WATCHDOG_AVAILABLE:-}" = 1 ] && [[ "\${2:-}" == *paseo-watchdog ]]; then exit 0; fi
+  exit 1
+fi
 if [ "\${LAUNCHCTL_FAIL:-}" = 1 ] && [ "\${1:-}" = bootstrap ]; then exit 5; fi
 EOF
 cat > "$fixture_root/provider-bin/crontab" <<'EOF'
 #!/usr/bin/env bash
 state="$HOME/crontab.txt"
 if [ "${1:-}" = -l ]; then [ -f "$state" ] && cat "$state"; exit 0; fi
+if [ "${CRONTAB_FAIL:-}" = 1 ]; then exit 5; fi
 if [ "${1:-}" = - ]; then cat > "$state"; exit 0; fi
 exit 2
 EOF
@@ -102,5 +106,17 @@ if grep -q 'agent-link-toolchain-updater' "$fixture_root/crontab.txt"; then
   echo "cron fallback was not removed" >&2
   exit 1
 fi
+
+CRONTAB_FAIL=1 LAUNCHCTL_FAIL=1 WATCHDOG_AVAILABLE=1 \
+  PATH="$fixture_root/provider-bin:/usr/bin:/bin" HOME="$fixture_root" AGENT_LINK_HOME="$fixture_root" \
+  "$repo_root/agent-link" toolchain enable >/dev/null 2>&1
+test -f "$fixture_root/state/toolchain-watchdog-enabled"
+test ! -e "$fixture_root/Library/LaunchAgents/com.agent-link.toolchain-updater.plist"
+watchdog_status="$(WATCHDOG_AVAILABLE=1 PATH="$fixture_root/provider-bin:/usr/bin:/bin" \
+  HOME="$fixture_root" AGENT_LINK_HOME="$fixture_root" "$repo_root/agent-link" toolchain status)"
+grep -q 'enabled via Paseo watchdog daily after 04:15' <<< "$watchdog_status"
+WATCHDOG_AVAILABLE=1 PATH="$fixture_root/provider-bin:/usr/bin:/bin" HOME="$fixture_root" \
+  AGENT_LINK_HOME="$fixture_root" "$repo_root/agent-link" toolchain disable >/dev/null
+test ! -e "$fixture_root/state/toolchain-watchdog-enabled"
 
 echo "toolchain updater fixture passed"

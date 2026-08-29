@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.5.34"
+VERSION="0.5.35"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -867,7 +867,7 @@ PY2
 }
 
 cmd_recover() {
-  local paseo_bin self_bin scan=0
+  local paseo_bin self_bin scan=0 recover_rc=0
   [ "${1:-}" = "--scan" ] && scan=1
   # Always rewrite it: the helper is managed code and must upgrade with the
   # CLI, even on machines that already generated an older copy.
@@ -877,7 +877,9 @@ cmd_recover() {
   [ -x "$paseo_bin" ] || { echo "paseo CLI not found — recovery requests remain queued" >&2; return 1; }
   self_bin="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
   AGENT_LINK_SELF="$self_bin" AGENT_LINK_ACCOUNT_ROOT="$ROOT" AGENT_LINK_RECOVERY_SCAN="$scan" \
-    "$SHIM_BIN/paseo-recover" "$(recovery_queue_dir)" "$(pools_dir)/routes.log" "$paseo_bin"
+    "$SHIM_BIN/paseo-recover" "$(recovery_queue_dir)" "$(pools_dir)/routes.log" "$paseo_bin" || recover_rc=$?
+  [ "$scan" -ne 1 ] || toolchain_watchdog_tick
+  return "$recover_rc"
 }
 
 cmd_refused() { # $1 provider
@@ -3105,6 +3107,8 @@ toolchain_plist() { echo "$HOME/Library/LaunchAgents/com.agent-link.toolchain-up
 toolchain_log() { echo "$STATE/toolchain-updater.log"; }
 toolchain_state() { echo "$STATE/toolchain-updates.json"; }
 toolchain_cron_marker() { echo "# agent-link-toolchain-updater"; }
+toolchain_watchdog_marker() { echo "$STATE/toolchain-watchdog-enabled"; }
+toolchain_watchdog_stamp() { echo "$STATE/toolchain-watchdog-last-date"; }
 toolchain_runtime_path() {
   printf '%s\n' "$HOME/.local/bin:$HOME/.kimi-code/bin:$HOME/.grok/bin:$HOME/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 }
@@ -3139,6 +3143,38 @@ toolchain_remove_cron() {
   marker="$(toolchain_cron_marker)"
   existing="$(crontab -l 2>/dev/null || true)"
   printf '%s\n' "$existing" | grep -Fv "$marker" | crontab - || true
+}
+
+toolchain_watchdog_available() {
+  local uid label
+  command -v launchctl >/dev/null 2>&1 || return 1
+  uid="$(id -u)"
+  for label in com.agent-link.paseo-watchdog com.ankit.paseo-watchdog; do
+    launchctl print "gui/$uid/$label" >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+
+toolchain_enable_watchdog() {
+  toolchain_watchdog_available || return 1
+  : > "$(toolchain_watchdog_marker)"
+  echo "automatic provider CLI updates enabled via the Paseo watchdog — daily after 04:15"
+  echo "live providers are skipped and retried on the next daily run"
+}
+
+toolchain_watchdog_tick() {
+  local marker today last hour self
+  marker="$(toolchain_watchdog_marker)"
+  [ -f "$marker" ] || return 0
+  today="$(date +%Y-%m-%d)"
+  last="$(cat "$(toolchain_watchdog_stamp)" 2>/dev/null || true)"
+  hour="$(date +%H)"
+  [ "$last" != "$today" ] || return 0
+  [ "$hour" -gt 4 ] || { [ "$hour" -eq 4 ] && [ "$(date +%M)" -ge 15 ]; } || return 0
+  printf '%s\n' "$today" > "$(toolchain_watchdog_stamp)"
+  self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+  /usr/bin/nohup /usr/bin/nice -n 10 "$self" toolchain update --scheduled \
+    >> "$(toolchain_log)" 2>&1 </dev/null &
 }
 
 toolchain_binary_path() { # $1 provider
@@ -3346,6 +3382,8 @@ toolchain_status() {
     schedule="enabled via launchd daily at 04:15"
   elif toolchain_cron_enabled; then
     schedule="enabled via cron daily at 04:15"
+  elif [ -f "$(toolchain_watchdog_marker)" ] && toolchain_watchdog_available; then
+    schedule="enabled via Paseo watchdog daily after 04:15"
   elif [ -f "$(toolchain_plist)" ]; then
     schedule="written but not loaded"
   fi
@@ -3388,7 +3426,7 @@ toolchain_enable() {
       echo "live providers are skipped and retried on the next daily run"
       return 0
     fi
-    echo "neither launchd nor cron is available on this machine" >&2
+    echo "neither launchd, cron, nor the Paseo watchdog is available on this machine" >&2
     return 1
   fi
   plist="$(toolchain_plist)"
@@ -3423,7 +3461,12 @@ PY2
   if ! launchctl bootstrap "gui/$uid" "$plist"; then
     echo "launchd could not load the schedule; using the daily cron fallback" >&2
     if ! toolchain_install_cron "$self"; then
-      echo "neither launchd nor cron could install the schedule" >&2
+      echo "cron could not install the schedule; trying the loaded Paseo watchdog" >&2
+      if toolchain_enable_watchdog; then
+        rm -f "$plist"
+        return 0
+      fi
+      echo "no supported scheduler could install the daily update" >&2
       return 1
     fi
     rm -f "$plist"
@@ -3432,6 +3475,7 @@ PY2
     return 0
   fi
   toolchain_remove_cron
+  rm -f "$(toolchain_watchdog_marker)" "$(toolchain_watchdog_stamp)"
   echo "automatic provider CLI updates enabled — daily at 04:15 and once now"
   echo "live providers are skipped and retried on the next daily run"
 }
@@ -3441,6 +3485,7 @@ toolchain_disable() {
   plist="$(toolchain_plist)"; uid="$(id -u)"
   launchctl bootout "gui/$uid/com.agent-link.toolchain-updater" >/dev/null 2>&1 || true
   toolchain_remove_cron
+  rm -f "$(toolchain_watchdog_marker)" "$(toolchain_watchdog_stamp)"
   [ ! -f "$plist" ] || rm -f "$plist"
   echo "automatic provider CLI updates disabled"
 }
