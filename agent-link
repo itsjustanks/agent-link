@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.5.43"
+VERSION="0.5.44"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -582,8 +582,10 @@ def update_sentry_outcome(request, outcome):
         "model": request.get("model"),
         "limit": request.get("limit"),
     }
-    base.update(action=action, detail=f"{request.get('detail') or base.get('detail') or 'provider limit'} — {suffix}")
-    for key in ("targetAgentId", "targetProvider", "targetModel"):
+    detail = str(request.get("detail") or base.get("detail") or "provider limit")
+    if suffix not in detail: detail += f" — {suffix}"
+    base.update(action=action, detail=detail, attempts=max(0, int(request.get("attempts", 0))))
+    for key in ("workspaceId", "title", "targetAgentId", "targetProvider", "targetModel"):
         if request.get(key): base[key] = request[key]
     record_sentry(base)
 
@@ -645,7 +647,7 @@ def start_cross_provider(request, detail, target):
     source_id = str(request.get("agentId") or "")
     prior = prior_cross_provider(source_id)
     if prior:
-        request.update({key: prior.get(key) for key in ("targetAgentId", "targetProvider", "targetModel") if prior.get(key)})
+        request.update({key: prior.get(key) for key in ("workspaceId", "title", "targetAgentId", "targetProvider", "targetModel", "detail") if prior.get(key)})
         return "already-cross-provider", ""
     stored = agent_record(source_id)
     workspace_id = request.get("workspaceId") or detail.get("WorkspaceId") or detail.get("workspaceId") or stored.get("workspaceId")
@@ -893,7 +895,7 @@ for path in sorted(glob.glob(os.path.join(pending, "*.json")))[:8]:
         if not target or target == request.get("account"):
             prior = prior_cross_provider(agent_id)
             if prior:
-                request.update({key: prior.get(key) for key in ("targetAgentId", "targetProvider", "targetModel") if prior.get(key)})
+                request.update({key: prior.get(key) for key in ("workspaceId", "title", "targetAgentId", "targetProvider", "targetModel", "detail") if prior.get(key)})
                 finish(path, request, "already-cross-provider")
                 accepted += 1
                 continue
@@ -928,6 +930,7 @@ for path in sorted(glob.glob(os.path.join(pending, "*.json")))[:8]:
                 **({"account": request["account"]} if request.get("account") else {}),
                 **({"model": request["model"]} if request.get("model") else {}),
                 **({"limit": request["limit"]} if request.get("limit") else {}),
+                "attempts": max(0, int(request.get("attempts", 0))),
             })
             deferred += 1
             continue

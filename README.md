@@ -90,7 +90,7 @@ The panel opens on **AgentRouter**, followed by **Accounts, Limit recovery, and 
 
 One click installs a **Dynamic Agent Link** provider. Pick it and each new chat chooses an available account by priority, then least recent use. A running chat keeps the account it started with.
 
-Every agent's composer has a **model and account** pill. It opens Paseo's native modal with the actual provider/model, current sign-in, live usage windows and reset times. From there you can prioritise an account for new chats or safely move a stopped Claude/Codex conversation to a chosen healthy sign-in and continue. AgentRouter keeps its request reader and answer model separate; unavailable runtime data stays explicitly unknown.
+Every agent's composer has a **model and account** pill. It opens Paseo's native modal with the actual provider/model, current sign-in, live usage windows, reset times, recovery attempts, and linked fallback. From there you can prioritise an account for new chats, safely move a stopped Claude/Codex conversation to a chosen healthy sign-in, or choose another provider/model and continue in a linked Paseo tab. The original chat stays intact as history. AgentRouter keeps its request reader and answer model separate; unavailable runtime data stays explicitly unknown.
 
 The **AgentRouter** tab starts with **How to use AgentRouter**, including what every tab and account check does. Fable 5 reads the request by default; searchable provider/model pickers then define the ordered models that can answer. Every answer runs as a concrete Paseo child. Direct Paseo profiles remain faster when you already know the model. Claude and Codex choices still use AgentLink's account availability and cooldown rules.
 

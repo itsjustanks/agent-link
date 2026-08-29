@@ -173,6 +173,21 @@ export const routerTrace = defineRpc({
   }),
 });
 
+export const agentContinue = defineRpc({
+  name: "agent-link.agent-continue",
+  input: z.object({
+    agentId: z.string().min(1),
+    provider: z.string().regex(/^[a-z][a-z0-9-]*$/),
+    model: z.string().min(1).max(160),
+    thinking: z.string().min(1).max(40),
+  }),
+  output: z.object({
+    ok: z.boolean(),
+    agentId: z.string().nullable(),
+    message: z.string(),
+  }),
+});
+
 export const wireAuto = defineRpc({
   name: "agent-link.wire-auto",
   input: z.object({ provider: z.enum(["claude", "codex"]) }),

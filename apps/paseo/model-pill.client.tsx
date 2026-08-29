@@ -9,10 +9,18 @@ import type { PaseoAgent, PaseoAgentListResult, PaseoAgentUpdate } from "@getpas
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import React, { useEffect, useMemo, useState } from "react";
 import { ScrollView, Text, View } from "react-native";
-import { accountCapacity, routerTrace, setPreference, type CapacityAccount } from "./contracts.shared";
+import {
+  accountCapacity,
+  agentContinue,
+  providerHeartbeat,
+  routerModels,
+  routerTrace,
+  setPreference,
+  type CapacityAccount,
+} from "./contracts.shared";
 import { limitsResume, limitsStatus } from "./limits.shared";
 import { friendlyModelName, resolveRuntimeModel, UNKNOWN_MODEL } from "./model.shared";
-import { Button, ConfirmButton, Meter, StatusPill, TokensProvider, useUi, type Status } from "./ui.client";
+import { Button, ComboBox, ConfirmButton, Meter, StatusPill, TokensProvider, useUi, type Status } from "./ui.client";
 
 const modalListeners = new Map<string, Set<() => void>>();
 
@@ -120,6 +128,11 @@ function AccountModal({
   const callPreference = useRpc(setPreference);
   const callLimits = useRpc(limitsStatus);
   const callResume = useRpc(limitsResume);
+  const callProviders = useRpc(providerHeartbeat);
+  const callModels = useRpc(routerModels);
+  const callContinue = useRpc(agentContinue);
+  const [targetProvider, setTargetProvider] = useState("");
+  const [targetModel, setTargetModel] = useState("");
   const family = provider.replace(/-auto$/, "");
   const pooled = family === "claude" || family === "codex";
   const capacity = useQuery({
@@ -133,6 +146,42 @@ function AccountModal({
     queryFn: () => callLimits({}),
     enabled: open,
   });
+  const providers = useQuery({
+    queryKey: ["agent-link", "composer-providers"],
+    queryFn: () => callProviders({}),
+    enabled: open,
+    refetchInterval: open ? 30_000 : false,
+  });
+  const providerOptions = useMemo(
+    () => (providers.data?.providers ?? []).filter((entry) => entry.available).map((entry) => {
+      const dynamic = entry.kind === "pooled" && entry.aliases.includes(`${entry.id}-auto`);
+      return {
+        value: dynamic ? `${entry.id}-auto` : entry.id,
+        label: dynamic ? `${entry.label} · dynamic accounts` : entry.label,
+        description: entry.summary,
+      };
+    }),
+    [providers.data?.providers],
+  );
+  useEffect(() => {
+    if (!open || providerOptions.length === 0) return;
+    if (providerOptions.some((entry) => entry.value === targetProvider)) return;
+    setTargetProvider(providerOptions.find((entry) => entry.value !== provider)?.value ?? providerOptions[0]!.value);
+  }, [open, provider, providerOptions, targetProvider]);
+  const models = useQuery({
+    queryKey: ["agent-link", "composer-models", targetProvider],
+    queryFn: () => callModels({ provider: targetProvider }),
+    enabled: open && Boolean(targetProvider),
+  });
+  const modelOptions = useMemo(
+    () => (models.data?.models ?? []).map((entry) => ({ value: entry.id, label: entry.label, description: entry.description })),
+    [models.data?.models],
+  );
+  useEffect(() => {
+    if (!open || modelOptions.length === 0) return;
+    if (modelOptions.some((entry) => entry.value === targetModel)) return;
+    setTargetModel(modelOptions[0]!.value);
+  }, [modelOptions, open, targetModel]);
   const entries = useMemo(
     () => (capacity.data?.accounts ?? []).filter((entry) => !pooled || entry.provider === family),
     [capacity.data?.accounts, family, pooled],
@@ -153,6 +202,20 @@ function AccountModal({
       toast.show("Chat moved and continuation requested.", { variant: "success" });
       onOpenChange(false);
       void queryClient.invalidateQueries({ queryKey: ["agent-link"] });
+    },
+    onError: (error: Error) => toast.error(error.message),
+  });
+  const continueAgent = useMutation({
+    mutationFn: () => callContinue({
+      agentId,
+      provider: targetProvider,
+      model: targetModel,
+      thinking: targetProvider.startsWith("codex") && targetModel === "gpt-5.6-sol" ? "ultra" : "high",
+    }),
+    onSuccess: (result) => {
+      if (!result.ok) return toast.error(result.message);
+      toast.show(result.message, { variant: "success", durationMs: 4_000 });
+      onOpenChange(false);
     },
     onError: (error: Error) => toast.error(error.message),
   });
@@ -234,7 +297,57 @@ function AccountModal({
                 </View>
               );
             })}
-            {currentEvent ? <Text style={[t.text.caption, { color: t.color.warning }]}>{`Last limit: ${currentEvent.detail}`}</Text> : null}
+            <View style={{ padding: 12, borderRadius: t.radius.md, backgroundColor: t.color.surface2, gap: 10 }}>
+              <View style={{ gap: 4 }}>
+                <Text style={t.text.bodyStrong}>Continue in another provider</Text>
+                <Text style={t.text.caption}>Creates a linked Paseo agent in this workspace. The original chat stays intact as history.</Text>
+              </View>
+              <ComboBox
+                label="Provider"
+                value={targetProvider}
+                onChange={(value) => {
+                  setTargetProvider(value);
+                  setTargetModel("");
+                }}
+                options={providerOptions}
+                placeholder="Choose provider"
+                allowCustom={false}
+              />
+              <ComboBox
+                label="Model"
+                value={targetModel}
+                onChange={setTargetModel}
+                options={modelOptions}
+                placeholder={models.isLoading ? "Loading models…" : "Choose model"}
+                allowCustom={modelOptions.length === 0}
+                hint={models.data?.message}
+              />
+              {targetProvider && targetModel && agentStatus !== "running" && agentStatus !== "initializing" ? (
+                <ConfirmButton
+                  label="Continue in new tab"
+                  confirmLabel="Create linked continuation"
+                  variant="secondary"
+                  onConfirm={() => continueAgent.mutate()}
+                />
+              ) : (
+                <Button
+                  label={agentStatus === "running" || agentStatus === "initializing" ? "Wait for current turn" : "Choose provider and model"}
+                  disabled
+                  onPress={() => {}}
+                />
+              )}
+            </View>
+            {currentEvent ? (
+              <View style={{ padding: 12, borderRadius: t.radius.md, backgroundColor: t.color.warningWash, gap: 4 }}>
+                <Text style={t.text.bodyStrong}>Recovery</Text>
+                <Text style={t.text.caption}>{currentEvent.detail}</Text>
+                <Text style={t.text.caption}>
+                  {`${currentEvent.attempts ?? 0} retry attempt${(currentEvent.attempts ?? 0) === 1 ? "" : "s"}${
+                    currentEvent.targetAgentId ? ` · linked agent ${currentEvent.targetAgentId}` : ""
+                  }`}
+                </Text>
+              </View>
+            ) : null}
           </ScrollView>
         </TokensProvider>
       </Modal.Content>

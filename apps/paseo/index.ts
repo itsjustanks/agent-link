@@ -16,6 +16,7 @@ import {
   routerModels,
   routerStatus,
   routerTrace,
+  agentContinue,
   scan,
   setCooldown,
   setPreference,
@@ -36,6 +37,7 @@ import {
   handleRouterModels,
   handleRouterStatus,
   handleRouterTrace,
+  handleAgentContinue,
   handleScan,
   handleSetCooldown,
   handleSetPreference,
@@ -69,6 +71,7 @@ export default function contribute(plugin: PluginContext) {
   plugin.handle(routerConfigure, handleRouterConfigure);
   plugin.handle(routerModels, handleRouterModels);
   plugin.handle(routerTrace, handleRouterTrace);
+  plugin.handle(agentContinue, handleAgentContinue);
   plugin.handle(setCooldown, handleSetCooldown);
   plugin.handle(addAccount, handleAddAccount);
   plugin.handle(removeAccount, handleRemoveAccount);

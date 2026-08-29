@@ -944,6 +944,47 @@ export async function handleRouterTrace({ agentId }: { agentId: string }, { pase
   return { isAgentRouter, summary, nodes };
 }
 
+export async function handleAgentContinue(
+  {
+    agentId,
+    provider,
+    model,
+    thinking,
+  }: { agentId: string; provider: string; model: string; thinking: string },
+  { paseo }: PluginHandlerContext,
+) {
+  try {
+    const sourceHandle = paseo.agents.ref(agentId);
+    const refreshed = await sourceHandle.refresh();
+    const source = refreshed?.agent;
+    if (!source) return { ok: false, agentId: null, message: "The source chat is no longer available." };
+    if (source.status === "running" || source.status === "initializing") {
+      return { ok: false, agentId: null, message: "Wait for the current turn to stop before continuing in another provider." };
+    }
+    const target = `${provider}/${model}`;
+    const prompt =
+      `AgentLink provider continuation for Paseo agent ${agentId}. Continue this chat using ${target}. ` +
+      `First run \`paseo agent logs ${agentId}\` and inspect the current workspace and git diff. ` +
+      "Continue from the first incomplete step; do not redo completed work. Preserve every user constraint and existing agent/subagent result. " +
+      `Begin with one short line: \`Continued from ${agentId} on ${target}\` and then take the next action.`;
+    const options = {
+      config: { provider: target, thinkingOptionId: thinking },
+      title: `Continue: ${source.title ?? "Agent"}`.slice(0, 120),
+      prompt,
+      labels: {
+        "agent-link-continuation-of": agentId,
+        "agent-link-manual-provider-switch": "true",
+      },
+    };
+    const created = source.workspaceId
+      ? await paseo.workspaces.ref(source.workspaceId).agents.create(options)
+      : await paseo.agents.create({ ...options, cwd: source.cwd });
+    return { ok: true, agentId: created.id, message: `Created linked agent ${created.id} on ${target}.` };
+  } catch (error) {
+    return { ok: false, agentId: null, message: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 // Create the slot and kick off that CLI's own browser login. The flow opens a
 // browser and completes there, so it can be started detached — the panel then
 // shows the account as logged in once its config records the identity.

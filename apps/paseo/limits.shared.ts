@@ -17,6 +17,7 @@ export const LimitEventSchema = z.object({
   account: z.string().optional(),
   model: z.string().optional(),
   limit: z.string().optional(),
+  attempts: z.number().int().nonnegative().optional(),
   targetAgentId: z.string().optional(),
   targetProvider: z.string().optional(),
   targetModel: z.string().optional(),
