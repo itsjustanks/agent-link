@@ -1,10 +1,10 @@
 import {
-  Icon,
   type PluginClientContext,
   type PluginComposerPillProps,
   useAgent,
   useRpc,
 } from "@getpaseo/plugin";
+import { Icon } from "@getpaseo/plugin/react-native";
 import type { PaseoAgent, PaseoAgentListResult, PaseoAgentUpdate } from "@getpaseo/client";
 import { useQuery } from "@tanstack/react-query";
 import React from "react";
@@ -60,7 +60,7 @@ export function contributeModelPills(client: PluginClientContext) {
       workspaceId,
       remove: client.addComposerPill({
         id: "runtime-model",
-        title: "Open model and routing evidence",
+        title: "Open model and account details",
         workspaceId,
         agentId: agent.id,
         Component: AgentModelPill,

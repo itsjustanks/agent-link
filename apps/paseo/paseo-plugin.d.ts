@@ -52,9 +52,50 @@ declare module "@getpaseo/plugin/server" {
   export const PluginAttachmentSearchPayloadSchema: import("zod").ZodType<PluginAttachmentSearchPayload>;
 }
 
+declare module "@getpaseo/plugin/react-native" {
+  import type { ComponentType, FunctionComponent, ReactNode } from "react";
+
+  export interface PluginIconProps {
+    name: string;
+    size?: number;
+    color?: string;
+  }
+
+  export interface ModalProps {
+    title: string;
+    icon?: ReactNode;
+    open: boolean;
+    onOpenChange(open: boolean): void;
+    children: ReactNode;
+  }
+
+  export interface ModalContentProps {
+    children: ReactNode;
+  }
+
+  export interface ModalComponent extends FunctionComponent<ModalProps> {
+    Content: ComponentType<ModalContentProps>;
+  }
+
+  export type ToastVariant = "default" | "info" | "success" | "warning" | "error";
+  export interface ToastOptions {
+    variant?: ToastVariant;
+    durationMs?: number;
+  }
+  export interface ToastApi {
+    show(message: string, options?: ToastOptions): void;
+    error(message: string): void;
+  }
+
+  export const Icon: ComponentType<PluginIconProps>;
+  export const Modal: ModalComponent;
+  export function useToast(): ToastApi;
+}
+
 declare module "@getpaseo/plugin" {
   import type { ComponentType } from "react";
   import type { PaseoApi } from "@getpaseo/client";
+  import type { AgentTimelineItem } from "@getpaseo/protocol/agent-types";
   import type { ZodType, input as ZodInput, output as ZodOutput } from "zod";
   import type {
     PluginAttachmentSourceContribution,
@@ -77,10 +118,15 @@ declare module "@getpaseo/plugin" {
   export interface PluginTheme {
     readonly colors: {
       readonly surface0: string;
+      readonly surface1: string;
+      readonly surface2: string;
+      readonly border: string;
       readonly foreground: string;
       readonly foregroundMuted: string;
       readonly accent: string;
       readonly accentForeground: string;
+      readonly statusSuccess: string;
+      readonly statusWarning: string;
       readonly statusDanger: string;
     };
   }
@@ -171,8 +217,8 @@ declare module "@getpaseo/plugin" {
   }
 
   export type PluginWorkspacePanelContribution =
-    | { id: string; title: string; icon: string; context: "workspace"; Component: ComponentType<PluginWorkspacePanelProps> }
-    | { id: string; title: string; icon: string; context: "agent"; Component: ComponentType<PluginAgentPanelProps> };
+    | { id: string; title: string; icon: string; locations?: readonly PluginPanelLocation[]; context: "workspace"; Component: ComponentType<PluginWorkspacePanelProps> }
+    | { id: string; title: string; icon: string; locations?: readonly PluginPanelLocation[]; context: "agent"; Component: ComponentType<PluginAgentPanelProps> };
 
   export interface PluginSidebarContribution {
     id: string;
@@ -181,9 +227,50 @@ declare module "@getpaseo/plugin" {
     surface: string;
   }
 
+  export interface PluginThemeColors {
+    background: string;
+    foreground: string;
+    raised: string;
+    control: string;
+    border: string;
+    accent?: string;
+    mutedForeground: string;
+    ring: string;
+  }
+
+  export interface PluginThemeContribution {
+    id: string;
+    name: string;
+    appearance: "light" | "dark";
+    colors: PluginThemeColors;
+  }
+
   export interface PluginSurfaceContribution {
     id: string;
     Component: ComponentType<PluginSurfaceProps>;
+  }
+
+  export type PluginTimelineData = null | boolean | number | string | PluginTimelineData[] | { [key: string]: PluginTimelineData };
+  export interface PluginTimelineItem { type: "plugin"; kind: string; version: number; data: PluginTimelineData; }
+  export interface PluginTimelineTransformResult { items: PluginTimelineItem[]; }
+  export type PluginTimelineTransformerContribution<ItemType extends AgentTimelineItem["type"] = AgentTimelineItem["type"]> =
+    ItemType extends AgentTimelineItem["type"]
+      ? {
+          id: string;
+          query: { itemType: ItemType };
+          transform(input: { item: Extract<AgentTimelineItem, { type: ItemType }> }): PluginTimelineTransformResult | undefined;
+        }
+      : never;
+  export interface PluginTimelineItemProps<Data = unknown> extends PluginHostProps {
+    agentId: string;
+    item: { type: "plugin"; kind: string; version: number; data: Data };
+    timestamp: Date;
+  }
+  export interface PluginTimelineRendererContribution<Schema extends ZodType = ZodType> {
+    kind: string;
+    version: number;
+    schema: Schema;
+    Component: ComponentType<PluginTimelineItemProps<ZodOutput<Schema>>>;
   }
 
   export interface PluginCommandCapabilities {
@@ -238,6 +325,9 @@ declare module "@getpaseo/plugin" {
     addCommandCenterItem(contribution: PluginCommandCenterItemContribution): void;
     addClientSide(contribution: PluginClientContribution): void;
     addAttachmentSource(contribution: PluginAttachmentSourceContribution): void;
+    addTheme(contribution: PluginThemeContribution): void;
+    addTimelineTransformer<ItemType extends AgentTimelineItem["type"]>(contribution: PluginTimelineTransformerContribution<ItemType>): void;
+    addTimelineRenderer<Schema extends ZodType>(contribution: PluginTimelineRendererContribution<Schema>): void;
   }
 
   export type PluginCleanup = () => void | Promise<void>;

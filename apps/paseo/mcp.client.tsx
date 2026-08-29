@@ -1489,6 +1489,29 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
     </View>
   ) : null;
 
+  const projectServerGroups = [...(authQuery.data?.projectServers ?? []).reduce((groups, entry) => {
+    const names = groups.get(entry.project) ?? [];
+    names.push(entry.name);
+    groups.set(entry.project, names);
+    return groups;
+  }, new Map<string, string[]>()).entries()];
+  const projectInventory = projectServerGroups.length > 0 ? (
+    <Section title="Project MCP servers">
+      <Card padded={false}>
+        {projectServerGroups.map(([project, names], index) => (
+          <Row
+            key={project}
+            first={index === 0}
+            title={project}
+            subtitle={names.join(", ")}
+            meta={<Facts items={[{ value: `${names.length} server${names.length === 1 ? "" : "s"}` }]} />}
+          />
+        ))}
+      </Card>
+      <Text style={t.text.caption}>Open MCP connections from a project workspace to manage its sign-ins.</Text>
+    </Section>
+  ) : null;
+
   const help = (
     <Disclosure title="MCP FAQs">
       <Text style={t.text.heading}>Why is OAuth per account?</Text>
@@ -1508,7 +1531,7 @@ export function McpSurface({ theme, layout }: PluginSurfaceProps) {
       ? importPane
       : selected
         ? serverPane
-        : <View style={{ gap: t.space.lg }}>{filters}{list}{help}</View>;
+        : <View style={{ gap: t.space.lg }}>{filters}{list}{projectInventory}{help}</View>;
 
   return (
     <Screen t={t}>

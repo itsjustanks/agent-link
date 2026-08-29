@@ -5,10 +5,9 @@ import { ActivityIndicator, Clipboard, Image, Pressable, ScrollView, Text, TextI
 /**
  * The plugin's design system.
  *
- * Paseo hands a surface six colours and a compact flag, and that is the whole
- * budget: no icon set inside a surface body, no SVG, no chart library. So
- * hierarchy has to come from type weight, surface level and spacing, and every
- * other colour is derived here rather than invented at each call site.
+ * Paseo hands each surface semantic colours, host-rendered icons and a compact
+ * flag. Keep those host tokens as the source of truth so every theme and client
+ * renders the same meaning.
  *
  * Two rules keep it honest:
  *   - one filled button per view; everything else is quieter than it,
@@ -71,9 +70,8 @@ export function isDarkSurface(color: string): boolean {
   return (0.299 * r + 0.587 * g + 0.114 * b) / 255 < 0.5;
 }
 
-// Paseo's palette has danger but no success or warning, so exactly two pairs are
-// hardcoded — picked per light/dark surface. Nothing else in this file is a
-// literal colour.
+// Older Paseo hosts did not supply success and warning colours. These remain
+// compatibility fallbacks for a directory install opened by an older client.
 const SUCCESS = { dark: "#3ecf8e", light: "#12855a" };
 const WARNING = { dark: "#e0a33e", light: "#a16207" };
 
@@ -84,12 +82,19 @@ export type Tokens = ReturnType<typeof tokens>;
 export function tokens(theme: PluginTheme, compact: boolean) {
   const dark = isDarkSurface(theme.colors.surface0);
   const ink = dark ? "#ffffff" : "#000000";
+  const colors = theme.colors as PluginTheme["colors"] & Partial<{
+    surface1: string;
+    surface2: string;
+    border: string;
+    statusSuccess: string;
+    statusWarning: string;
+  }>;
   const fg = theme.colors.foreground;
   const muted = theme.colors.foregroundMuted;
   const accent = theme.colors.accent;
   const danger = theme.colors.statusDanger;
-  const success = dark ? SUCCESS.dark : SUCCESS.light;
-  const warning = dark ? WARNING.dark : WARNING.light;
+  const success = colors.statusSuccess || (dark ? SUCCESS.dark : SUCCESS.light);
+  const warning = colors.statusWarning || (dark ? WARNING.dark : WARNING.light);
 
   return {
     compact,
@@ -102,12 +107,13 @@ export function tokens(theme: PluginTheme, compact: boolean) {
       danger,
       success,
       warning,
-      // Three surface levels. Never nest one inside another of the same level.
+      // Native semantic surfaces on Paseo 0.7+, with compatible derivation for
+      // older hosts. Never nest one inside another of the same level.
       surface0: theme.colors.surface0,
-      surface1: mix(theme.colors.surface0, ink, dark ? 0.05 : 0.03),
-      surface2: mix(theme.colors.surface0, ink, dark ? 0.09 : 0.06),
+      surface1: colors.surface1 || mix(theme.colors.surface0, ink, dark ? 0.05 : 0.03),
+      surface2: colors.surface2 || mix(theme.colors.surface0, ink, dark ? 0.09 : 0.06),
       borderSubtle: alpha(muted, 0.14),
-      border: alpha(muted, 0.24),
+      border: colors.border || alpha(muted, 0.24),
       borderStrong: alpha(muted, 0.4),
       accentWash: alpha(accent, 0.14),
       accentLine: alpha(accent, 0.45),

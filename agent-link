@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.5.38"
+VERSION="0.5.39"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -3672,20 +3672,67 @@ except Exception:
 PY3
 }
 
+paseo_plugin_source() { # $1 plugin id -> git|directory|empty
+  paseo plugin status "$1" --json 2>/dev/null | python3 -c '
+import json, sys
+try: value = json.load(sys.stdin)
+except Exception: value = []
+rows = value if isinstance(value, list) else [value]
+print(next((row.get("source") or "" for row in rows if isinstance(row, dict) and row.get("id") == sys.argv[1]), ""))
+' "$1"
+}
+
+paseo_has_git_plugins() {
+  paseo plugin add --help 2>&1 | grep -q -- '--path <path>'
+}
+
 install_paseo_plugin() { # $1 source dir, $2 plugin id, $3 "link" to run from source
-  local src="$1" pid="$2" mode="${3:-copy}" dest home status
+  local src="$1" pid="$2" mode="${3:-copy}" dest home status prior_path source
   command -v paseo >/dev/null 2>&1 || {
     echo "Paseo is not installed on this machine — this app is optional." >&2
     echo "Get it at https://paseo.sh, then run: agent-link app install paseo" >&2
-    return 1; }
-  command -v npm >/dev/null 2>&1 || {
-    echo "This app needs Node.js (for npm) to build. Install Node 20+, then run this again." >&2
     return 1; }
   if [ "$(paseo_plugins_on)" != yes ]; then
     echo "Paseo has plugins switched off." >&2
     echo "Turn them on in Paseo → Settings → Plugins, then run: agent-link app install paseo" >&2
     return 1
   fi
+
+  # Paseo 0.7+ owns Git installs and updates. It builds a candidate with install
+  # scripts disabled and keeps the current plugin if the candidate cannot start.
+  # --link stays explicit for local development; older hosts use the copy flow.
+  if [ "$mode" != link ] && paseo_has_git_plugins; then
+    source="$(paseo_plugin_source "$pid")"
+    if [ "$source" = git ]; then
+      echo "checking the Git-managed plugin for updates…"
+      paseo plugin update "$pid" >/dev/null || return 1
+    else
+      prior_path="$(paseo plugin ls --json 2>/dev/null | python3 -c '
+import json, sys
+try: rows = json.load(sys.stdin)
+except Exception: rows = []
+print(next((row.get("path") or "" for row in rows if isinstance(row, dict) and row.get("id") == sys.argv[1]), ""))
+' "$pid")"
+      [ -n "$source" ] && paseo plugin remove "$pid" >/dev/null 2>&1
+      echo "installing from Git with Paseo-managed updates…"
+      if ! paseo plugin add itsjustanks/agent-link --path apps/paseo --id "$pid" >/dev/null; then
+        [ -n "$prior_path" ] && [ -d "$prior_path" ] && paseo plugin install "$prior_path" --id "$pid" >/dev/null 2>&1
+        echo "Git install failed; the previous plugin was restored when possible." >&2
+        return 1
+      fi
+    fi
+    status="$(paseo plugin ls 2>/dev/null | awk -v id="$pid" '$1 == id { print $2 }')"
+    case "$status" in
+      running) echo "installed from Git and running. Paseo now checks and applies its updates." ;;
+      "")      echo "installed, but Paseo does not list it yet — check: paseo plugin ls" >&2 ;;
+      *)       echo "installed but $status — check: paseo plugin logs $pid" >&2; return 1 ;;
+    esac
+    return 0
+  fi
+
+  command -v npm >/dev/null 2>&1 || {
+    echo "This app needs Node.js (for npm) to build. Install Node 20+, then run this again." >&2
+    return 1; }
 
   home="$(paseo_home)"
   if [ "$mode" = link ]; then

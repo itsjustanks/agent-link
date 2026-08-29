@@ -18,33 +18,33 @@ Two sidebar tabs:
 
 ## 👥 Agent Link
 
-The surface opens on **AgentRouter**, followed by **Accounts, Limit sentry, Memory guard, and FAQs**. Provider tabs — **Claude Code, Codex, Kimi Code, Grok, and custom additions** — live only inside Accounts. A cheap 30-second heartbeat refreshes registry, account, route, recovery, and capacity state without starting an agent or spending quota; **Deep check** is the explicit provider-starting diagnostic. The host watchdog separately scans recent stopped agents from every provider once a minute. Claude/Codex account-pinned aliases roll into their family tab. Inside each pooled provider:
+The surface opens on **AgentRouter**, followed by **Accounts, Limit recovery, and Memory protection**. **How to use AgentRouter** sits first and explains every tab and account check. Provider tabs — **Claude Code, Codex, Kimi Code, Grok, and custom additions** — live only inside Accounts. A free 30-second status check refreshes local state without starting a model. **Check setup** verifies a provider path, version, login, and models. **Test account limits** is the only check that spends a tiny model turn. The host watchdog separately scans recent stopped agents from every provider once a minute. Claude/Codex account-pinned aliases roll into their family tab.
 
 - the **primary** account (the login your plain `claude` / `codex` uses), shown by email
-- every **account slot** with live state: 🟢 logged in · 🟠 login needed · 🔴 wrong account (the slot folder says one email, the login inside is another)
-- a **pool summary** — "5 logged-in entries → 4 independent quota pools" — and a ⚠ badge on any two entries signed into the *same* account, since a rate limit belongs to an account, not to a slot
-- **Usage and capacity on each account row** — rolling session and weekly windows, used and available capacity, exact reset countdowns, the viewing device's local reset time, freshness, plan/model context, extra credits, and whether routing considers it available, nearing, held, or cooling down. No token material is read.
+- every saved **sign-in** with live state: logged in, login needed, or signed into the wrong account
+- a clear count of saved sign-ins versus separate usage limits, with a warning when two sign-ins share one account and therefore one limit
+- **Usage limits on each account row** — session and weekly windows, amount left, exact reset countdowns, the viewing device's local reset time, freshness, plan/model context, extra credits, and whether new chats can use it. No token material is read.
 - **Activity in account Details** — an on-request Claude and Codex transcript scan for sessions, input/output/reasoning tokens, cache rate, context window, projects, and models actually used.
 - **Credit state** — when an account has hit a spend limit, its row says so (Claude records the reason in its own config), instead of you finding out when an agent dies.
 - **Rotation usage** — a bar and a count showing how many agents the router has handed each account and when it was last used, so you can see the rotation actually spreading. This is launch distribution, separate from the provider quota shown in **Available capacity**.
 - **Last Paseo consumer** — routed launches retain the exact Paseo agent ID and working directory, so duplicate rows reveal which agent last used their shared quota.
-- **Probe accounts** — an explicit measured Claude turn from the UI; refusing accounts stay held out and only a passing probe releases them. Heartbeat never performs this paid check.
-- **Memory guard tab** — live Paseo-owned TypeScript checks only. A shell/package-runner/compiler chain counts as one job; one job runs at a time, and under critical pressure its real compiler is paused, not killed, then continued after recovery. Checks launched from Terminal are never touched, and recent guard actions are labelled as history.
-- **+ Add account** — creates the slot for a new account and hands you the one command to finish sign-in. The browser step itself stays in a terminal because both CLIs ask you to paste a code back; the row turns green once you have (and flags a mismatch if you signed in as someone else)
-- **Automatic routing row** — one click wires a single `Claude (Dynamic Agent Link)` / `Codex (Dynamic Agent Link)` provider. The first row labels the next **new launch** forecast separately from recent launch history, including each Paseo agent and project. Selection is deterministic: health gate → priority group → least-recently-used target. A running agent is never re-routed, and an all-parked pool blocks cleanly instead of launching a known-dead primary.
-- **Routing evidence panel** — every agent shows the runtime provider/model Paseo reports plus the exact AgentLink account and decision trace. AgentRouter separates its control and answer models. Hidden values stay explicitly unknown. The composer-pill source is retained but not registered against Paseo 0.7.0-beta.1 because that host's compiler cannot load `addClientSide` safely.
-- **AgentRouter provider** — the first Agent Link tab explains and configures the controller plus ordered target groups. Searchable provider/model combo boxes read Paseo's catalogs; targets can be reordered without hand-writing route strings. Fable is the default interpreter; every answer runs as a concrete Paseo child. Targets may use any native, custom, or ACP provider. Claude/Codex account selection still goes through the existing health router. The controller must boot through one Claude-compatible Paseo adapter; child targets can fail over cross-provider once it is running. Groups stay collapsed until edited to keep narrow/mobile surfaces light, and the former FAQs now live in **How to use it** on this page.
+- **Test account limits** — one tiny Claude turn per sign-in; refusing sign-ins stay unavailable and only a passing test releases them. The automatic status check never performs this paid check.
+- **Memory protection tab** — live Paseo-owned TypeScript checks only. One check runs at a time; under critical pressure its compiler pauses instead of dying, then continues after recovery. Checks launched from Terminal are never touched.
+- **+ Add account** — creates a sign-in and gives you the command to finish login
+- **Automatic account selection** — one Dynamic Agent Link provider chooses an available account by priority, then least recent use, for each new chat. A running chat keeps its original account.
+- **Model used panel and composer pill** — every agent shows the provider/model Paseo reports, the exact AgentLink sign-in when known, and the Paseo agent ID. AgentRouter separates its request reader and answer model. Hidden values stay explicitly unknown.
+- **AgentRouter provider** — the first tab starts with its guide, then configures the request reader and ordered answer models through searchable pickers. Every answer runs as a concrete Paseo child. Choices may use any native, custom, or ACP provider.
 - **Provider CLI updates** — the Accounts tab exposes AgentLink/provider CLI paths, the daily/manual schedule, safe run-now action, verified built-in recipes, and custom argument-by-argument recipes for every other provider Paseo lists. Live provider processes are skipped. This never performs a quota probe.
 - **Paseo Codex resume routing** — `codex-auto` resolves the persisted thread from `PASEO_AGENT_ID` before account selection, because Paseo supplies app-server thread IDs over RPC after launch. A parked owner therefore hands its rollout to a healthy account instead of producing `no rollout found`.
 - **Provider usage** — Codex limits come from rollout telemetry. Claude limits come from its interactive statusline or cached `/usage` result; Paseo's non-interactive Claude process cannot create that signal, so the panel gives the exact one-account command needed to capture it.
 - **Park 3h / Resume** — take an account that hit its limit out of rotation and put it back
-- **Wire into Paseo** — one click adds that account as a Paseo custom provider (`extends` the native integration, pointing `CLAUDE_CONFIG_DIR` / `CODEX_HOME` at the slot). Each wired account is an independent quota pool: five agents across three Claude accounts genuinely run on three separate rate limits. A banner reminds you Paseo loads new providers at the next daemon restart.
+- **Create fixed-account provider** — one click adds a Paseo provider that always uses that sign-in. Three different Claude accounts provide three separate usage limits.
 
 ![The MCP tab: servers with coverage and live health, plus actions to add, import and sync definitions](../../docs/screenshots/mcp.png)
 
 ## 🔌 MCP
 
-A universal manager for MCP servers across the machine. The global surface covers user-level Claude Code and Codex primaries, wired providers, account slots, Kimi Code and Grok. A workspace panel reads that Paseo workspace's project `.mcp.json`. Selecting a server puts its health, definition and per-destination account management in one full-width flow.
+A universal manager for MCP servers across the machine. The global surface covers user-level Claude Code and Codex accounts, Kimi Code, Grok, and custom providers. It also lists MCP servers from every project registered with Paseo. A workspace panel reads that workspace's project `.mcp.json`. Selecting a server puts its health, definition, and account management in one full-width flow.
 
 - **Servers** — search plus **All / Gaps / Issues**, with health and destination editing after selection. OAuth is shown only when a provider reports an account grant; headers, environment values, credential-bearing URL queries and command arguments are treated as inline credentials instead.
 - **Automatic health** — runs on open and every 15 minutes while the surface is visible. HTTP servers get a real request (401/403 means **auth needed**); stdio servers get a binary-on-PATH check.
@@ -75,9 +75,18 @@ Paseo plugins run on phones as well as desktop, so the panel uses one spacing sc
 agent-link app install paseo
 ```
 
-It copies the plugin into `<paseo home>/plugins/agent-link`, installs its dependencies, typechecks it, registers it under the id `agent-link`, and confirms the daemon has it running. Re-run it to upgrade; `agent-link app remove paseo` uninstalls; `agent-link update` updates the CLI and this panel together. If Paseo, Node or the plugins switch is missing, it says which and stops rather than half-installing.
+On Paseo 0.7+, it installs from Git and hands updates to Paseo's candidate validation and rollback flow. Re-run it to check for updates; `agent-link app remove paseo` uninstalls. Older Paseo versions use the directory installer.
 
-**From the Paseo UI** — no CLI needed:
+**Directly with Paseo 0.7+** — no clone or AgentLink CLI needed:
+
+```sh
+paseo plugin add itsjustanks/agent-link --path apps/paseo
+paseo plugin update agent-link
+```
+
+The default branch tracks updates. `--ref <tag-or-commit>` creates a pinned install instead.
+
+**Local development**:
 
 ```sh
 git clone https://github.com/itsjustanks/agent-link
@@ -91,11 +100,11 @@ git clone https://github.com/itsjustanks/agent-link
 
 No `npm install` step: the plugin imports only modules Paseo provides at runtime, and Paseo compiles it on install. The same screen has **Reload**, **Disable**, **Remove** and **Logs** per plugin — Logs is the first place to look if a tab misbehaves. Removing a plugin deletes its configuration, never your source directory.
 
-**Updates come to you.** The Agent Link tab checks the latest GitHub release once per session and shows an **Update now** card only when that release is newer than the installed build. A local build ahead of the release is never offered a downgrade. One press runs the installer, and a Reload in Settings → Plugins finishes it if the panel doesn't pick it up on its own.
+**Updates come to you.** Paseo checks Git-managed sources and validates each candidate before activation. The Agent Link tab compares release numbers and starts the same Paseo update flow; a local build ahead of the release is never offered a downgrade.
 
 **Working on it?** `agent-link app install paseo --link` registers your checkout in place instead of copying, so `paseo plugin reload agent-link` picks up an edit.
 
-Requires Paseo ≥ 0.5 with plugins enabled. Tested against 0.5.0-beta.5.
+Requires Paseo with plugins enabled. Git updates and the newest client integrations target Paseo 0.7+.
 
 **Nothing else is required.** Every provider and account it finds is one you already have — the plugin installs no software and creates no accounts. Providers you don't use simply don't appear.
 
@@ -138,7 +147,7 @@ Paseo alone has no automatic account failover. Agent Link adds restart-based rec
 
 A running turn still keeps the account it started on. Recovery starts only after that turn has stopped, then preserves the transcript while changing the account-backed process.
 
-Paseo's built-in usage figure reads the primary accounts only (`~/.claude`, `~/.codex`). Agent Link's **Available capacity** also covers per-account slots by reading the small quota snapshots its session hooks already capture; it never reads access tokens.
+Paseo's built-in usage figure reads the primary accounts only (`~/.claude`, `~/.codex`). Agent Link's **Usage limits** also covers managed sign-ins by reading the small usage snapshots its session hooks already capture; it never reads access tokens.
 
 ## What may still use the terminal
 

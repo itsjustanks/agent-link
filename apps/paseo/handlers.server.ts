@@ -790,12 +790,12 @@ export async function handleProbeAccounts({
   parkFailures: boolean;
 }) {
   if (provider !== "claude") {
-    return { ok: false, message: "Codex exposes its quota windows directly; its CLI has no account probe yet.", log: "" };
+    return { ok: false, message: "Codex already reports its usage limits. A separate account test is not available.", log: "" };
   }
   const binary = searchPath()
     .flatMap((directory) => [join(directory, "agent-link"), join(directory, "agent-auth")])
     .find(existsSync);
-  if (!binary) return { ok: false, message: "Install the AgentLink CLI from this panel before probing accounts.", log: "" };
+  if (!binary) return { ok: false, message: "Install the AgentLink command-line tool before testing account limits.", log: "" };
 
   const args = ["probe", provider];
   const trimmedModel = model.trim();
@@ -827,14 +827,14 @@ export async function handleProbeAccounts({
       finish({
         ok: code === 0,
         message: refused
-          ? "Probe complete. Refusing accounts are held out; passing accounts were released."
-          : "Probe complete. Every checked account served the model.",
+          ? "Test complete. Refusing sign-ins remain blocked; passing sign-ins are available again."
+          : "Test complete. Every sign-in served the model.",
         log,
       });
     });
     const timer = setTimeout(() => {
       child.kill("SIGTERM");
-      finish({ ok: false, message: "Account probe timed out after 3 minutes.", log: output.trim() });
+      finish({ ok: false, message: "Account-limit test timed out after 3 minutes.", log: output.trim() });
     }, 180_000);
   });
 }
@@ -992,7 +992,7 @@ export async function handleWireAuto({ provider }: { provider: "claude" | "codex
   if (!existsSync(launcher)) {
     return {
       ok: false,
-      message: `no launcher at ${launcher} — run 'agent-link auto' in a terminal to create it`,
+      message: `Automatic account selection is not ready. Run 'agent-link auto' in a terminal.`,
     };
   }
   const providerId = `${provider}-auto`;
@@ -1002,14 +1002,14 @@ export async function handleWireAuto({ provider }: { provider: "claude" | "codex
         [providerId]: {
           extends: provider,
           label: `${provider === "claude" ? "Claude" : "Codex"} (Dynamic Agent Link)`,
-          description: `Routes each new agent through health, priority groups and least-recently-used ${provider} targets`,
+          description: `Chooses an available ${provider} sign-in for each new chat using priority and least-recently-used order`,
           command: [launcher],
         },
       },
     },
   } as never);
   needsRestart = true;
-  return { ok: true, message: `'${providerId}' wired — restart the Paseo daemon to load it` };
+  return { ok: true, message: `Installed '${providerId}'. Restart Paseo when no chat is running to make it available.` };
 }
 
 const ROUTER_PROVIDER_ID = "agent-router";
@@ -1158,13 +1158,13 @@ async function routerProviderStatus(paseo: PluginHandlerContext["paseo"], messag
     loaded,
     launcherPath,
     rulesPath,
-    baseProvider: config.controllerProvider === "claude-auto" ? "Claude · AgentLink account pool" : "Claude · primary account",
+    baseProvider: config.controllerProvider === "claude-auto" ? "Claude · automatic sign-in" : "Claude · default sign-in",
     baseModel: config.controllerModel,
     controllerProvider: config.controllerProvider,
     controllerModel: config.controllerModel,
     controllerOptions: ([
-      { provider: "claude-auto", label: "Claude account pool", available: availability.get("claude-auto") === true, models: controllerModels },
-      { provider: "claude", label: "Claude primary", available: availability.get("claude") === true, models: controllerModels },
+      { provider: "claude-auto", label: "Claude · choose an available sign-in", available: availability.get("claude-auto") === true, models: controllerModels },
+      { provider: "claude", label: "Claude · always use the default sign-in", available: availability.get("claude") === true, models: controllerModels },
     ] satisfies Array<{ provider: RouterController; label: string; available: boolean; models: Array<{ id: string; label: string }> }>),
     providerOptions: [...availability.entries()]
       .filter(([id]) => id !== ROUTER_PROVIDER_ID)
@@ -1181,11 +1181,11 @@ async function routerProviderStatus(paseo: PluginHandlerContext["paseo"], messag
     message:
       message ||
       (loaded
-        ? "AgentRouter is available in Paseo's provider picker."
+        ? "AgentRouter is ready in Paseo's provider picker."
         : configured
-          ? "AgentRouter is configured; reload Paseo to publish it."
+          ? "AgentRouter is saved. Reload Paseo to make it available."
           : installed
-            ? "The router launcher is ready; add its Paseo provider profile."
+            ? "The AgentRouter command is ready. Add it to Paseo's provider list."
             : "AgentRouter is not installed."),
   };
 }
@@ -1211,13 +1211,13 @@ export async function handleRouterInstall(_input: Record<string, never>, { paseo
           [ROUTER_PROVIDER_ID]: {
             extends: "claude",
             label: "AgentRouter",
-            description: "Interprets each request, then delegates it to an ordered healthy Paseo provider/model target",
+            description: "Reads each request, then chooses an available Paseo provider and model from your preferred order",
             command: [launcherPath],
             models: [
               {
                 id: ROUTER_VIRTUAL_MODEL,
                 label: "Automatic route",
-                description: "AgentRouter selects and records the concrete provider/model that performs the answer",
+                description: "Chooses and records the provider and model that performs the task",
                 isDefault: true,
               },
             ],
@@ -1226,7 +1226,7 @@ export async function handleRouterInstall(_input: Record<string, never>, { paseo
       },
     } as never);
     needsRestart = true;
-    return routerProviderStatus(paseo, "AgentRouter installed. Reload Paseo, then choose it like any other provider.");
+    return routerProviderStatus(paseo, "AgentRouter installed. Reload Paseo, then choose AgentRouter and Automatic route.");
   } catch (caught) {
     return routerProviderStatus(
       paseo,
@@ -1245,7 +1245,7 @@ export async function handleRouterConfigure(
   context: PluginHandlerContext,
 ) {
   if (new Set(input.targetGroups.map((group) => group.name)).size !== input.targetGroups.length) {
-    return routerProviderStatus(context.paseo, "Every orchestration group needs a unique name.");
+    return routerProviderStatus(context.paseo, "Every work type needs a different name.");
   }
   mkdirSync(join(AGENT_LINK_HOME_DIR, "router"), { recursive: true });
   backupFile(routerConfigPath());
@@ -1257,7 +1257,7 @@ export async function handleRouterConfigure(
   });
   writeTextAtomic(routerRulesPath(), input.userRules.endsWith("\n") ? input.userRules : `${input.userRules}\n`);
   const status = await handleRouterInstall({}, context);
-  return { ...status, message: "AgentRouter orchestration saved for new launches." };
+  return { ...status, message: "AgentRouter choices saved for new chats." };
 }
 
 export async function handleRouterModels({ provider }: { provider: string }, { paseo }: PluginHandlerContext) {
@@ -1321,7 +1321,7 @@ export async function handleRouterTrace({ agentId }: { agentId: string }, { pase
       title: agent.title ?? "Agent",
       ...controlIdentity,
       status: agent.status,
-      note: isAgentRouter ? "Control plane only; this should nominate a Paseo child." : controlRoute?.decision ?? "Direct Paseo agent.",
+      note: isAgentRouter ? "Reads the request and chooses the model that will answer." : controlRoute?.decision ?? "This chat uses its selected provider directly.",
       account: displayedRouteAccount(controlRoute),
       routedAt: controlRoute?.at ?? 0,
     },
@@ -1339,10 +1339,10 @@ export async function handleRouterTrace({ agentId }: { agentId: string }, { pase
     nodes.push({
       source: "paseo" as const,
       id: child.id ?? "unknown",
-      title: child.title ?? "Paseo child",
+      title: child.title ?? "Answering model",
       ...identity,
       status: child.archivedAt ? "archived" : child.status ?? "unknown",
-      note: "Concrete Paseo delegation; provider and model are auditable.",
+      note: "This provider and model performed the delegated work.",
       account: displayedRouteAccount(childRoute),
       routedAt: childRoute?.at ?? 0,
     });
@@ -1351,18 +1351,18 @@ export async function handleRouterTrace({ agentId }: { agentId: string }, { pase
   if (children.length === 0) {
     try {
       const timeline = await handle.timeline.refetch({ direction: "tail", limit: 300, projection: "canonical" });
-      for (const row of timeline.rows) {
+      for (const row of timeline.entries) {
         const item = row.item;
         if (item.type !== "tool_call" || item.detail.type !== "sub_agent") continue;
         if (nodes.some((node) => node.id === item.callId)) continue;
         nodes.push({
           source: "provider-internal" as const,
           id: item.callId,
-          title: item.detail.description ?? item.detail.subAgentType ?? "Provider subagent",
+          title: item.detail.description ?? item.detail.subAgentType ?? "Provider helper",
           provider: `${agent.provider} internal`,
           model: "Unknown (runtime not exposed)",
           status: item.status,
-          note: "Provider-internal subagent; this bypasses auditable AgentRouter target selection.",
+          note: "This helper ran inside the provider, so Paseo cannot report its exact model.",
           account: "Unknown (provider-internal)",
           routedAt: 0,
         });
@@ -1375,11 +1375,11 @@ export async function handleRouterTrace({ agentId }: { agentId: string }, { pase
   const concrete = nodes.filter((node) => node.source === "paseo");
   const internal = nodes.filter((node) => node.source === "provider-internal");
   const summary = concrete.length > 0
-    ? `${concrete.length} concrete Paseo route${concrete.length === 1 ? "" : "s"} recorded.`
+    ? `${concrete.length} answering model${concrete.length === 1 ? "" : "s"} recorded.`
     : internal.length > 0
-      ? "No concrete Paseo route was recorded; a provider-internal subagent hid its model."
+      ? "The provider used an internal helper whose exact model was not reported."
       : isAgentRouter
-        ? "No answer-model delegation is recorded; only the control model ran."
+        ? "No answering model is recorded yet; only the request reader ran."
         : "This agent runs directly; its provider and model are shown below.";
   return { isAgentRouter, summary, nodes };
 }
@@ -1421,8 +1421,8 @@ export async function handleAddAccount({ provider, email }: { provider: "claude"
     ok: true,
     started: false,
     message: cli
-      ? `Slot created. Finish in a terminal: agent-link login ${provider} ${email}`
-      : `Slot created. Finish in a terminal: ${envVarFor(provider)}="${dir}" ${provider} ${
+      ? `Sign-in created. Finish in a terminal: agent-link login ${provider} ${email}`
+      : `Sign-in created. Finish in a terminal: ${envVarFor(provider)}="${dir}" ${provider} ${
           provider === "claude" ? `auth login --email ${email}` : "login"
         }`,
   };
@@ -1454,7 +1454,7 @@ export async function handleSetPreference({
     email !== "primary" &&
     !collectSlots().some((slot) => slot.source === "agent-link" && slot.provider === provider && slot.email === email)
   ) {
-    return { ok: false, message: `no ${provider} target '${email}'` };
+    return { ok: false, message: `No ${provider} sign-in named '${email}' was found.` };
   }
   const state = join(AGENT_LINK_HOME_DIR, "state");
   try {
@@ -1462,7 +1462,7 @@ export async function handleSetPreference({
     updateLineSet(join(state, `prefer-${provider}-first`), email, preference === "preferred");
     updateLineSet(join(state, `prefer-${provider}-last`), email, preference === "reserve");
     const label = preference === "preferred" ? "priority" : preference === "reserve" ? "reserve" : "default";
-    return { ok: true, message: `${provider} · ${email} moved to the ${label} routing group` };
+    return { ok: true, message: `${provider} · ${email} now has ${label} priority for new chats.` };
   } catch (error) {
     return { ok: false, message: error instanceof Error ? error.message : String(error) };
   }
@@ -1473,17 +1473,17 @@ export async function handleRemoveAccount(
   { paseo }: PluginHandlerContext,
 ) {
   if (!/^[^/\\]+$/.test(email) || email === "." || email === "..") {
-    return { ok: false, message: "invalid account slot" };
+    return { ok: false, message: "That sign-in name is invalid." };
   }
   const dir = join(AGENT_LINK_ROOT, provider, email);
   const slot = collectSlots().find(
     (candidate) => candidate.source === "agent-link" && candidate.provider === provider && candidate.email === email && candidate.dir === dir,
   );
-  if (!slot) return { ok: false, message: `no managed ${provider} slot '${email}'` };
+  if (!slot) return { ok: false, message: `No managed ${provider} sign-in named '${email}' was found.` };
 
   const pinned = providerIdForDir(await providerOverrides(paseo), provider, dir);
   if (pinned) {
-    return { ok: false, message: `remove the pinned Paseo provider '${pinned}' before removing this slot` };
+    return { ok: false, message: `Remove the fixed-account Paseo provider '${pinned}' before removing this sign-in.` };
   }
 
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -1531,7 +1531,7 @@ export async function handleRemoveAccount(
         shims = " Numbered launchers need a refresh: agent-link shims.";
       }
     }
-    return { ok: true, message: `${email} removed from routing and archived at ${archived}.${shims}` };
+    return { ok: true, message: `${email} removed from new-chat selection and archived at ${archived}.${shims}` };
   } catch (error) {
     return { ok: false, message: error instanceof Error ? error.message : String(error) };
   }
@@ -1552,11 +1552,11 @@ export async function handleSetCooldown({
       rmSync(file, { force: true });
       rmSync(join(poolsDir(), `hold-${provider}-${email}`), { force: true });
       rmSync(join(poolsDir(), `reason-${provider}-${email}`), { force: true });
-      return { ok: true, message: `${email} is back in rotation` };
+      return { ok: true, message: `${email} is available for new chats again.` };
     }
     mkdirSync(poolsDir(), { recursive: true });
     writeFileSync(file, String(Math.floor(Date.now() / 1000) + minutes * 60));
-    return { ok: true, message: `${email} parked for ${minutes}m — auto-routing will skip it` };
+    return { ok: true, message: `${email} will be skipped for ${minutes} minutes.` };
   } catch (error) {
     return { ok: false, message: error instanceof Error ? error.message : String(error) };
   }
@@ -2029,9 +2029,9 @@ export async function handleAccountCapacity() {
     const noTelemetry =
       provider === "claude"
         ? isPrimary
-          ? "Paseo runs Claude non-interactively, so it cannot emit statusline quota. Open `claude`, send one message, then refresh."
-          : `Paseo runs Claude non-interactively, so it cannot emit statusline quota. Run \`agent-link run claude ${poolKey} claude\`, send one message, then refresh.`
-        : "No current usage report. Run one Codex session on this account to refresh it.";
+          ? "Claude only reports these limits during an interactive chat. Open `claude`, send one message, then refresh."
+          : `Claude only reports these limits during an interactive chat. Run \`agent-link run claude ${poolKey} claude\`, send one message, then refresh.`
+        : "No current usage limits are available. Run one Codex chat with this sign-in, then refresh.";
     return {
       provider,
       email,
@@ -2216,12 +2216,12 @@ export async function handleProviderHeartbeat(_input: Record<string, never>, { p
       quotaTelemetry: pooled,
       aliases,
       summary: !familyAvailable
-        ? "Configured, but unavailable to the daemon; check the provider CLI and PATH, then reload"
+        ? "Paseo cannot find this provider. Check its command location, then reload Paseo"
         : pooled
           ? routeLoaded
-            ? "Provider and dynamic account route are registered"
-            : "Provider is registered; dynamic account route is not loaded"
-          : "Provider is registered; auth and model response require a manual deep check",
+            ? "Provider and automatic account selection are ready"
+            : "Provider is ready, but automatic account selection is not installed"
+          : "Provider is ready. Use Check setup to confirm its login and models",
     };
   });
   const rank = (id: string) => (id === "claude" ? 0 : id === "codex" ? 1 : 2);
@@ -2690,7 +2690,10 @@ function codexMcpAuth(accountDir: string): Record<string, "connected" | "not-con
   }
 }
 
-export async function handleMcpAuth() {
+export async function handleMcpAuth(
+  _input: Record<string, never> = {},
+  context?: PluginHandlerContext,
+) {
   const readNeeds = (dir: string): string[] => {
     const data = readJson(join(dir, "mcp-needs-auth-cache.json"));
     return data ? Object.keys(data) : [];
@@ -2758,23 +2761,49 @@ export async function handleMcpAuth() {
       authStatus: codexMcpAuth(slot.dir),
     });
   }
-  // Project-scoped servers live in a repo's .mcp.json — not managed here, but
-  // they still need authorizing per account, so they must be visible.
+  // Paseo 0.7 exposes every registered project, including projects with no
+  // active workspace. Prefer that catalog so the MCP inventory is not tied to
+  // guessed folder roots; retain the old scan for earlier hosts.
   const projectServers: Array<{ project: string; name: string }> = [];
-  const roots = [join(HOME, ".superset", "projects"), join(HOME, "projects"), join(HOME, "code")];
-  for (const root of roots) {
-    let entries: string[] = [];
+  let projects: Array<{ name: string; path: string }> = [];
+  const projectApi = (context?.paseo as unknown as {
+    projects?: { list(): Promise<{ entries?: Array<{ name?: string; path?: string }> } | Array<{ name?: string; path?: string }>> };
+  } | undefined)?.projects;
+  if (projectApi) {
     try {
-      entries = readdirSync(root);
+      const result = await projectApi.list();
+      const entries = Array.isArray(result) ? result : result.entries ?? [];
+      projects = entries.flatMap((entry) => entry.path
+        ? [{ name: entry.name || basename(entry.path), path: entry.path }]
+        : []);
     } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      const file = join(root, entry, ".mcp.json");
-      if (!existsSync(file)) continue;
-      for (const name of Object.keys(jsonMcpRead(file))) projectServers.push({ project: entry, name });
+      // Fall through to the directory scan supported by older hosts.
     }
   }
+  if (projects.length === 0) {
+    const roots = [join(HOME, ".superset", "projects"), join(HOME, "projects"), join(HOME, "code")];
+    for (const root of roots) {
+      let entries: string[] = [];
+      try {
+        entries = readdirSync(root);
+      } catch {
+        continue;
+      }
+      projects.push(...entries.map((entry) => ({ name: entry, path: join(root, entry) })));
+    }
+  }
+  const seenProjectServers = new Set<string>();
+  for (const project of projects) {
+    const file = join(project.path, ".mcp.json");
+    if (!existsSync(file)) continue;
+    for (const name of Object.keys(jsonMcpRead(file))) {
+      const key = `${project.name}\0${name}`;
+      if (seenProjectServers.has(key)) continue;
+      seenProjectServers.add(key);
+      projectServers.push({ project: project.name, name });
+    }
+  }
+  projectServers.sort((a, b) => a.project.localeCompare(b.project) || a.name.localeCompare(b.name));
   return { accounts, projectServers };
 }
 
@@ -2810,7 +2839,7 @@ export async function handleMcpWorkspace(
       };
     })
     .sort((a, b) => a.name.localeCompare(b.name));
-  const { accounts } = await handleMcpAuth();
+  const { accounts } = await handleMcpAuth({}, { paseo });
   return {
     workspace: {
       id: workspace.id,

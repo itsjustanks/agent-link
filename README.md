@@ -80,21 +80,21 @@ Paseo watchdog triggers the low-priority daily run.
 
 ## In Paseo
 
-`agent-link app install paseo` adds two tabs to [Paseo](https://paseo.sh).
+`agent-link app install paseo` adds two tabs to [Paseo](https://paseo.sh). On Paseo 0.7+, this creates a Git-managed install, so Paseo can check, validate, update, and roll back the plugin itself.
 
 ### 🔗 Agent Link
 
 ![The Agent Link tab: a Routing card showing the auto-router installed for Claude and Codex, then each account with its state, park timer, credit note and launch count](docs/screenshots/agent-link.png)
 
-The panel opens on **AgentRouter**, followed by **Accounts, Limit sentry, Memory guard, and FAQs**. Provider tabs — Claude, Codex, Kimi, Grok, and custom additions — appear only inside Accounts. Automatic routing is the first collapsible account-list row; every account row owns its live quota meters, reset times, rotation state, cooldown, priority, and on-request 7-day activity. There are no separate usage or routing dashboards repeating the same accounts. A cheap 30-second heartbeat refreshes provider registration, account readiness, routing decisions, limit sentry, and capacity snapshots without launching a provider; **Deep check** remains manual because it starts the provider. **Probe accounts** spends one small Claude turn per account, keeps refusals held out, and releases only accounts that actually serve.
+The panel opens on **AgentRouter**, followed by **Accounts, Limit recovery, and Memory protection**. Provider tabs — Claude, Codex, Kimi, Grok, and custom additions — appear only inside Accounts. Automatic account selection is the first collapsible row; every account row owns its usage limits, reset times, availability, pause, priority, and on-request 7-day activity. A free 30-second status check refreshes local state without starting a model. **Check setup** starts the provider only to verify its path, version, login, and models. **Test account limits** spends one tiny Claude turn per sign-in and releases only sign-ins that answer.
 
-One click installs a **Dynamic Agent Link** provider. Pick that single provider and every new agent passes through a deterministic route: quota/health gate → priority target group → least-recently-used account. The panel labels its **next new launch** forecast separately from the bounded history of real Paseo agents and projects. A running agent is never re-routed: its account is fixed when the process starts, and nothing swaps underneath a live session.
+One click installs a **Dynamic Agent Link** provider. Pick it and each new chat chooses an available account by priority, then least recent use. A running chat keeps the account it started with.
 
-Every agent's **Routing** panel shows its server-derived provider, model, AgentLink account, route decision, and agent ID. AgentRouter keeps control and answer models separate. A hidden runtime says `Unknown (runtime not exposed)` instead of guessing. The composer-pill implementation ships in source, but this compatibility build does not register it because Paseo 0.7.0-beta.1 removes its client import without removing `addClientSide`, which prevents the whole plugin from loading.
+Every agent's **Model used** panel shows the provider, model, AgentLink sign-in, routing reason, and Paseo agent ID reported by the runtime. A composer pill shows the model at a glance and opens that panel. AgentRouter keeps its request reader and answer model separate; unavailable runtime data stays explicitly unknown.
 
-The **AgentRouter** tab explains and configures the optional virtual Paseo route. Fable 5 is the default prompt interpreter; searchable provider/model combo boxes use Paseo's live catalogs, while still accepting custom IDs a provider has not reported. Ordered targets can be added, removed, and moved without hand-writing route strings. Every request is delegated to a concrete Paseo child. Direct Paseo profiles remain faster when you already know the model. Claude and Codex targets still pass through Dynamic Agent Link, so account health and cooldown are preserved. Route groups use progressive disclosure on narrow screens, and **How to use it** lives on the same page.
+The **AgentRouter** tab starts with **How to use AgentRouter**, including what every tab and account check does. Fable 5 reads the request by default; searchable provider/model pickers then define the ordered models that can answer. Every answer runs as a concrete Paseo child. Direct Paseo profiles remain faster when you already know the model. Claude and Codex choices still use AgentLink's account availability and cooldown rules.
 
-The **Accounts** tab also shows the AgentLink CLI and provider CLI paths and manages updates. Claude, Codex, Kimi, and Grok have verified recipes; every other Paseo catalog or custom provider appears and can receive an argument-by-argument updater. Scheduled runs prove the provider is idle before changing its binary. This is separate from **Probe accounts**: a probe spends a tiny model turn to verify quota, while an update check only compares software releases.
+The **Accounts** tab also shows AgentLink and provider app locations and manages updates. Claude, Codex, Kimi, and Grok have built-in update steps; every other Paseo provider can receive a custom one. Scheduled runs first prove the provider is idle. **Test account limits** spends a tiny model turn; checking for software updates does not.
 
 AgentRouter uses virtual aliases, healthy targets, ordered groups, cooldowns, failover, and decision evidence. It delegates to explicit Paseo child agents, while Agent Link separately routes CLI account launches. It never claims to switch an in-flight agent. Routed launches record the exact Paseo agent ID and working directory, so duplicate-account rows show which agent last consumed that shared quota. If every target is parked, the launch stops cleanly instead of silently falling onto a known-exhausted primary. Paseo binds a custom provider to one adapter, so the controller must boot through a Claude-compatible adapter; once running, its target groups can use any native, custom, or ACP provider.
 
@@ -123,13 +123,22 @@ The one exception is **routing**, because a Paseo provider runs a *command*, and
 
 ### Installing the plugin
 
-**From the CLI** — one command, which copies the plugin into Paseo's own plugins directory, installs and typechecks it, registers the ID and confirms the daemon is running it:
+**From the CLI** — one command. Paseo 0.7+ installs it from Git and owns safe updates; older versions fall back to the local-directory installer:
 
 ```sh
 agent-link app install paseo
 ```
 
-**From the Paseo UI** — clone this repo, then:
+**Directly with Paseo 0.7+**:
+
+```sh
+paseo plugin add itsjustanks/agent-link --path apps/paseo
+paseo plugin update agent-link
+```
+
+The default branch tracks updates. A tag or commit passed with `--ref` stays pinned. Paseo validates a candidate before activation and keeps the running version if startup fails.
+
+**Local development** — clone this repo, then:
 
 1. **Settings → Plugins**
 2. Turn on **Enable plugins**
@@ -273,7 +282,7 @@ The plugin does this for you, but if you would rather wire it yourself:
 }
 ```
 
-`agent-link auto` prints this snippet filled in for your machine. Provider changes apply with `paseo reload` — no daemon restart, so nothing mid-task is disturbed.
+`agent-link auto` prints this snippet filled in for your machine. Provider changes apply with `paseo plugin reload agent-link` — no daemon restart, so nothing mid-task is disturbed.
 
 ## Integrations
 

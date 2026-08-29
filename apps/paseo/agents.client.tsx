@@ -149,11 +149,11 @@ function capacityTone(entry: CapacityAccount): Status {
 }
 
 function capacityStateLabel(entry: CapacityAccount): string {
-  if (entry.state === "held") return "held";
+  if (entry.state === "held") return "blocked until tested";
   if (entry.state === "parked") return "cooling down";
-  if (entry.state === "nearing") return "routing away";
-  if (entry.state === "ready") return "available";
-  return entry.windows.length > 0 ? "report is stale" : "no report yet";
+  if (entry.state === "nearing") return "new chats routed elsewhere";
+  if (entry.state === "ready") return "available for new chats";
+  return entry.windows.length > 0 ? "usage data is old" : "waiting for usage data";
 }
 
 function creditLabel(entry: CapacityAccount): string | null {
@@ -208,7 +208,7 @@ function CapacitySummary({ entry }: { entry: CapacityAccount }) {
         items={[
           { value: capacityStateLabel(entry), tone },
           entry.plan ? { value: `${entry.plan} plan` } : null,
-          entry.at > 0 ? { value: `usage updated ${agoLabel(entry.at)}` } : { value: "quota telemetry pending", tone: "attention" },
+          entry.at > 0 ? { value: `limits updated ${agoLabel(entry.at)}` } : { value: "waiting for usage limits", tone: "attention" },
         ]}
       />
       {windows.map((window, index) => {
@@ -235,7 +235,7 @@ function CapacityDetail({ entry }: { entry: CapacityAccount }) {
   return (
     <View style={{ gap: t.space.sm }}>
       <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: t.space.sm }}>
-        <Text style={t.text.bodyStrong}>Usage & capacity</Text>
+        <Text style={t.text.bodyStrong}>Usage limits</Text>
         <StatusPill status={tone} label={capacityStateLabel(entry)} />
       </View>
       {entry.windows.length > 0 ? (
@@ -246,7 +246,7 @@ function CapacityDetail({ entry }: { entry: CapacityAccount }) {
         </View>
       ) : (
         <View style={{ padding: t.space.md, borderRadius: t.radius.sm, backgroundColor: t.color.surface2, gap: t.space.xs }}>
-          <Text style={t.text.bodyStrong}>No quota telemetry yet</Text>
+          <Text style={t.text.bodyStrong}>Usage limits unavailable</Text>
           <Text style={t.text.caption}>{entry.detail}</Text>
         </View>
       )}
@@ -306,10 +306,10 @@ function ToolchainRow({
       meta={
         <Facts
           items={[
-            { value: entry.version || (entry.installed ? "version unavailable" : "CLI not installed") },
+            { value: entry.version || (entry.installed ? "version unavailable" : "provider app not installed") },
             { value: entry.availableInPaseo ? "available in Paseo" : "not currently available" },
-            { value: entry.managed ? (entry.builtIn ? "verified updater" : "custom updater") : "manual updates", tone: entry.managed ? "ok" : "attention" },
-            entry.lastResult ? { value: `last: ${entry.lastResult}`, tone: entry.lastResult === "failed" ? "error" : undefined } : null,
+            { value: entry.managed ? (entry.builtIn ? "automatic updates ready" : "custom updates ready") : "manual updates", tone: entry.managed ? "ok" : "attention" },
+            entry.lastResult ? { value: `last update: ${entry.lastResult}`, tone: entry.lastResult === "failed" ? "error" : undefined } : null,
           ]}
         />
       }
@@ -321,23 +321,23 @@ function ToolchainRow({
             {entry.builtIn ? (
               <>
                 <Facts items={[{ value: entry.binary }, { value: `update: ${entry.updateArgs.join(" ")}` }]} />
-                <Text style={t.text.caption}>Built-in update recipes are release-tested. Live processes are skipped and retried on the next run.</Text>
+                <Text style={t.text.caption}>This update method is tested. AgentLink waits until the provider is not running, so active chats are untouched.</Text>
               </>
             ) : (
               <>
-                <Field label="Executable" value={binary} onChangeText={setBinary} placeholder={entry.id} mono />
+                <Field label="Provider command" value={binary} onChangeText={setBinary} placeholder={entry.id} mono />
                 <View style={{ flexDirection: t.compact ? "column" : "row", gap: t.space.sm }}>
                   <View style={{ flex: 1 }}>
-                    <Field label="Version arguments · one per line" value={versionArgs} onChangeText={setVersionArgs} multiline mono minHeight={72} />
+                    <Field label="How to check its version · one item per line" value={versionArgs} onChangeText={setVersionArgs} multiline mono minHeight={72} />
                   </View>
                   <View style={{ flex: 1 }}>
-                    <Field label="Update arguments · one per line" value={updateArgs} onChangeText={setUpdateArgs} multiline mono minHeight={72} />
+                    <Field label="How to update it · one item per line" value={updateArgs} onChangeText={setUpdateArgs} multiline mono minHeight={72} />
                   </View>
                 </View>
-                <Field label="Process match" value={processPattern} onChangeText={setProcessPattern} mono hint="The updater skips this provider whenever this process pattern or a live Paseo agent matches." />
+                <Field label="Running-process name" value={processPattern} onChangeText={setProcessPattern} mono hint="AgentLink waits when this process or a matching Paseo chat is running." />
                 <View style={{ flexDirection: "row", flexWrap: "wrap", gap: t.space.sm }}>
                   <Button
-                    label="Save updater"
+                    label="Save update method"
                     variant="secondary"
                     loading={busy}
                     disabled={!binary.trim() || !updateArgs.trim() || !processPattern.trim()}
@@ -350,7 +350,7 @@ function ToolchainRow({
                       processPattern: processPattern.trim(),
                     })}
                   />
-                  {entry.managed ? <ConfirmButton label="Use manual updates" confirmLabel="Remove updater" onConfirm={() => onRemove(entry.id)} /> : null}
+                  {entry.managed ? <ConfirmButton label="Use manual updates" confirmLabel="Remove automatic update" onConfirm={() => onRemove(entry.id)} /> : null}
                 </View>
               </>
             )}
@@ -403,7 +403,7 @@ function RouterTargetEditor({
               description: option.available ? "available now" : "currently unavailable",
             }))}
             placeholder="Choose a Paseo provider"
-            hint={provider ? (provider.available ? "Available in Paseo now." : "Configured but unavailable; fallback will skip it.") : "Custom provider IDs are allowed."}
+            hint={provider ? (provider.available ? "Paseo can use this provider now." : "Unavailable providers are skipped automatically.") : "You can also enter a custom provider ID."}
           />
         </View>
         <View style={{ flex: 1 }}>
@@ -420,7 +420,7 @@ function RouterTargetEditor({
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: t.space.sm }}>
         <Button label="Move up" variant="ghost" disabled={index === 0} onPress={() => onMove(-1)} />
         <Button label="Move down" variant="ghost" disabled={index === count - 1} onPress={() => onMove(1)} />
-        <ConfirmButton label="Remove target" confirmLabel="Remove" onConfirm={onRemove} />
+        <ConfirmButton label="Remove choice" confirmLabel="Remove choice" onConfirm={onRemove} />
       </View>
     </View>
   );
@@ -588,7 +588,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const limitsResumeMutation = useMutation({
     mutationFn: (agentId: string) => callLimitsResume({ agentId }),
     onSuccess: (result) => {
-      setNotice(result.ok ? "Agent nudged — it continues on a healthy account" : `Resume failed: ${result.error ?? "unknown"}`);
+      setNotice(result.ok ? "Continuation requested on an available account." : `Could not continue: ${result.error ?? "reason unknown"}`);
       void queryClient.invalidateQueries({ queryKey: ["agent-link", "limits"] });
     },
   });
@@ -607,7 +607,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const pinMutation = useMutation({
     mutationFn: (slot: Slot) => callWire({ provider: slot.provider, email: slot.email, dir: slot.dir }),
     onSuccess: (result) => {
-      setNotice(`'${result.providerId}' wired — it always uses that one account`);
+      setNotice(`Created '${result.providerId}'. It always uses that sign-in.`);
       refresh();
     },
   });
@@ -736,23 +736,23 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
     for (const group of routerGroups) {
       const name = group.name.trim().toLowerCase();
       if (!/^[a-z][a-z0-9-]*$/.test(name) || names.has(name)) {
-        setNotice("Route group names must be unique lowercase slugs, such as planning or browser-check.");
+        setNotice("Give every work type a different lowercase name, such as planning or browser-check.");
         return;
       }
       names.add(name);
       const targets = group.targets.map((target) => ({ provider: target.provider.trim(), model: target.model.trim() }));
       if (!group.purpose.trim() || targets.some((target) => !/^[a-z][a-z0-9-]*$/.test(target.provider) || !target.model) || targets.length === 0) {
-        setNotice(`Fix ${name || "the unnamed route"}: choose a provider and model for every target.`);
+        setNotice(`Finish ${name || "the unnamed work type"}: choose a provider and model for every option.`);
         return;
       }
       targetGroups.push({ name, purpose: group.purpose.trim(), selector: "in_order", targets });
     }
     if (targetGroups.length === 0) {
-      setNotice("Add at least one orchestration group.");
+      setNotice("Add at least one work type.");
       return;
     }
     if (!routerModel.trim()) {
-      setNotice("Choose a controller model.");
+      setNotice("Choose a request-reader model.");
       return;
     }
     routerConfigureMutation.mutate({
@@ -836,17 +836,17 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
         title="Automatic routing"
         subtitle={
           entry.wiredProviderId
-            ? "health gate → priority group → least-recently-used target"
+            ? "Chooses an available account by priority, then uses the least recently used."
             : entry.launcherExists
-              ? "not wired yet — new agents still go to one fixed account"
-              : "no launcher on disk"
+              ? "Not installed in Paseo yet; new chats still use one fixed account."
+              : "The routing launcher is missing."
         }
         meta={
           <Facts
             items={[
-              { value: `${plural(count, "target", "targets")} in rotation` },
-              next ? { value: `next new launch: ${next}` } : { value: "no account available", tone: "attention" },
-              { value: "forecast, not a pinned agent" },
+              { value: plural(count, "account available", "accounts available") },
+              next ? { value: `next new chat: ${next}` } : { value: "no account available", tone: "attention" },
+              { value: "applies to new chats only" },
             ]}
           />
         }
@@ -860,7 +860,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                 onPress={() => routerMutation.mutate([entry.provider])}
               />
             ) : (
-              <StatusPill status={entry.wiredProviderId ? "ok" : "attention"} label={entry.wiredProviderId ? "routing" : "off"} />
+              <StatusPill status={entry.wiredProviderId ? "ok" : "attention"} label={entry.wiredProviderId ? "automatic" : "off"} />
             )}
             <Button label={open ? "Hide" : "Details"} variant="ghost" onPress={() => toggleRow(key)} />
           </>
@@ -869,13 +869,13 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
           open ? (
             <View style={{ gap: t.space.sm }}>
               <Text style={t.text.caption}>
-                This forecast is not tied to a project. Every new provider process re-checks holds, cooldowns and cached quota before choosing; the history below only records where earlier launches happened.
+                The next-account preview is not tied to a project. Every new chat checks blocked accounts, cooldowns and known usage limits before choosing. Running chats stay on their current account.
               </Text>
               <View style={{ flexDirection: "row", flexWrap: "wrap", gap: t.space.xs }}>
-                <Tag label="quota health" tone="ok" />
-                <Tag label="priority groups" />
-                <Tag label="LRU selector" />
-                <Tag label="cooldown filtering" tone="attention" />
+                <Tag label="usage limits" tone="ok" />
+                <Tag label="account priority" />
+                <Tag label="least recently used" />
+                <Tag label="cooldowns" tone="attention" />
               </View>
               {!entry.launcherExists ? (
                 <View style={{ gap: t.space.xs }}>
@@ -885,15 +885,15 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
               ) : null}
               {routeHistory.length > 0 ? (
                 <View style={{ gap: t.space.xs }}>
-                  <Text style={t.text.bodyStrong}>Recent launches</Text>
+                  <Text style={t.text.bodyStrong}>Recent account choices</Text>
                   {routeHistory.map((route, index) => (
                     <Text key={`${route.at}-${route.email}-${index}`} style={t.text.caption}>
-                      {`${agoLabel(route.at)} · ${route.email === "primary" ? primaryEmail(entry.provider) : route.email}${route.model ? ` · ${route.model}` : ""} · ${route.agentId ? `Paseo ${route.agentId}` : "non-Paseo launch"}${route.cwd ? ` · ${routeLocation(route.cwd)}` : ""}`}
+                      {`${agoLabel(route.at)} · ${route.email === "primary" ? primaryEmail(entry.provider) : route.email}${route.model ? ` · ${route.model}` : ""} · ${route.agentId ? `Paseo ${route.agentId}` : "started outside Paseo"}${route.cwd ? ` · ${routeLocation(route.cwd)}` : ""}`}
                     </Text>
                   ))}
                 </View>
               ) : (
-                <Text style={t.text.caption}>Decision history appears after the next routed launch.</Text>
+                <Text style={t.text.caption}>Recent choices appear after AgentLink routes a new chat.</Text>
               )}
               {routerMutation.error ? <ErrorText>{String(routerMutation.error)}</ErrorText> : null}
             </View>
@@ -921,9 +921,8 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
       <Card tone="attention">
         <Text style={t.text.heading}>Install the agent-link CLI</Text>
         <Text style={[t.text.body, { color: t.color.muted }]}>
-          Accounts and MCP both work without it. Routing does not: a Paseo provider runs a command, and that
-          command is a small launcher the CLI writes. Installing it downloads one file to {cli.data.binDir} and writes
-          the launchers, after which routing can be installed from here.
+          Accounts and MCP work without this command-line tool. Automatic account selection needs it. Installing
+          downloads one file to {cli.data.binDir} and creates the launch commands Paseo needs.
         </Text>
         <View style={{ flexDirection: "row", gap: t.space.sm, alignItems: "center", flexWrap: "wrap" }}>
           <Button
@@ -942,14 +941,14 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
           first
           title="AgentLink CLI"
           subtitle={cli.data.path}
-          meta={<Facts items={[{ value: `v${cli.data.version}` }, { value: cli.data.routersReady ? "routing launchers ready" : "routing launchers missing", tone: cli.data.routersReady ? "ok" : "attention" }]} />}
+          meta={<Facts items={[{ value: `v${cli.data.version}` }, { value: cli.data.routersReady ? "automatic account selection ready" : "automatic account selection needs setup", tone: cli.data.routersReady ? "ok" : "attention" }]} />}
           trailing={<StatusPill status="ok" label="installed" />}
         />
       </Card>
     ) : null;
 
-  // One cheap GitHub check per panel session compares the installed ancestry
-  // with the latest release; the Update button runs the CLI installer.
+  // One cheap GitHub check per panel session compares release numbers. Paseo
+  // owns the safe update when this is a Git-managed install.
   const update = useQuery({
     queryKey: ["agent-link", "update-check"],
     queryFn: () => callUpdateCheck({}),
@@ -971,11 +970,11 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
         <Text style={t.text.heading}>Plugin update ready</Text>
         <Text style={[t.text.body, { color: t.color.muted }]}>
           {update.data.note ||
-            `Agent Link ${update.data.installedVersion ? `v${update.data.installedVersion}` : "legacy install"} → v${update.data.latestVersion}. Updating fetches that published release, typechecks it, and reinstalls this panel — Paseo itself is untouched.`}
+            `Agent Link ${update.data.installedVersion ? `v${update.data.installedVersion}` : "older install"} → v${update.data.latestVersion}. Paseo validates the new release and keeps the current plugin if the update cannot start.`}
         </Text>
         <View style={{ flexDirection: "row", gap: t.space.sm, alignItems: "center", flexWrap: "wrap" }}>
           <Button label="Update now" variant="primary" loading={applyUpdate.isPending} onPress={() => applyUpdate.mutate()} />
-          <Text style={t.text.caption}>or in a terminal: agent-link update</Text>
+          <Text style={t.text.caption}>You can also update it from Paseo Settings → Plugins.</Text>
         </View>
       </Card>
     ) : null;
@@ -985,8 +984,8 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
       <View style={{ padding: pad, gap: t.space.md }}>
         <View style={{ flexDirection: t.compact ? "column" : "row", alignItems: t.compact ? "stretch" : "center", justifyContent: "space-between", gap: t.space.sm }}>
           <View style={{ flex: 1, minWidth: 0, gap: t.space.xs }}>
-            <Text style={t.text.heading}>Provider CLI updates</Text>
-            <Text style={t.text.caption}>Every Paseo provider appears below. Verified recipes update automatically; any other CLI can be given a safe argument-by-argument updater.</Text>
+            <Text style={t.text.heading}>Provider app updates</Text>
+            <Text style={t.text.caption}>Keep Claude, Codex, Kimi and Grok current automatically. Other command-line providers can use a custom update method.</Text>
           </View>
           <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: t.space.sm }}>
             <Segmented
@@ -1000,7 +999,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
         <Facts
           items={[
             { value: toolchainQuery.data.schedule, tone: toolchainQuery.data.enabled ? "ok" : "neutral" },
-            { value: "live providers are always skipped", tone: "ok" },
+            { value: "active provider apps are never updated", tone: "ok" },
           ]}
         />
       </View>
@@ -1065,7 +1064,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
               row.limitLast > 0 ? ` · last ${agoLabel(row.limitLast)}` : ""
             } — an account can be healthy and still refuse one model`}
           </ErrorText>
-          <Text style={t.text.caption}>Use Probe accounts above to test service, cool refusals, and release accounts that pass.</Text>
+          <Text style={t.text.caption}>Use Test account limits above. Refusing accounts stay blocked; passing accounts return to new-chat selection.</Text>
         </View>
       ) : null}
     </View>
@@ -1081,13 +1080,13 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const parkButton = (provider: ProviderId, email: string, parked: boolean, held = false) =>
     held && provider === "claude" ? (
       <ConfirmButton
-        label="Probe to release"
-        confirmLabel="Spend one small turn per account"
+        label="Test to release"
+        confirmLabel="Use one tiny request per sign-in"
         onConfirm={() => probeMutation.mutate(provider)}
       />
     ) : (
       <Button
-      label={parked ? "Release" : "Park 3h"}
+      label={parked ? "Use again" : "Pause for 3h"}
       loading={
         cooldownMutation.isPending &&
         cooldownMutation.variables?.provider === provider &&
@@ -1104,7 +1103,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
     preference: "preferred" | "standard" | "reserve",
   ) => (
     <View style={{ gap: t.space.xs }}>
-      <Text style={t.text.caption}>Routing priority</Text>
+      <Text style={t.text.caption}>Priority for new chats</Text>
       <Segmented
         value={preference}
         options={[
@@ -1137,10 +1136,10 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
           </View>
         ) : null}
         {capacity ? <CapacityDetail entry={capacity} /> : null}
-        {capacityQuery.error ? <ErrorText>{`Capacity failed to load: ${String(capacityQuery.error)}`}</ErrorText> : null}
+        {capacityQuery.error ? <ErrorText>{`Usage limits failed to load: ${String(capacityQuery.error)}`}</ErrorText> : null}
         <Facts
           items={[
-            { value: slot.source === "external" ? "external folder" : "agent-link slot" },
+            { value: slot.source === "external" ? "existing sign-in folder" : "AgentLink sign-in" },
             slot.outputStyle ? { value: `style: ${slot.outputStyle}` } : null,
             slot.settingsDrift.length > 0
               ? { value: `settings differ from primary: ${slot.settingsDrift.join(", ")}`, tone: "attention" }
@@ -1156,10 +1155,10 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
         {usageQuery.error ? <ErrorText>{`Activity failed to load: ${String(usageQuery.error)}`}</ErrorText> : null}
         {slot.wiredProviderId ? (
           <View style={{ gap: t.space.xs }}>
-            <Facts items={[{ value: `own provider: ${slot.wiredProviderId}` }]} />
+            <Facts items={[{ value: `fixed-account provider: ${slot.wiredProviderId}` }]} />
             <View style={{ flexDirection: "row", gap: t.space.sm }}>
               <Button
-                label="Diagnose provider"
+                label="Check provider setup"
                 variant="ghost"
                 loading={diagnosing === slot.dir}
                 disabled={diagnosing !== null}
@@ -1169,10 +1168,10 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
           </View>
         ) : slot.loggedIn ? (
           <View style={{ gap: t.space.xs }}>
-            <Text style={t.text.caption}>A provider pinned to this account alone, for work that must stay on it.</Text>
+            <Text style={t.text.caption}>Create a separate Paseo provider that always uses this sign-in.</Text>
             <View style={{ flexDirection: "row", gap: t.space.sm }}>
               <Button
-                label="Pin as its own provider"
+                label="Create fixed-account provider"
                 loading={pinning && pinMutation.isPending}
                 onPress={() => pinMutation.mutate(slot)}
               />
@@ -1184,11 +1183,11 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
         {slot.source === "agent-link" ? (
           <View style={{ gap: t.space.xs }}>
             <Text style={t.text.caption}>
-              Only remove this slot when none of its agents are running. Its login and chat history are archived for recovery.
+              Remove this sign-in only when none of its chats are running. Its login and chat history are archived for recovery.
             </Text>
             <ConfirmButton
-              label="Remove slot"
-              confirmLabel="Archive & remove"
+              label="Remove sign-in"
+              confirmLabel="Archive and remove"
               onConfirm={() => removeMutation.mutate({ provider: slot.provider, email: slot.email })}
             />
           </View>
@@ -1218,14 +1217,14 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
       : slot.wrongAccount
         ? "wrong account"
         : slot.blocked
-          ? "held until probe passes"
+          ? "blocked until test passes"
           : parked
-            ? `parked ${remainingLabel(slot.cooldownUntil)}`
+            ? `cooling down for ${remainingLabel(slot.cooldownUntil)}`
             : slot.creditNote
               ? "credit limited"
-              : "in rotation";
+              : "available for new chats";
     const facts: Array<{ value: string; tone?: Status } | null> = [
-      slot.lastUsed > 0 ? { value: `last agent ${agoLabel(slot.lastUsed)}` } : null,
+      slot.lastUsed > 0 ? { value: `last used ${agoLabel(slot.lastUsed)}` } : null,
       lastRoute?.agentId ? { value: `Paseo ${lastRoute.agentId}` } : null,
       lastRoute?.cwd ? { value: routeLocation(lastRoute.cwd) } : null,
       slot.creditNote ? { value: slot.creditNote, tone: "attention" } : null,
@@ -1250,8 +1249,8 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
           <View style={{ gap: t.space.xs }}>
             <View style={{ flexDirection: "row", alignItems: "center", gap: t.space.sm }}>
               <StatusPill status={status} label={label} />
-              {nextUpKeys[slot.provider] === slot.dir ? <Tag label="next new launch" tone="busy" /> : null}
-              {shared ? <Tag label="shared quota" tone="attention" /> : null}
+              {nextUpKeys[slot.provider] === slot.dir ? <Tag label="next new chat" tone="busy" /> : null}
+              {shared ? <Tag label="same usage limit" tone="attention" /> : null}
               {slot.modelHolds.map((model) => <Tag key={model} label={`${model} limited`} tone="attention" />)}
             </View>
             <Facts items={facts.slice(0, 5)} />
@@ -1262,9 +1261,9 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                 tone={parked ? "attention" : "busy"}
                 label={
                   slot.launches === 0
-                    ? "no agents yet"
-                    : `${plural(slot.launches, "launch", "launches")} · ${
-                        slot.launches === maxLaunches ? "most in rotation" : `busiest has ${maxLaunches}`
+                    ? "no new chats yet"
+                    : `${plural(slot.launches, "new chat", "new chats")} · ${
+                        slot.launches === maxLaunches ? "most used" : `highest is ${maxLaunches}`
                       }`
                 }
               />
@@ -1298,34 +1297,34 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
     const label = !account
       ? "sign-in needed"
       : info?.blocked
-        ? "held until probe passes"
+        ? "blocked until test passes"
         : parked
-          ? `parked ${remainingLabel(info?.cooldownUntil ?? 0)}`
+          ? `cooling down for ${remainingLabel(info?.cooldownUntil ?? 0)}`
         : info?.duplicated
           ? "duplicated"
           : credit
             ? "credit limited"
-            : "in rotation";
+            : "available for new chats";
     const open = Boolean(openRows[key]);
     return (
       <Row
         key={key}
         tone={status}
         title={account || "not signed in"}
-        subtitle={`primary — the account plain \`${provider}\` uses`}
+        subtitle={`Default sign-in used by the plain ${provider} command`}
         onPress={() => toggleRow(key)}
         meta={
           <View style={{ gap: t.space.xs }}>
             <View style={{ flexDirection: "row", alignItems: "center", gap: t.space.sm }}>
               <StatusPill status={status} label={label} />
-              {nextUpKeys[provider] === key ? <Tag label="next new launch" tone="busy" /> : null}
-              {shared ? <Tag label="shared quota" tone="attention" /> : null}
+              {nextUpKeys[provider] === key ? <Tag label="next new chat" tone="busy" /> : null}
+              {shared ? <Tag label="same usage limit" tone="attention" /> : null}
               {info?.modelHolds.map((model) => <Tag key={model} label={`${model} limited`} tone="attention" />)}
             </View>
             <Facts
               items={[
                 credit ? { value: credit, tone: "attention" } : null,
-                info?.duplicated ? { value: "an account below holds it too — routing uses that row", tone: "attention" } : null,
+                info?.duplicated ? { value: "the same login appears below, so both rows share one limit", tone: "attention" } : null,
                 lastRoute?.agentId ? { value: `Paseo ${lastRoute.agentId}` } : null,
                 lastRoute?.cwd ? { value: `last used in ${routeLocation(lastRoute.cwd)}` } : null,
                 usage && usage.limitHits > 0
@@ -1340,9 +1339,9 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                 tone={parked ? "attention" : "busy"}
                 label={
                   launches === 0
-                    ? "no agents yet"
-                    : `${plural(launches, "launch", "launches")} · ${
-                        launches === maxLaunches ? "most in rotation" : `busiest has ${maxLaunches}`
+                    ? "no new chats yet"
+                    : `${plural(launches, "new chat", "new chats")} · ${
+                        launches === maxLaunches ? "most used" : `highest is ${maxLaunches}`
                       }`
                 }
               />
@@ -1365,9 +1364,9 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                   <CodeBlock tone="attention">{provider === "claude" ? "claude auth login" : "codex login"}</CodeBlock>
                 </View>
               )}
-              <Facts items={[{ value: "managed by the CLI itself, not by a slot folder" }]} />
+              <Facts items={[{ value: "This is the provider's default sign-in." }]} />
               {capacity ? <CapacityDetail entry={capacity} /> : null}
-              {capacityQuery.error ? <ErrorText>{`Capacity failed to load: ${String(capacityQuery.error)}`}</ErrorText> : null}
+              {capacityQuery.error ? <ErrorText>{`Usage limits failed to load: ${String(capacityQuery.error)}`}</ErrorText> : null}
               {info ? preferenceControl(provider, "primary", info.preference) : null}
               {lastRoute?.agentId ? <CodeBlock>{`Paseo agent ${lastRoute.agentId}${lastRoute.cwd ? `\n${lastRoute.cwd}` : ""}`}</CodeBlock> : null}
               {usage ? activityDetail(provider, usage) : null}
@@ -1406,7 +1405,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                 onChangeText={setNewEmail}
                 placeholder={`new ${provider} account email`}
                 autoFocus
-                hint="Creates the slot and hands you the one command that finishes the browser sign-in — that step needs a terminal, because the CLI asks you to paste a code back."
+                hint="Creates a separate sign-in and gives you the terminal command needed to finish logging in."
               />
               <View style={{ flexDirection: "row", gap: t.space.sm }}>
                 {/* The provider's router install is the primary action; once it
@@ -1431,7 +1430,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const heartbeatStatus = (entry: ProviderHeartbeat | undefined): { status: Status; label: string } => {
     if (heartbeatQuery.isLoading) return { status: "busy", label: "connecting" };
     if (heartbeatQuery.error || !entry) return { status: "error", label: "unavailable" };
-    return { status: entry.available ? "ok" : "error", label: entry.available ? "registered" : "unavailable" };
+    return { status: entry.available ? "ok" : "error", label: entry.available ? "available to Paseo" : "unavailable" };
   };
 
   const providerCard = (provider: ProviderId, heartbeat: ProviderHeartbeat | undefined) => {
@@ -1457,15 +1456,15 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
               }}
             >
               <View style={{ flex: 1, minWidth: 0, gap: t.space.xs }}>
-                <Text numberOfLines={1} style={t.text.heading}>{`${CARD_TITLE[provider]} accounts`}</Text>
+                <Text numberOfLines={1} style={t.text.heading}>{`${CARD_TITLE[provider]} sign-ins`}</Text>
                 <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: t.space.sm }}>
                   <StatusPill status={state.status} label={state.label} />
                   <Facts
                     items={[
-                      { value: plural(totalEntries, "signed-in entry", "signed-in entries") },
-                      { value: plural(providerPools.length, "quota pool", "quota pools"), tone: totalEntries > providerPools.length ? "attention" : undefined },
-                      { value: plural(ready, "account available", "accounts available"), tone: ready > 0 ? "ok" : "attention" },
-                      constrained > 0 ? { value: plural(constrained, "account constrained", "accounts constrained"), tone: "attention" } : null,
+                      { value: plural(totalEntries, "saved sign-in", "saved sign-ins") },
+                      { value: plural(providerPools.length, "separate usage limit", "separate usage limits"), tone: totalEntries > providerPools.length ? "attention" : undefined },
+                      { value: plural(ready, "sign-in ready", "sign-ins ready"), tone: ready > 0 ? "ok" : "attention" },
+                      constrained > 0 ? { value: plural(constrained, "sign-in unavailable", "sign-ins unavailable"), tone: "attention" } : null,
                     ]}
                   />
                 </View>
@@ -1478,7 +1477,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                   onPress={() => void usageQuery.refetch()}
                 />
                 <Button
-                  label="Deep check"
+                  label="Check setup"
                   variant="ghost"
                   loading={diagnosing === provider}
                   disabled={diagnosing !== null}
@@ -1486,11 +1485,11 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                 />
                 {provider === "claude" ? (
                   probeMutation.isPending ? (
-                    <StatusPill status="busy" label="probing accounts" />
+                    <StatusPill status="busy" label="testing account limits" />
                   ) : (
                     <ConfirmButton
-                      label="Probe accounts"
-                      confirmLabel="Spend one small turn per account"
+                      label="Test account limits"
+                      confirmLabel="Use one tiny request per sign-in"
                       onConfirm={() => probeMutation.mutate(provider)}
                     />
                   )
@@ -1498,12 +1497,12 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
               </View>
             </View>
             <Text style={t.text.caption}>
-              {heartbeat?.summary ?? "Waiting for the Paseo provider registry."} Quota stays with each account below; opening Details loads its 7-day activity.
+              {heartbeat?.summary ?? "Waiting for Paseo."} Each unique login has its own usage limit. Open Details to load its recent activity.
             </Text>
             {totalEntries > providerPools.length ? (
-              <Notice tone="attention">One login appears twice, so those rows share the same quota.</Notice>
+              <Notice tone="attention">The same login appears twice. Those rows share one usage limit.</Notice>
             ) : null}
-            {capacityQuery.error ? <ErrorText>{`Capacity failed to load: ${String(capacityQuery.error)}`}</ErrorText> : null}
+            {capacityQuery.error ? <ErrorText>{`Usage limits failed to load: ${String(capacityQuery.error)}`}</ErrorText> : null}
             {usageQuery.error ? <ErrorText>{`Activity failed to load: ${String(usageQuery.error)}`}</ErrorText> : null}
             {diagnosis[provider] ? <CodeBlock>{diagnosis[provider]}</CodeBlock> : null}
             {probeLogs[provider] ? <CodeBlock>{probeLogs[provider]}</CodeBlock> : null}
@@ -1539,19 +1538,19 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                 <StatusPill status={state.status} label={state.label} />
               </View>
               <Button
-                label="Deep check"
+                label="Check setup"
                 variant="ghost"
                 loading={diagnosing === entry.id}
                 disabled={diagnosing !== null}
                 onPress={() => runDiagnose(entry.id, entry.id)}
               />
             </View>
-            <Text style={t.text.caption}>{entry.summary} Heartbeat never starts a model turn.</Text>
+            <Text style={t.text.caption}>{entry.summary} Automatic status checks never send a model request.</Text>
             <Facts
               items={[
-                { value: "single provider login" },
-                { value: "no Agent Link account cycling", tone: "attention" },
-                { value: entry.quotaTelemetry ? "quota telemetry available" : "quota telemetry not exposed", tone: "attention" },
+                { value: "one provider sign-in" },
+                { value: "AgentLink cannot switch accounts for this provider", tone: "attention" },
+                { value: entry.quotaTelemetry ? "usage limits available" : "provider does not share usage limits", tone: "attention" },
               ]}
             />
             {entry.aliases.length > 0 ? <Text style={t.text.caption}>{`Loaded aliases: ${entry.aliases.join(", ")}`}</Text> : null}
@@ -1583,10 +1582,10 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
         </ScrollView>
         <StatusPill
           status={heartbeatQuery.error ? "error" : heartbeatQuery.isFetching ? "busy" : "ok"}
-          label={heartbeatQuery.data ? `heartbeat ${agoLabel(heartbeatQuery.data.checkedAt)}` : heartbeatQuery.error ? "heartbeat failed" : "connecting"}
+          label={heartbeatQuery.data ? `status checked ${agoLabel(heartbeatQuery.data.checkedAt)}` : heartbeatQuery.error ? "status check failed" : "connecting"}
         />
       </View>
-      {heartbeatQuery.error ? <ErrorText>{`Provider heartbeat failed: ${String(heartbeatQuery.error)}`}</ErrorText> : null}
+      {heartbeatQuery.error ? <ErrorText>{`Provider status check failed: ${String(heartbeatQuery.error)}`}</ErrorText> : null}
       {selectedProvider}
     </View>
   );
@@ -1594,18 +1593,50 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const panelOptions: Array<{ value: PanelTab; label: string }> = [
     { value: "router", label: "AgentRouter" },
     { value: "accounts", label: "Accounts" },
-    { value: "limits", label: "Limit sentry" },
-    { value: "memory", label: "Memory guard" },
+    { value: "limits", label: "Limit recovery" },
+    { value: "memory", label: "Memory protection" },
   ];
 
   const selectedController = routerProviderQuery.data?.controllerOptions.find((option) => option.provider === routerController);
   const controllerModels = selectedController?.models ?? [];
   const panelSubtitle: Record<PanelTab, string> = {
-    router: "Interpret once, delegate to a concrete Paseo provider/model, and keep the route auditable.",
-    accounts: "Provider availability, account quota, routing pools, CLI locations, and safe software updates.",
-    limits: "Detect real quota refusals, cool the affected account, and resume through a healthy route.",
-    memory: "Pause only Paseo-owned compiler work under pressure, then continue it without killing the agent.",
+    router: "Let Paseo choose the provider and model for each new request.",
+    accounts: "See sign-ins, usage limits, the next account, app locations and updates.",
+    limits: "Continue routed chats safely after an account reaches its limit.",
+    memory: "Pause heavy Paseo type-checks when RAM is low, then continue them automatically.",
   };
+  const routerGuide = (
+    <Card padded={false}>
+      <View style={{ padding: pad, gap: t.space.xs }}>
+        <Text style={t.text.heading}>How to use AgentRouter</Text>
+        <Text style={t.text.caption}>Use it when you want one Paseo option to choose the right provider and model for each request.</Text>
+      </View>
+      <Row
+        first
+        title="1. Choose the request reader"
+        subtitle="It understands the prompt and chooses a work type. It does not perform the task itself."
+      />
+      <Row
+        title="2. Put models in preferred order"
+        subtitle="For each work type, the first available model is used. A genuine failure moves to the next choice."
+      />
+      <Row
+        title="3. Start an AgentRouter chat"
+        subtitle="In Paseo, choose AgentRouter and Automatic route. The chat records the provider and model that actually answered."
+      />
+      <View style={{ padding: pad, gap: t.space.sm }}>
+        <Text style={t.text.bodyStrong}>What each tab does</Text>
+        <Text style={t.text.body}><Text style={t.text.bodyStrong}>AgentRouter</Text> chooses a provider and model for new requests.</Text>
+        <Text style={t.text.body}><Text style={t.text.bodyStrong}>Accounts</Text> shows sign-ins, remaining usage, the next account and provider updates.</Text>
+        <Text style={t.text.body}><Text style={t.text.bodyStrong}>Limit recovery</Text> continues eligible routed chats after a real limit failure.</Text>
+        <Text style={t.text.body}><Text style={t.text.bodyStrong}>Memory protection</Text> pauses Paseo type-checks when RAM is low and resumes them later.</Text>
+        <Text style={t.text.bodyStrong}>The three account checks</Text>
+        <Text style={t.text.body}><Text style={t.text.bodyStrong}>Automatic status check</Text> reads local state every 30 seconds and sends no model request.</Text>
+        <Text style={t.text.body}><Text style={t.text.bodyStrong}>Check setup</Text> shows the command path, version, login and models; it does not prove how much usage remains.</Text>
+        <Text style={t.text.body}><Text style={t.text.bodyStrong}>Test account limits</Text> sends one tiny Claude request per sign-in and can release accounts that pass.</Text>
+      </View>
+    </Card>
+  );
 
   return (
     <Screen t={t}>
@@ -1629,6 +1660,8 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
       {notice ? <Notice onDismiss={() => setNotice(null)}>{notice}</Notice> : null}
       {scanQuery.error ? <ErrorText>{String(scanQuery.error)}</ErrorText> : null}
 
+      {panelTab === "router" ? routerGuide : null}
+
       {panelTab === "accounts" && scanQuery.data ? (
         <>
           {updateCard}
@@ -1644,7 +1677,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
         <Card padded={false}>
           <View style={{ padding: pad, gap: t.space.xs }}>
             <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: t.space.sm }}>
-              <Text style={t.text.heading}>Limit sentry</Text>
+              <Text style={t.text.heading}>Limit recovery</Text>
               <StatusPill
                 status={
                   limitsQuery.data.scanner.error
@@ -1655,31 +1688,31 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                 }
                 label={
                   limitsQuery.data.scanner.error
-                    ? "watchdog issue"
+                    ? "background check failed"
                     : limitsQuery.data.scanner.active
-                    ? "host watchdog"
+                    ? "checking in background"
                     : limitsQuery.data.watching
-                      ? "panel watcher"
-                      : "arming\u2026"
+                      ? "checking while open"
+                      : "starting\u2026"
                 }
               />
             </View>
             <Text style={t.text.caption}>
               {limitsQuery.data.scanner.error
-                ? `Every-provider scan failed: ${limitsQuery.data.scanner.error}`
+                ? `Background limit check failed: ${limitsQuery.data.scanner.error}`
                 : limitsQuery.data.scanner.active
-                ? `Every-provider scan active · last checked ${agoLabel(Math.floor(new Date(limitsQuery.data.scanner.lastScanAt ?? 0).getTime() / 1000))}`
-                : "Open-panel detection is active; install the host watchdog for unattended every-provider scans."}
+                ? `All providers checked ${agoLabel(Math.floor(new Date(limitsQuery.data.scanner.lastScanAt ?? 0).getTime() / 1000))}`
+                : "Limit failures are checked while this panel is open. Install the background checker for unattended recovery."}
             </Text>
           </View>
             <Row
               first
-              title="Recover only when continuity is provable"
-              subtitle="Routed Claude, Codex and AgentRouter chats keep their transcript and get one retry on a healthy account. Direct, Kimi, Grok and other single-account providers are detected and held for an explicit retry or handoff—never hammered."
+              title="Continue chats without losing their history"
+              subtitle="Routed Claude, Codex and AgentRouter chats retry once through an available account. Providers with only one sign-in wait for you instead of repeating a failed request."
               trailing={
                 <Segmented
                   options={[
-                    { value: "on", label: "Auto" },
+                    { value: "on", label: "Automatic" },
                     { value: "off", label: "Manual" },
                   ]}
                   value={limitsQuery.data.auto ? "on" : "off"}
@@ -1702,9 +1735,9 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                 }
                 trailing={
                   event.action === "auto-resumed" ? (
-                    <StatusPill status="ok" label="retry sent" />
+                    <StatusPill status="ok" label="continued" />
                   ) : event.action === "recovery-queued" ? (
-                    <StatusPill status="busy" label="recovery queued" />
+                    <StatusPill status="busy" label="waiting to continue" />
                   ) : event.action === "resume-failed" ? (
                     <StatusPill status="error" label="resume failed" />
                   ) : (
@@ -1719,43 +1752,43 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
             ))}
             {limitsQuery.data.events.length === 0 ? (
               <View style={{ padding: pad }}>
-                <Text style={t.text.caption}>No agent has died on a limit since the daemon started.</Text>
+                <Text style={t.text.caption}>No chat has stopped on a usage limit since Paseo started.</Text>
               </View>
             ) : null}
         </Card>
       ) : panelTab === "limits" ? (
-        <Loading label="Reading limit sentry…" />
+        <Loading label="Reading limit recovery…" />
       ) : null}
 
       {panelTab === "memory" && resourceQuery.data ? (
         <Card padded={false}>
           <View style={{ padding: pad, gap: t.space.xs }}>
             <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: t.space.sm }}>
-              <Text style={t.text.heading}>Memory guard</Text>
+              <Text style={t.text.heading}>Memory protection</Text>
               <StatusPill
                 status={resourceQuery.data.paused.length > 0 ? "attention" : resourceQuery.data.enabled ? "ok" : "neutral"}
                 label={
                   resourceQuery.data.paused.length > 0
                     ? `${resourceQuery.data.paused.length} paused`
                     : resourceQuery.data.enabled
-                      ? "guarding"
+                      ? "active"
                       : "off"
                 }
               />
             </View>
-            <Text style={t.text.caption}>Live Paseo-owned TypeScript checks only; this is not a list of every check ever started.</Text>
+            <Text style={t.text.caption}>Only TypeScript checks started by Paseo appear here. Terminal jobs are never changed.</Text>
           </View>
             <Row
               first
-              title="Keep heavy Paseo type-checks in one lane"
-              subtitle="Treats each shell/package-runner/compiler chain as one job. One compiler runs at a time; under memory pressure it pauses, keeps its agent alive, then continues when macOS recovers. Terminal jobs are never touched."
+              title="Pause heavy checks before RAM runs out"
+              subtitle="Paseo runs one type-check at a time. When memory is low, it pauses the check—not the chat—and continues after macOS recovers."
               meta={
                 <Facts
                   items={[
                     resourceQuery.data.freePercent === null
                       ? { value: "memory signal unavailable" }
                       : { value: `${resourceQuery.data.freePercent}% memory available` },
-                    { value: `${resourceQuery.data.activeTypechecks} compiler job${resourceQuery.data.activeTypechecks === 1 ? "" : "s"} running` },
+                    { value: `${resourceQuery.data.activeTypechecks} type-check${resourceQuery.data.activeTypechecks === 1 ? "" : "s"} running` },
                   ]}
                 />
               }
@@ -1780,7 +1813,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
             ))}
             {resourceQuery.data.events.length > 0 ? (
               <View style={{ padding: pad, gap: t.space.xs }}>
-                <Text style={t.text.bodyStrong}>Recent guard actions</Text>
+                <Text style={t.text.bodyStrong}>Recent memory actions</Text>
                 {resourceQuery.data.events.slice(0, 5).map((event, index) => (
                   <Text key={`${event.at}-${event.pid}-${index}`} style={t.text.caption}>
                     {`${agoLabel(Math.floor(new Date(event.at).getTime() / 1000))} · ${event.action} PID ${event.pid} · ${event.reason}`}
@@ -1790,7 +1823,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
             ) : null}
         </Card>
       ) : panelTab === "memory" ? (
-        <Loading label="Reading memory guard…" />
+        <Loading label="Reading memory protection…" />
       ) : null}
 
       {panelTab === "router" && routerProviderQuery.data ? (
@@ -1799,17 +1832,15 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
             <View style={{ flexDirection: t.compact ? "column" : "row", alignItems: t.compact ? "stretch" : "center", justifyContent: "space-between", gap: t.space.sm }}>
               <View style={{ flex: 1, minWidth: 0, gap: t.space.xs }}>
                 <Text style={t.text.heading}>AgentRouter</Text>
-                <Text style={t.text.caption}>
-                  One Paseo provider that interprets the prompt, chooses an ordered route, then launches the concrete provider/model that performs the work.
-                </Text>
+                <Text style={t.text.caption}>One Paseo option that reads the request, chooses a work type, then starts the provider and model that will do the work.</Text>
               </View>
               <View style={{ flexDirection: "row", alignItems: "center", gap: t.space.sm }}>
                 <StatusPill
                   status={routerProviderQuery.data.loaded ? "ok" : routerProviderQuery.data.configured ? "attention" : "neutral"}
-                  label={routerProviderQuery.data.loaded ? "ready" : routerProviderQuery.data.configured ? "reload required" : "not installed"}
+                  label={routerProviderQuery.data.loaded ? "ready" : routerProviderQuery.data.configured ? "reload Paseo" : "not installed"}
                 />
                 <Button
-                  label={routerProviderQuery.data.installed ? "Save routes" : "Save & install"}
+                  label={routerProviderQuery.data.installed ? "Save choices" : "Save & install"}
                   variant="primary"
                   loading={routerConfigureMutation.isPending}
                   onPress={saveRouter}
@@ -1818,21 +1849,21 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
             </View>
             <Facts
               items={[
-                { value: "interpret" },
-                { value: "health filter" },
-                { value: "ordered fallback" },
-                { value: "auditable Paseo child", tone: "ok" },
+                { value: "understands the request" },
+                { value: "skips unavailable providers" },
+                { value: "tries choices in order" },
+                { value: "shows which model answered", tone: "ok" },
               ]}
             />
           </View>
           <Row
             first
-            title="Controller"
-            subtitle="The controller only interprets and delegates; it never performs the requested task. Fable is the planning-safe default."
+            title="Request reader"
+            subtitle="This model understands the prompt and chooses a work type. It does not perform the requested task. Fable is the default."
             expanded={
               <View style={{ gap: t.space.md }}>
                 <ComboBox
-                  label="Controller account source"
+                  label="Request-reader sign-in"
                   options={routerProviderQuery.data.controllerOptions.map((option) => ({
                     value: option.provider,
                     label: option.label,
@@ -1846,20 +1877,20 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                     setRouterController(value);
                     setRouterDirty(true);
                   }}
-                  hint="The account pool spreads new controller launches across healthy Claude accounts; primary pins one account."
+                  hint="Automatic uses any available Claude sign-in. Primary always uses the default Claude sign-in."
                 />
                 <ComboBox
-                  label="Controller model"
+                  label="Request-reader model"
                   value={routerModel}
                   onChange={(value) => {
                     setRouterModel(value);
                     setRouterDirty(true);
                   }}
                   options={controllerModels.map((model) => ({ value: model.id, label: model.label }))}
-                  hint="This model interprets the request. The selected target below performs the work."
+                  hint="This model only chooses the work type. A provider and model below perform the task."
                 />
                 <Notice tone="attention">
-                  The boot controller is Claude-compatible because one Paseo adapter must start first. Once running, its targets can be any native, custom, or ACP provider.
+                  The request reader currently starts through Claude. The models that perform the work can come from any Paseo provider.
                 </Notice>
               </View>
             }
@@ -1870,16 +1901,16 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
             return (
               <Row
               key={`${group.name}-${index}`}
-              title={`${index + 1}. ${group.name || "Unnamed route"}`}
-              subtitle="Targets run top to bottom; unavailable or genuinely failed targets fall through."
-              meta={<Facts items={[{ value: plural(group.targets.length, "target", "targets") }, group.targets[0] ? { value: `first: ${group.targets[0].provider}/${group.targets[0].model}` } : null]} />}
+              title={`${index + 1}. ${group.name || "Unnamed work type"}`}
+              subtitle="Choices run top to bottom. Unavailable or genuinely failed models move to the next choice."
+              meta={<Facts items={[{ value: plural(group.targets.length, "model choice", "model choices") }, group.targets[0] ? { value: `first choice: ${group.targets[0].provider}/${group.targets[0].model}` } : null]} />}
               trailing={
                 <>
                   <Button label={open ? "Done" : "Edit"} variant="ghost" onPress={() => toggleRow(groupKey)} />
                   {routerGroups.length > 1 ? (
                     <ConfirmButton
                       label="Remove"
-                      confirmLabel="Remove route"
+                      confirmLabel="Remove work type"
                       onConfirm={() => {
                         setRouterGroups((groups) => groups.filter((_, groupIndex) => groupIndex !== index));
                         setRouterDirty(true);
@@ -1892,10 +1923,10 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                 open ? <View style={{ gap: t.space.sm }}>
                   <View style={{ flexDirection: t.compact ? "column" : "row", gap: t.space.sm }}>
                     <View style={{ flex: 1 }}>
-                      <Field label="Route name" value={group.name} onChangeText={(value) => updateRouterGroup(index, { name: value })} placeholder="planning" />
+                      <Field label="Work type name" value={group.name} onChangeText={(value) => updateRouterGroup(index, { name: value })} placeholder="planning" />
                     </View>
                     <View style={{ flex: 2 }}>
-                      <Field label="When to use it" value={group.purpose} onChangeText={(value) => updateRouterGroup(index, { purpose: value })} placeholder="Product and implementation plans" />
+                      <Field label="Use it for" value={group.purpose} onChangeText={(value) => updateRouterGroup(index, { purpose: value })} placeholder="Product and implementation plans" />
                     </View>
                   </View>
                   <View style={{ gap: t.space.sm }}>
@@ -1910,7 +1941,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                         onMove={(direction) => moveRouterTarget(index, targetIndex, direction)}
                         onRemove={() => {
                           if (group.targets.length === 1) {
-                            setNotice("Each route group needs at least one target.");
+                            setNotice("Each work type needs at least one model choice.");
                             return;
                           }
                           updateRouterGroup(index, { targets: group.targets.filter((_, current) => current !== targetIndex) });
@@ -1918,7 +1949,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                       />
                     ))}
                     <Button
-                      label="Add fallback target"
+                      label="Add fallback model"
                       variant="secondary"
                       onPress={() => updateRouterGroup(index, { targets: [...group.targets, { provider: "", model: "" }] })}
                     />
@@ -1930,15 +1961,15 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
           })}
           <View style={{ padding: pad, gap: t.space.md }}>
             <Button
-              label="Add route group"
+              label="Add work type"
               variant="secondary"
               onPress={() => {
-                setRouterGroups((groups) => [...groups, { name: `route-${groups.length + 1}`, purpose: "Describe when this route should be used", targets: [{ provider: "", model: "" }] }]);
+                setRouterGroups((groups) => [...groups, { name: `work-${groups.length + 1}`, purpose: "Describe when this work type should be used", targets: [{ provider: "", model: "" }] }]);
                 setRouterDirty(true);
               }}
             />
             <Field
-              label="Global routing rules"
+              label="Extra instructions"
               value={routerRules}
               onChangeText={(value) => {
                 setRouterRules(value);
@@ -1947,7 +1978,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
               multiline
               mono
               minHeight={120}
-              hint="Applied after the managed groups. Named provider/model requests still win."
+              hint="Applied after the work types above. A provider or model named in the request still wins."
             />
             <Facts
               items={[
@@ -1970,28 +2001,6 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
         <Loading label="Reading AgentRouter provider…" />
       ) : null}
 
-      {panelTab === "router" ? (
-        <Card>
-          <Text style={t.text.heading}>How to use it</Text>
-          <Text style={t.text.bodyStrong}>1. Choose the interpreter</Text>
-          <Text style={t.text.body}>Use the Claude account pool for resilient controller launches. Fable is the default because interpreting and planning routes need judgment, not the cheapest model.</Text>
-          <Text style={t.text.bodyStrong}>2. Define ordered routes</Text>
-          <Text style={t.text.body}>Each group describes a kind of work. Add providers and models in preferred order; unavailable or genuinely failed targets fall through to the next entry.</Text>
-          <Text style={t.text.bodyStrong}>3. Start AgentRouter in Paseo</Text>
-          <Text style={t.text.body}>Choose AgentRouter → Automatic route. It states the selected provider/model, creates an auditable Paseo child, then relays that child's result.</Text>
-          <Text style={t.text.heading}>What stays fixed?</Text>
-          <Text style={t.text.body}>Running processes never switch accounts or models. Routing happens at launch; a failed resumable session is ended, then relaunched through a healthy account.</Text>
-          <Text style={t.text.heading}>Why can a launch still hit a limit?</Text>
-          <Text style={t.text.body}>Some providers do not expose fresh quota without a paid call. AgentLink uses the latest telemetry, records real refusals, cools that account, and tries the next configured target.</Text>
-          <Text style={t.text.heading}>Probe versus update</Text>
-          <Text style={t.text.body}>Probe spends one tiny model turn to prove account quota. Provider update only checks or replaces an idle CLI binary. Plugin update compares published Agent Link release numbers. They are independent.</Text>
-          <Text style={t.text.heading}>Direct provider or AgentRouter?</Text>
-          <Text style={t.text.body}>Choose a direct Paseo provider when you already know the model. Use AgentRouter when you want one entry point to interpret, delegate, fall back, and leave route evidence.</Text>
-          {scanQuery.data && !scanQuery.data.agentAuthInstalled ? (
-            <Text style={t.text.caption}>Install the AgentLink CLI to add dynamic routing and terminal account controls.</Text>
-          ) : null}
-        </Card>
-      ) : null}
     </Screen>
   );
 }
@@ -2014,15 +2023,15 @@ export function AgentRoutingPanel({ theme, layout, agentId }: PluginAgentPanelPr
     refetchInterval: 15_000,
   });
 
-  if (trace.isLoading) return <Screen t={t}><Loading label="Reading routing evidence…" /></Screen>;
+  if (trace.isLoading) return <Screen t={t}><Loading label="Reading model choice…" /></Screen>;
   if (trace.error) return <Screen t={t}><ErrorText>{trace.error instanceof Error ? trace.error.message : String(trace.error)}</ErrorText></Screen>;
   if (!trace.data) return null;
 
   return (
     <Screen t={t}>
       <Toolbar
-        title="Routing evidence"
-        subtitle="Control and answer models are shown separately. Provider-internal work is never presented as an auditable route."
+        title="Model used"
+        subtitle="See the request reader, the model that answered and the account used. Unknown details stay clearly marked."
       />
       <Notice tone={trace.data.isAgentRouter && !trace.data.nodes.some((node) => node.source === "paseo") ? "attention" : "neutral"}>
         {trace.data.summary}
@@ -2037,10 +2046,10 @@ export function AgentRoutingPanel({ theme, layout, agentId }: PluginAgentPanelPr
             meta={
               <Facts
                 items={[
-                  { value: node.source === "control" ? "control plane" : node.source === "paseo" ? "answer model" : "model hidden" },
+                  { value: node.source === "control" ? "request reader" : node.source === "paseo" ? "answer model" : "model not reported" },
                   { value: `${node.provider} / ${node.model}` },
-                  { value: `account: ${node.account}` },
-                  { value: `agent: ${node.id}` },
+                  { value: `sign-in: ${node.account}` },
+                  { value: `Paseo agent: ${node.id}` },
                 ]}
               />
             }

@@ -76,6 +76,7 @@ import {
   handleToolchainStatus,
 } from "./toolchain.server";
 import { McpSurface, McpWorkspacePanel } from "./mcp.client";
+import { contributeModelPills } from "./model-pill.client";
 import {
   mcpExport,
   mcpExportFile,
@@ -172,11 +173,12 @@ export default function contribute(plugin: PluginContext) {
   });
   plugin.addWorkspacePanel({
     id: "agent-routing",
-    title: "Routing",
+    title: "Model used",
     icon: "Route",
     context: "agent",
     Component: AgentRoutingPanel,
   });
+  plugin.addClientSide(contributeModelPills);
   plugin.addSidebarItem({ id: "agent-sync", title: "Agent Link", icon: "Users", surface: "agent-sync" });
   plugin.addSidebarItem({ id: "mcp", title: "MCP", icon: "Plug", surface: "mcp" });
   plugin.addCommandCenterItem({

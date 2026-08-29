@@ -70,12 +70,30 @@ const COMMIT_SHA_URL = (ref: string) => `https://api.github.com/repos/itsjustank
 const COMPARE_URL = (base: string, head: string) =>
   `https://api.github.com/repos/itsjustanks/agent-link/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`;
 
-// The plugin cannot ask Paseo where it is installed, so it looks in the places
-// the daemon actually uses. ponytail: fixed candidate list — extend it if a
-// platform ever stores plugins elsewhere.
+function pluginInfo(command: "ls" | "status"): Record<string, unknown> | null {
+  try {
+    const args = command === "ls" ? ["plugin", "ls", "--json"] : ["plugin", "status", "agent-link", "--json"];
+    const parsed = JSON.parse(execFileSync("paseo", args, { encoding: "utf8", timeout: 8_000 })) as unknown;
+    const rows = Array.isArray(parsed) ? parsed : [parsed];
+    return (rows.find((row) => row && typeof row === "object" && (row as { id?: string }).id === "agent-link") as Record<string, unknown> | undefined) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function pluginSource(): string {
+  const source = pluginInfo("status")?.source;
+  return typeof source === "string" ? source : "";
+}
+
+// Prefer Paseo's registered path. Fixed legacy locations preserve update
+// identity for older directory installs.
 function buildStamp(): { sha: string; version: string } {
+  const registeredPath = pluginInfo("ls")?.path;
   const candidates = [
+    ...(typeof registeredPath === "string" ? [join(registeredPath, "build.json"), join(registeredPath, "package.json")] : []),
     join(HOME, ".paseo", "plugins", "agent-link", "build.json"),
+    join(HOME, ".paseo", "plugins", "agent-link", "package.json"),
     join(HOME, "Library", "Application Support", "paseo", "plugins", "agent-link", "build.json"),
     join(HOME, ".config", "paseo", "plugins", "agent-link", "build.json"),
   ];
@@ -93,6 +111,16 @@ function buildStamp(): { sha: string; version: string } {
     }
   }
   return { sha: "", version: "" };
+}
+
+function compareReleaseVersions(left: string, right: string): number {
+  const parts = (value: string) => value.replace(/^v/, "").split(/[.-]/).slice(0, 3).map((part) => Number.parseInt(part, 10) || 0);
+  const a = parts(left);
+  const b = parts(right);
+  for (let index = 0; index < 3; index += 1) {
+    if ((a[index] ?? 0) !== (b[index] ?? 0)) return (a[index] ?? 0) - (b[index] ?? 0);
+  }
+  return 0;
 }
 
 export async function handleCliUpdateCheck(): Promise<{
@@ -140,6 +168,17 @@ export async function handleCliUpdateCheck(): Promise<{
     };
   }
   if (!installedSha) {
+    if (installedVersion && latestVersion) {
+      const comparison = compareReleaseVersions(installedVersion, latestVersion);
+      return {
+        installedVersion,
+        latestVersion,
+        installedSha,
+        latestSha,
+        updateReady: comparison < 0,
+        note: comparison > 0 ? "Installed build is newer than the latest release." : "",
+      };
+    }
     return {
       installedVersion,
       latestVersion,
@@ -186,17 +225,18 @@ export async function handleCliUpdateCheck(): Promise<{
 
 export async function handleCliUpdateApply(): Promise<{ ok: boolean; message: string }> {
   const cli = findCli();
-  if (!cli) {
+  const gitManaged = pluginSource() === "git";
+  if (!gitManaged && !cli) {
     return { ok: false, message: "The agent-link CLI is not installed — install it from the card above first." };
   }
-  // The installer removes and re-registers THIS plugin, so it must never run
-  // inside one of this plugin's own RPCs — the daemon tears the handler down
-  // mid-call and the panel sees "Plugin is not available … handler_error".
-  // Fire it detached with a beat of delay so this response flushes first; the
-  // reinstall's outcome is visible in the version stamp once the new plugin
-  // is serving, and in `paseo plugin logs agent-link` if it goes wrong.
+  // Updating replaces this running plugin, so start it after this RPC response
+  // has flushed. Paseo's Git flow validates the candidate and rolls back on a
+  // startup failure; older directory installs retain the CLI fallback.
   try {
-    const child = spawn("/bin/sh", ["-c", `sleep 1; ${JSON.stringify(cli)} app install paseo >/dev/null 2>&1`], {
+    const command = gitManaged
+      ? "paseo plugin update agent-link"
+      : `${JSON.stringify(cli)} app install paseo`;
+    const child = spawn("/bin/sh", ["-c", `sleep 1; ${command} >/dev/null 2>&1`], {
       detached: true,
       stdio: "ignore",
     });
@@ -204,7 +244,7 @@ export async function handleCliUpdateApply(): Promise<{ ok: boolean; message: st
     return {
       ok: true,
       message:
-        "Update started. The panel is being reinstalled and reloaded — come back to this tab in about 30 seconds; the version stamp above will show the new build.",
+        "Update started. Paseo is validating the new release and will keep the current plugin if it cannot start. Reopen this tab in about 30 seconds.",
     };
   } catch (caught) {
     return {
