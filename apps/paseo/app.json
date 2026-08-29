@@ -1,7 +1,7 @@
 {
   "id": "paseo",
   "title": "Paseo panel",
-  "summary": "Accounts and MCP across your coding CLIs, in Paseo",
+  "summary": "Account routing, limits, recovery, and memory protection in Paseo",
   "requires": "paseo",
   "kind": "paseo-plugin",
   "pluginId": "agent-link"

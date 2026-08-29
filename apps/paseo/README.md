@@ -2,7 +2,7 @@
 
 # agent-link for Paseo
 
-**Every AI coding account you own and every MCP server across them — globally and per workspace.**
+**Account routing, limits, recovery, and memory protection for Paseo.**
 
 ![Paseo](https://img.shields.io/badge/Paseo-%E2%89%A5%200.5-8A63D2)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
@@ -12,7 +12,7 @@
 
 This is the Paseo app that ships with [agent-link](https://github.com/itsjustanks/agent-link). The CLI works perfectly well on its own; this is the same thing with a UI.
 
-Two sidebar tabs:
+One Agent Link sidebar tab:
 
 ![The Agent Link tab: a Routing card showing the auto-router installed for Claude and Codex, then each account with its state, park timer, credit note and launch count](../../docs/screenshots/agent-link.png)
 
@@ -40,32 +40,19 @@ The surface opens on **AgentRouter**, followed by **Accounts, Limit recovery, an
 - **Park 3h / Resume** — take an account that hit its limit out of rotation and put it back
 - **Create fixed-account provider** — one click adds a Paseo provider that always uses that sign-in. Three different Claude accounts provide three separate usage limits.
 
-![The MCP tab: servers with coverage and live health, plus actions to add, import and sync definitions](../../docs/screenshots/mcp.png)
+## MCP companion
 
-## 🔌 MCP
+MCP management now lives in the independent [Paseo MCP](https://github.com/itsjustanks/paseo-mcp) plugin. It works without AgentLink and automatically discovers AgentLink accounts when present:
 
-A universal manager for MCP servers across the machine. The global surface covers user-level Claude Code and Codex accounts, Kimi Code, Grok, and custom providers. It also lists MCP servers from every project registered with Paseo. A workspace panel reads that workspace's project `.mcp.json`. Selecting a server puts its health, definition, and account management in one full-width flow.
-
-- **Servers** — search plus **All / Gaps / Issues**, with health and destination editing after selection. OAuth is shown only when a provider reports an account grant; headers, environment values, credential-bearing URL queries and command arguments are treated as inline credentials instead.
-- **Automatic health** — runs on open and every 15 minutes while the surface is visible. HTTP servers get a real request (401/403 means **auth needed**); stdio servers get a binary-on-PATH check.
-- **Workspace MCP connections** — open the panel on a Paseo workspace to see the exact `.mcp.json` servers associated with it and run OAuth from the correct project directory
-- **Expand** a server for its destination table: present or missing per destination, add or remove there
-- **Edit** — every destination's own definition, side by side. Different auth per account is expected and supported: change one account's header and save just that destination, or take one destination's version and **Use for ALL**.
-- **Reveal secrets** — masked (`•••last4`) by default; one tap shows the stored values. Masked values are preserved on save, so editing one account can never copy its token into another. (Deliberate cross-account copies — **Add to all** and **Use for ALL** — do carry a definition's inline credentials, which is the point of those buttons.)
-- **Rename everywhere** — rewrites a server's key across every config that has it (copy-then-delete, so a failure can never lose the definition)
-- **Add server** — http or stdio, headers/env as `KEY=VALUE` lines, targeting all destinations or specific ones
-- **Edit as JSON** — a `Fields | JSON` switch on every destination. You always type the shape people actually paste out of a README (Claude's), and TOML destinations are translated on the way in and out, so you never have to know that Codex spells headers `http_headers`. Validate before saving, Preview shows exactly what the destination will hold in its own format with any dropped keys named, and errors point at a line and column with a caret.
-- **Paste JSON to import** — accepts `{"mcpServers":{…}}`, `{"servers":{…}}`, a single named entry, a bare definition, a `claude mcp add-json` command, or a TOML block; strips code fences, comments and trailing commas and tells you what it had to clean up. Unfilled placeholders like `<YOUR_TOKEN>` block the write until you say otherwise. Validation covers every server × destination pair before anything is written, so a bad import writes nothing at all rather than half of it.
-- **Authorise or reconnect from the destination row** — when a provider reports OAuth, the definition and that account's connection live together. The daemon runs the right account's CLI and opens its computer's default browser. The authorization URL and callback target stay visible; Claude's manual flow accepts the browser's final callback URL directly in the panel. Sign out remains available.
-- **Sync accounts** — pushes user-level definitions and project trust from each primary into its account slots
-
-Every write backs up the target config first (last 20 kept — one "apply to all" is seven files in one press), replaces it atomically, and keeps the permissions it had, because these files hold bearer tokens. A config that exists but cannot be parsed is never overwritten. An edit is **lossless**: the stored entry is loaded and only the fields you changed are modified, so keys the plugin does not model — Claude's `type`, Codex's `enabled` and `startup_timeout_sec` — survive it.
+```sh
+paseo plugin add itsjustanks/paseo-mcp
+```
 
 Looking for the **Canvas** tab — live rendering and public links for everything your agents build? It grew into its own plugin: [paseo-canvas](https://github.com/itsjustanks/paseo-canvas). Install either, or both; they are independent.
 
 ### Built for narrow screens
 
-Paseo plugins run on phones as well as desktop, so the panel uses one spacing scale that tightens on narrow layouts, buttons with real touch targets, account rows that put the identity on its own line above the detail, and an MCP destination table that stacks instead of squeezing labels to nothing.
+Paseo plugins run on phones as well as desktop, so the panel uses one spacing scale that tightens on narrow layouts, buttons with real touch targets, and account rows that put the identity on its own line above the detail.
 
 ## Install
 
@@ -110,27 +97,13 @@ Requires Paseo with plugins enabled. Git updates and the newest client integrati
 
 ### Do you need the CLI?
 
-No, for most of it. This panel reads the account directories and writes MCP configuration on its own — accounts and MCP work with the plugin alone.
+No, for account visibility, usage, provider checks, memory protection, and recovery. Those work in the plugin alone.
 
 **Routing is the exception.** A Paseo provider runs a command, so the auto-router needs the launcher script that `agent-link auto` writes. The Agent Link tab therefore shows an **Install the agent-link CLI** card when it is missing: one press fetches a single file into `~/.local/bin`, writes the launchers, and routing becomes installable from the panel. The `curl` command sits beside the button if you would rather do it yourself, and the card disappears once the CLI is found.
 
 ### Optional: the agent-link CLI
 
-[**agent-link**](https://github.com/itsjustanks/agent-link) is the companion CLI that creates and logs in account slots (`agent-link add claude you@work.com`) and can hot-switch which account the plain `claude` / `codex` command uses. The plugin is fully standalone without it — it reads whatever slots exist and does its own MCP sync — but with agent-link installed, logins become one command and the panel points you at it. The panel also reads hand-rolled slot layouts in `~/.claude-accounts` / `~/.codex-accounts`.
-
-### Authentication by account
-
-MCP *definitions* sync between accounts; MCP *grants* do not — a server is authorized once per account, which is what "server X is not connected" actually means. Open the server, then press **Connect OAuth** or **Reconnect** on the account row. The daemon opens its computer's default browser and keeps copyable authorization/callback URLs in the panel; no token is pasted into Agent Link. A remote daemon also shows the exact fallback command:
-
-```sh
-CLAUDE_CONFIG_DIR="~/.agent-link/accounts/claude/you@work.com" claude mcp login <server>
-```
-
-For project-scoped servers, open **MCP connections** on the Paseo workspace. OAuth launches from that workspace's `.mcp.json` directory, so the provider resolves the exact raw server name. The plugin reads but never edits project definitions.
-
-### Global and project scope
-
-The sidebar MCP surface manages **user-level** servers available across projects. The workspace MCP panel reads the selected repository's `.mcp.json` and manages its account grants; project definitions remain read-only.
+[**agent-link**](https://github.com/itsjustanks/agent-link) creates and logs in account slots (`agent-link add claude you@work.com`), writes routing launchers, and can hot-switch the plain `claude` / `codex` command. The panel can inspect existing slots without the CLI, but routing requires its launcher.
 
 ## About rate limits and failover
 
@@ -151,7 +124,7 @@ Paseo's built-in usage figure reads the primary accounts only (`~/.claude`, `~/.
 
 ## What may still use the terminal
 
-Finishing a new CLI account login may require a code in a terminal. MCP OAuth can start directly from **Connect OAuth** in the panel when Paseo's daemon is on this Mac; for a remote daemon, the panel gives the provider- and account-specific command to run on that machine.
+Finishing a new CLI account login may require a code in a terminal.
 
 ## Troubleshooting
 
@@ -164,12 +137,9 @@ Finishing a new CLI account login may require a code in a terminal. MCP OAuth ca
 
 Plugin backend code runs trusted and unsandboxed on your daemon machine (that is true of every Paseo plugin). Specifically, this one:
 
-- reads MCP config files and, from credential-adjacent files, **only** the account email used for identity checks — never token material
-- masks secret values in the UI by default; full values are shown only when you press **Reveal secrets**, and never leave your machine
-- strips URL query strings from displayed summaries (some providers put tokens in URLs)
-- backs up every config file before writing it, and refuses to overwrite a file it cannot parse
+- reads from credential-adjacent files **only** the account identity and provider-owned usage state — never token material
 - changes Paseo providers through Paseo's own `config.patch` API, never by editing the daemon config file
-- copies MCP *definitions* between accounts, never credentials — OAuth grants stay in each account's own store
+- never switches an in-flight agent; account changes happen at launch or transcript-preserving recovery
 
 ## License
 

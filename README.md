@@ -80,7 +80,7 @@ Paseo watchdog triggers the low-priority daily run.
 
 ## In Paseo
 
-`agent-link app install paseo` adds two tabs to [Paseo](https://paseo.sh). On Paseo 0.7+, this creates a Git-managed install, so Paseo can check, validate, update, and roll back the plugin itself.
+`agent-link app install paseo` adds the Agent Link tab to [Paseo](https://paseo.sh). On Paseo 0.7+, this creates a Git-managed install, so Paseo can check, validate, update, and roll back the plugin itself.
 
 ### 🔗 Agent Link
 
@@ -98,26 +98,19 @@ The **Accounts** tab also shows AgentLink and provider app locations and manages
 
 AgentRouter uses virtual aliases, healthy targets, ordered groups, cooldowns, failover, and decision evidence. It delegates to explicit Paseo child agents, while Agent Link separately routes CLI account launches. It never claims to switch an in-flight agent. Routed launches record the exact Paseo agent ID and working directory, so duplicate-account rows show which agent last consumed that shared quota. If every target is parked, the launch stops cleanly instead of silently falling onto a known-exhausted primary. Paseo binds a custom provider to one adapter, so the controller must boot through a Claude-compatible adapter; once running, its target groups can use any native, custom, or ACP provider.
 
-### 🔌 MCP
+### 🔌 MCP companion
 
-![The MCP tab: servers listed with coverage and live health, plus actions to add, import and sync definitions](docs/screenshots/mcp.png)
+MCP management is now the independent [**Paseo MCP**](https://github.com/itsjustanks/paseo-mcp) plugin. It works with standard provider accounts on its own and automatically discovers AgentLink account directories when installed:
 
-Each server now owns its automatic health result and destination/account rows in one full-width view. There is no separate OAuth destination list: a destination owns both its definition and, only when the provider reports it, its account OAuth action. Header/env values, credential-bearing URL queries and secret command arguments are classified as inline credentials instead of being mislabeled OAuth.
-
-- Add, remove or **rename a server everywhere at once**
-- **Edit the raw JSON** for one destination, with a dry-run preview before anything is written (TOML destinations are translated both ways, so you never type TOML and never need to know that Codex spells headers `http_headers`)
-- **Paste a definition straight out of a README** to import it — fenced code, comments and trailing commas are cleaned up and reported, and unfilled placeholders block the write
-- **Run or reconnect OAuth per account** from the panel. The daemon opens its computer's default browser; the authorization URL, callback target and a callback-return field remain available if automatic return fails.
-- **Open MCP connections on any Paseo workspace** to read that workspace's `.mcp.json`, see its project servers and authorize each account from the same side panel
-- Automatic health checks, gap detection, and per-account authorisation status
-
-Every write is atomic, keeps the file's permissions, backs it up first, and refuses to overwrite a config it cannot parse.
+```sh
+paseo plugin add itsjustanks/paseo-mcp
+```
 
 Looking for the Canvas tab — the one that renders and shares what your agents build? It grew into its own plugin: [**paseo-canvas**](https://github.com/itsjustanks/paseo-canvas). Install either, or both; they are independent.
 
 ### Don't want the CLI?
 
-You do not need it. Installed from the Paseo UI, the plugin reads your account directories itself and syncs MCP definitions itself — accounts and MCP are fully usable with no terminal.
+You do not need it for account visibility, usage, provider checks, memory protection, or recovery.
 
 The one exception is **routing**, because a Paseo provider runs a *command*, and that command is a small launcher script the CLI writes. So the Agent Link tab offers to install the CLI for you: one press downloads a single file to `~/.local/bin`, writes the launchers, and routing becomes available — and the exact `curl` command is shown next to the button for anyone who would rather run it themselves.
 
@@ -290,7 +283,7 @@ Optional add-ons live in [`apps/`](apps), one folder per tool. They are never re
 
 ```sh
 agent-link app list
-#  ● paseo      Accounts and MCP across your coding CLIs, in Paseo  installed
+#  ● paseo      Account routing, limits, recovery, and memory protection in Paseo  installed
 #  ○ vscode     Rotating accounts in VS Code or Cursor         available
 
 agent-link app install paseo            # install (re-run to upgrade)
@@ -300,7 +293,7 @@ agent-link app remove paseo             # uninstall; the source is left alone
 
 | App | What it gives you |
 | --- | --- |
-| [`paseo`](apps/paseo) | The two tabs described [above](#in-paseo) — full detail in [`apps/paseo/README.md`](apps/paseo/README.md) |
+| [`paseo`](apps/paseo) | The Agent Link tab described [above](#in-paseo) — full detail in [`apps/paseo/README.md`](apps/paseo/README.md) |
 | [`vscode`](apps/vscode) | How to point VS Code or Cursor at a rotating or pinned account |
 
 Anything missing — Paseo itself, Node, the plugins switch in Settings — is named rather than guessed at. Adding another editor or tool means dropping a folder in `apps/` with an `app.json`.

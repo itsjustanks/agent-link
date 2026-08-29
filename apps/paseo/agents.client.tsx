@@ -921,7 +921,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
       <Card tone="attention">
         <Text style={t.text.heading}>Install the agent-link CLI</Text>
         <Text style={[t.text.body, { color: t.color.muted }]}>
-          Accounts and MCP work without this command-line tool. Automatic account selection needs it. Installing
+          Account visibility and provider checks work without this command-line tool. Automatic account selection needs it. Installing
           downloads one file to {cli.data.binDir} and creates the launch commands Paseo needs.
         </Text>
         <View style={{ flexDirection: "row", gap: t.space.sm, alignItems: "center", flexWrap: "wrap" }}>
