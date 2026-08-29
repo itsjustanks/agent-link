@@ -285,7 +285,7 @@ agent-link status                every account and its state
 agent-link whoami [prov]         one line: the account this process is using, and what is next
 agent-link next [prov]           just the account rotation would pick next
 agent-link add <prov> <email>    create an account and sign in
-agent-link login [prov] [email|all]      sign in whatever needs it
+agent-link login [prov] [email|all]      sign in primary/slots that need it
 agent-link claude|codex [args]   run that CLI on the next account in rotation
 agent-link auto                  write the auto-routing launchers
 agent-link cooldown <prov> <email> [min|clear]   park / unpark an account

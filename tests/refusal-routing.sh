@@ -144,4 +144,24 @@ status_output="$(HOME="$fixture_root" PATH="$fixture_root/bin:$PATH" AGENT_LINK_
 grep -q "primary.*HELD.*authentication failed" <<<"$status_output"
 grep -q "$account.*held.*authentication failed" <<<"$status_output"
 
+# `login all` includes primary Claude now, and an explicit successful login
+# clears only the authentication hold (model-specific holds remain separate).
+auth_state="$fixture_root/auth-state"
+mkdir -p "$auth_state"
+printf '%s\n' '#!/usr/bin/env bash' \
+  'key=primary' \
+  'if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then key="$(basename "$CLAUDE_CONFIG_DIR")"; fi' \
+  'case "$1 $2" in' \
+  '  "auth status") if [ -f "$AGENT_LINK_TEST_AUTH_STATE/$key" ]; then printf '\''{"loggedIn":true}'\''; else printf '\''{"loggedIn":false}'\''; fi ;;' \
+  '  "auth login") mkdir -p "$AGENT_LINK_TEST_AUTH_STATE"; touch "$AGENT_LINK_TEST_AUTH_STATE/$key" ;;' \
+  '  *) exit 2 ;;' \
+  'esac' > "$provider_bin/claude"
+chmod +x "$provider_bin/claude"
+HOME="$fixture_root" PATH="$provider_bin:$fixture_root/bin:$PATH" AGENT_LINK_HOME="$fixture_root" \
+  AGENT_LINK_TEST_AUTH_STATE="$auth_state" "$repo_root/agent-link" login claude primary >/dev/null
+test ! -f "$fixture_root/state/pools/hold-claude-primary"
+HOME="$fixture_root" PATH="$provider_bin:$fixture_root/bin:$PATH" AGENT_LINK_HOME="$fixture_root" \
+  AGENT_LINK_TEST_AUTH_STATE="$auth_state" "$repo_root/agent-link" login claude "$account" >/dev/null
+test ! -f "$fixture_root/state/pools/hold-claude-$account"
+
 echo "refusal routing fixture passed"
