@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.5.32"
+VERSION="0.5.33"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -3104,6 +3104,37 @@ cmd_update() {
 toolchain_plist() { echo "$HOME/Library/LaunchAgents/com.agent-link.toolchain-updater.plist"; }
 toolchain_log() { echo "$STATE/toolchain-updater.log"; }
 toolchain_state() { echo "$STATE/toolchain-updates.json"; }
+toolchain_cron_marker() { echo "# agent-link-toolchain-updater"; }
+
+toolchain_cron_enabled() {
+  command -v crontab >/dev/null 2>&1 || return 1
+  crontab -l 2>/dev/null | grep -Fq "$(toolchain_cron_marker)"
+}
+
+toolchain_install_cron() { # $1 executable
+  local executable="$1" marker existing line
+  command -v crontab >/dev/null 2>&1 || return 1
+  marker="$(toolchain_cron_marker)"
+  existing="$(crontab -l 2>/dev/null || true)"
+  line="$(python3 - "$executable" "$(toolchain_log)" "$marker" <<'PY2'
+import shlex, sys
+executable, log, marker = sys.argv[1:]
+print(f"15 4 * * * {shlex.quote(executable)} toolchain update --scheduled >> {shlex.quote(log)} 2>&1 {marker}")
+PY2
+)"
+  {
+    printf '%s\n' "$existing" | grep -Fv "$marker" || true
+    printf '%s\n' "$line"
+  } | crontab -
+}
+
+toolchain_remove_cron() {
+  local marker existing
+  toolchain_cron_enabled || return 0
+  marker="$(toolchain_cron_marker)"
+  existing="$(crontab -l 2>/dev/null || true)"
+  printf '%s\n' "$existing" | grep -Fv "$marker" | crontab - || true
+}
 
 toolchain_binary_path() { # $1 provider
   local resolved=""
@@ -3306,7 +3337,13 @@ PY2
 
 toolchain_status() {
   local provider binary current schedule="disabled" state_file
-  [ -f "$(toolchain_plist)" ] && schedule="enabled daily at 04:15"
+  if launchctl print "gui/$(id -u)/com.agent-link.toolchain-updater" >/dev/null 2>&1; then
+    schedule="enabled via launchd daily at 04:15"
+  elif toolchain_cron_enabled; then
+    schedule="enabled via cron daily at 04:15"
+  elif [ -f "$(toolchain_plist)" ]; then
+    schedule="written but not loaded"
+  fi
   echo "Automatic provider CLI updates: $schedule"
   for provider in claude codex kimi grok; do
     binary="$(toolchain_binary_path "$provider")"
@@ -3376,9 +3413,17 @@ os.replace(tmp, path)
 PY2
   launchctl bootout "gui/$uid/com.agent-link.toolchain-updater" >/dev/null 2>&1 || true
   if ! launchctl bootstrap "gui/$uid" "$plist"; then
-    echo "schedule file written, but launchd could not load it: $plist" >&2
-    return 1
+    echo "launchd could not load the schedule; using the daily cron fallback" >&2
+    if ! toolchain_install_cron "$self"; then
+      echo "neither launchd nor cron could install the schedule" >&2
+      return 1
+    fi
+    rm -f "$plist"
+    echo "automatic provider CLI updates enabled via cron — daily at 04:15"
+    echo "live providers are skipped and retried on the next daily run"
+    return 0
   fi
+  toolchain_remove_cron
   echo "automatic provider CLI updates enabled — daily at 04:15 and once now"
   echo "live providers are skipped and retried on the next daily run"
 }
@@ -3387,6 +3432,7 @@ toolchain_disable() {
   local plist uid
   plist="$(toolchain_plist)"; uid="$(id -u)"
   launchctl bootout "gui/$uid/com.agent-link.toolchain-updater" >/dev/null 2>&1 || true
+  toolchain_remove_cron
   [ ! -f "$plist" ] || rm -f "$plist"
   echo "automatic provider CLI updates disabled"
 }

@@ -71,7 +71,8 @@ Paseo and the process table before each update; a live provider, or an
 unreadable runtime state, is skipped until the next day. It never kills or
 restarts an agent and never changes credentials. Paseo itself remains managed
 by the desktop app. Unknown providers are left untouched rather than invoking
-an unverified update command.
+an unverified update command. macOS launchd is preferred; if registration is
+unavailable, AgentLink installs the same daily job through cron instead.
 
 ---
 
