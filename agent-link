@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.5.41"
+VERSION="0.5.42"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -565,8 +565,9 @@ def update_sentry_outcome(request, outcome):
     state = sentry_state()
     prior = next((item for item in state["events"] if item.get("agentId") == request["agentId"]), None)
     if not prior and not request.get("title") and not request.get("workspaceId"): return
-    if outcome == "continuation-accepted" or outcome.startswith("already-routed"):
-        action, suffix = "auto-resumed", "retry accepted by Paseo"
+    if outcome == "continuation-accepted" or outcome == "cross-provider-continuation" or outcome.startswith("already-routed") or outcome.startswith("already-cross-provider"):
+        action = "auto-resumed"
+        suffix = "linked continuation started" if "cross-provider" in outcome else "retry accepted by Paseo"
     elif outcome.endswith("3-times") or outcome in {"expired-or-invalid", "invalid-request"}:
         action, suffix = "resume-failed", outcome.replace("-", " ")
     else:
@@ -582,7 +583,109 @@ def update_sentry_outcome(request, outcome):
         "limit": request.get("limit"),
     }
     base.update(action=action, detail=f"{request.get('detail') or base.get('detail') or 'provider limit'} — {suffix}")
+    for key in ("targetAgentId", "targetProvider", "targetModel"):
+        if request.get(key): base[key] = request[key]
     record_sentry(base)
+
+def paseo_home():
+    return os.environ.get("PASEO_HOME") or os.path.join(os.path.expanduser("~"), ".paseo")
+
+def cross_provider_target(request):
+    """Return the first configured, healthy fallback outside the failed family."""
+    try:
+        preferences = json.load(open(os.path.join(paseo_home(), "orchestration-preferences.json")))
+    except Exception:
+        return None
+    family = str(request.get("provider") or "").removesuffix("-auto")
+    model = str(request.get("model") or "")
+    ladders = preferences.get("fallbacks") if isinstance(preferences, dict) else None
+    candidates = ladders.get(f"{family}/{model}") if isinstance(ladders, dict) else None
+    if not isinstance(candidates, list): return None
+    for raw in candidates:
+        if not isinstance(raw, str) or "/" not in raw: continue
+        provider, target_model = raw.split("/", 1)
+        target_family = provider.removesuffix("-auto")
+        if target_family == family or target_family not in {"claude", "codex"}: continue
+        rc, target_account, _ = run([self_bin, "pick", target_family, "dry", target_model], 30)
+        if rc != 0 or not target_account.strip(): continue
+        thinking = "ultra" if target_family == "codex" and target_model == "gpt-5.6-sol" else "high"
+        return {
+            "provider": f"{target_family}-auto",
+            "family": target_family,
+            "model": target_model,
+            "account": target_account.strip().splitlines()[-1],
+            "thinking": thinking,
+        }
+    return None
+
+def prior_cross_provider(agent_id):
+    for prior_path in sorted(glob.glob(os.path.join(done, f"{agent_id}-*.json")), key=os.path.getmtime, reverse=True):
+        try:
+            prior = json.load(open(prior_path))
+            if prior.get("targetAgentId") and prior.get("outcome") in {"cross-provider-continuation", "already-cross-provider"}:
+                return prior
+        except Exception:
+            pass
+    return None
+
+def extract_agent_id(payload):
+    if isinstance(payload, dict):
+        for key in ("id", "Id", "agentId", "AgentId"):
+            if isinstance(payload.get(key), str) and payload[key]: return payload[key]
+        for value in payload.values():
+            found = extract_agent_id(value)
+            if found: return found
+    if isinstance(payload, list):
+        for value in payload:
+            found = extract_agent_id(value)
+            if found: return found
+    return None
+
+def start_cross_provider(request, detail, target):
+    source_id = str(request.get("agentId") or "")
+    prior = prior_cross_provider(source_id)
+    if prior:
+        request.update({key: prior.get(key) for key in ("targetAgentId", "targetProvider", "targetModel") if prior.get(key)})
+        return "already-cross-provider", ""
+    stored = agent_record(source_id)
+    workspace_id = request.get("workspaceId") or detail.get("WorkspaceId") or detail.get("workspaceId") or stored.get("workspaceId")
+    title = str(request.get("title") or detail.get("Name") or detail.get("name") or stored.get("title") or "Agent continuation")
+    cwd = str(detail.get("Cwd") or detail.get("cwd") or request.get("cwd") or stored.get("cwd") or "")
+    request.update({"workspaceId": workspace_id, "title": title, "cwd": cwd})
+    source_provider = str(request.get("provider") or "unknown")
+    source_model = str(request.get("model") or "unknown model")
+    prompt = (
+        f"AgentLink cross-provider continuation for Paseo agent {source_id}. "
+        f"The {source_provider}/{source_model} account family is exhausted, so continue this incomplete task using "
+        f"{target['provider']}/{target['model']}. First run `paseo agent logs {source_id}` and inspect the current workspace and git diff. "
+        "Continue from the first incomplete step; do not redo completed work. Preserve every user constraint and existing agent/subagent result. "
+        f"Begin with one short line: `Continued from {source_id} on {target['provider']}/{target['model']}` and then take the next action."
+    )
+    args = [
+        paseo, "agent", "run", "--background", "--json",
+        "--provider", f"{target['provider']}/{target['model']}",
+        "--thinking", target["thinking"],
+        "--title", f"Continue: {title}"[:120],
+        "--label", f"agent-link-continuation-of={source_id}",
+        "--label", "agent-link-fallback-depth=1",
+    ]
+    if workspace_id: args.extend(["--workspace", str(workspace_id)])
+    elif cwd: args.extend(["--cwd", cwd])
+    args.append(prompt)
+    rc, output, error = run(args, 45)
+    payload = load_json(output) if rc == 0 else None
+    target_id = extract_agent_id(payload)
+    if rc != 0 or not target_id:
+        return None, (error or output or "Paseo did not return the continuation agent id")[-1500:]
+    request.update({
+        "targetAgentId": target_id,
+        "targetProvider": target["provider"],
+        "targetModel": target["model"],
+        "targetAccount": target["account"],
+        "detail": f"{request.get('detail') or 'provider limit'} — whole {source_provider} family unavailable; continued as {target['provider']}/{target['model']} in agent {target_id}",
+        "acceptedOutput": output[-2000:],
+    })
+    return "cross-provider-continuation", ""
 
 def limit_phrase(log_text, status):
     assistant = re.compile(
@@ -788,8 +891,23 @@ for path in sorted(glob.glob(os.path.join(pending, "*.json")))[:8]:
         rc, target, _ = run([self_bin, "pick", family, "dry", str(request.get("model") or "")], 30)
         target = target.strip().splitlines()[-1] if rc == 0 and target.strip() else ""
         if not target or target == request.get("account"):
+            rc, output, inspect_error = run([paseo, "inspect", agent_id, "--json"], 15)
+            source_detail = load_json(output) if rc == 0 else None
+            source_status = str((source_detail or {}).get("Status") or (source_detail or {}).get("status") or "").lower()
+            fallback = cross_provider_target(request)
+            if isinstance(source_detail, dict) and source_status in {"idle", "error", "closed"} and fallback:
+                outcome, fallback_error = start_cross_provider(request, source_detail, fallback)
+                if outcome:
+                    finish(path, request, outcome)
+                    accepted += 1
+                    continue
+                request["lastError"] = fallback_error
+            elif not isinstance(source_detail, dict):
+                request["lastError"] = (inspect_error or "inspect failed before cross-provider fallback")[-1000:]
             request["notBefore"] = time.time() + 5 * 60
             waiting = "waiting for a healthy alternate account"
+            if not fallback:
+                waiting += " or configured cross-provider fallback"
             if waiting not in str(request.get("detail") or ""):
                 request["detail"] = (request.get("detail") or "provider limit") + f" — {waiting}"
             write(path, request)

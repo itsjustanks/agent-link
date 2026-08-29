@@ -108,7 +108,13 @@ function externalRecoveryState(agentId: string): "pending" | "accepted" | null {
         };
         const at = state === "pending" ? request.createdAt : request.completedAt;
         if (!at || now - at > 5 * 60) continue;
-        if (state === "accepted" && request.outcome !== "continuation-accepted" && !request.outcome?.startsWith("already-routed")) continue;
+        if (
+          state === "accepted" &&
+          request.outcome !== "continuation-accepted" &&
+          request.outcome !== "cross-provider-continuation" &&
+          !request.outcome?.startsWith("already-routed") &&
+          !request.outcome?.startsWith("already-cross-provider")
+        ) continue;
         return state;
       }
     } catch {
@@ -472,14 +478,69 @@ export async function handleLimitsSetAuto({ auto }: { auto: boolean }, { paseo }
   return statusResponse();
 }
 
-export async function handleLimitsResume({ agentId }: { agentId: string }, { paseo }: HandlerContext): Promise<{ ok: boolean; error: string | null }> {
+function agentLinkBinary(): string | null {
+  const candidates = [
+    join(HOME, ".local", "bin", "agent-link"),
+    join(HOME, "Library", "pnpm", "bin", "agent-link"),
+  ];
+  return candidates.find(existsSync) ?? null;
+}
+
+function accountUnavailable(provider: "claude" | "codex", account: string): string | null {
+  const stateRoot = dirname(dirname(STATE_PATH));
+  const pools = join(stateRoot, "state", "pools");
+  if (account !== "primary" && !existsSync(join(stateRoot, "accounts", provider, account))) return "account not found";
+  try {
+    const held = readFileSync(join(pools, `hold-${provider}-${account}`), "utf8").trim();
+    if (held) return held;
+  } catch {
+    // Not held.
+  }
+  try {
+    const until = Number.parseInt(readFileSync(join(pools, `cooldown-${provider}-${account}`), "utf8").trim(), 10);
+    if (Number.isFinite(until) && until > Date.now() / 1000) return "account is cooling down";
+  } catch {
+    // Not cooling down.
+  }
+  return null;
+}
+
+export async function handleLimitsResume(
+  { agentId, account }: { agentId: string; account?: string },
+  { paseo }: HandlerContext,
+): Promise<{ ok: boolean; error: string | null }> {
   ensureLimitSentry(paseo);
   const p = (paseo ?? lastPaseo) as PaseoLike | null;
   if (!p) return { ok: false, error: "no daemon connection yet" };
   try {
     const state = loadState();
     const event = state.events.find((entry) => entry.agentId === agentId);
-    await p.agents.ref(agentId).send(continuationNudge(routeForAgent(agentId), event?.limit ?? "its usage limit", event?.model));
+    const route = routeForAgent(agentId);
+    if (account) {
+      if (!/^[^/\\]+$/.test(account) || account === "." || account === "..") return { ok: false, error: "invalid account" };
+      if (!route) return { ok: false, error: "this chat has no AgentLink route record" };
+      const current = p.agents.ref(agentId).current() as { status?: string } | null;
+      if (current?.status === "running" || current?.status === "initializing") {
+        return { ok: false, error: "wait for the current turn to stop before changing accounts" };
+      }
+      const unavailable = accountUnavailable(route.provider, account);
+      if (unavailable) return { ok: false, error: `${account} is unavailable: ${unavailable}` };
+      const sessionId = sessionIdFor(agentId);
+      const binary = agentLinkBinary();
+      if (!sessionId || !binary) return { ok: false, error: !sessionId ? "provider session id not found" : "AgentLink CLI not found" };
+      execFileSync(binary, ["handoff", route.provider, sessionId, account], {
+        encoding: "utf8",
+        timeout: 30_000,
+        env: { ...process.env, AGENT_LINK_HOME: dirname(dirname(STATE_PATH)) },
+      });
+      const retired = retirePinnedProcess(agentId);
+      if (retired) await new Promise((resolve) => setTimeout(resolve, 1_500));
+      await p.agents.ref(agentId).send(
+        `AgentLink account change: continue this conversation on ${account}. Do not redo completed work. Begin with one short line naming the actual account and model.`,
+      );
+    } else {
+      await p.agents.ref(agentId).send(continuationNudge(route, event?.limit ?? "its usage limit", event?.model));
+    }
     state.events = state.events.map((e) => (e.agentId === agentId ? { ...e, action: "auto-resumed" as const } : e));
     saveState(state);
     return { ok: true, error: null };

@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+fixture_root="$(mktemp -d /private/tmp/agent-link-cross-provider.XXXXXX)"
+trap 'rm -rf "$fixture_root"' EXIT
+
+claude_account="claude@example.com"
+claude_dir="$fixture_root/accounts/claude/$claude_account"
+codex_account="codex@example.com"
+codex_dir="$fixture_root/accounts/codex/$codex_account"
+mkdir -p "$claude_dir/projects/fixture" "$codex_dir" "$fixture_root/.paseo/agents/project"
+printf '%s\n' '{"oauthAccount":{"emailAddress":"claude@example.com"}}' > "$claude_dir/.claude.json"
+printf '%s\n' '{"isApiErrorMessage":true,"message":"You have reached your Fable 5 limit."}' > "$claude_dir/projects/fixture/refusal.jsonl"
+python3 - "$codex_dir/auth.json" <<'PY'
+import base64, json, sys
+payload = base64.urlsafe_b64encode(json.dumps({"email": "codex@example.com"}).encode()).decode().rstrip("=")
+json.dump({"tokens": {"id_token": f"x.{payload}.x"}}, open(sys.argv[1], "w"))
+PY
+printf '%s\n' '{"workspaceId":"workspace-1","title":"Interrupted build","cwd":"/tmp/project","persistence":{"metadata":{"model":"claude-fable-5"}}}' \
+  > "$fixture_root/.paseo/agents/project/agent-source.json"
+printf '%s\n' '{"fallbacks":{"claude/claude-fable-5":["claude-auto/claude-fable-5","codex/gpt-5.6-sol"]}}' \
+  > "$fixture_root/.paseo/orchestration-preferences.json"
+
+HOME="$fixture_root" AGENT_LINK_HOME="$fixture_root" CLAUDE_CONFIG_DIR="$claude_dir" \
+  AGENT_LINK_ROUTE_MODEL="claude-fable-5" PASEO_AGENT_ID="agent-source" \
+  AGENT_LINK_SKIP_RECOVERY_KICKSTART=1 "$repo_root/agent-link" refused claude >/dev/null
+
+provider_bin="$fixture_root/provider-bin"
+run_log="$fixture_root/run.log"
+mkdir -p "$provider_bin"
+printf '%s\n' '#!/usr/bin/env bash' \
+  'if [ "$1" = inspect ]; then printf '\''{"Status":"closed","Name":"Interrupted build","Cwd":"/tmp/project"}'\''; exit 0; fi' \
+  'if [ "$1 $2" = "agent run" ]; then printf '\''%s\n'\'' "$*" >> "$AGENT_LINK_TEST_RUN_LOG"; printf '\''{"id":"agent-sol"}'\''; exit 0; fi' \
+  'exit 2' > "$provider_bin/paseo"
+chmod +x "$provider_bin/paseo"
+
+HOME="$fixture_root" PATH="$provider_bin:$PATH" AGENT_LINK_HOME="$fixture_root" \
+  AGENT_LINK_TEST_RUN_LOG="$run_log" "$repo_root/agent-link" recover >/dev/null
+
+test "$(wc -l < "$run_log" | tr -d ' ')" -eq 1
+grep -q -- '--provider codex-auto/gpt-5.6-sol' "$run_log"
+grep -q -- '--thinking ultra' "$run_log"
+grep -q -- '--workspace workspace-1' "$run_log" || { printf 'missing workspace in: '; cat "$run_log"; exit 1; }
+grep -q -- '--label agent-link-continuation-of=agent-source' "$run_log"
+test "$(find "$fixture_root/state/paseo-recovery/pending" -type f -name '*.json' | wc -l | tr -d ' ')" -eq 0
+done_file="$(find "$fixture_root/state/paseo-recovery/done" -type f -name '*.json' -print -quit)"
+grep -q '"outcome": "cross-provider-continuation"' "$done_file"
+grep -q '"targetAgentId": "agent-sol"' "$done_file"
+grep -q '"targetProvider": "codex-auto"' "$fixture_root/state/paseo-limit-sentry.json"
+
+# A duplicate refusal for the same source links to the existing continuation
+# instead of starting another agent.
+python3 - "$done_file" "$fixture_root/state/paseo-recovery/pending/agent-source-duplicate.json" <<'PY'
+import json, sys, time
+request = json.load(open(sys.argv[1]))
+request.pop("completedAt", None)
+request.pop("outcome", None)
+request["createdAt"] = time.time()
+request["notBefore"] = 0
+json.dump(request, open(sys.argv[2], "w"))
+PY
+HOME="$fixture_root" PATH="$provider_bin:$PATH" AGENT_LINK_HOME="$fixture_root" \
+  AGENT_LINK_TEST_RUN_LOG="$run_log" "$repo_root/agent-link" recover >/dev/null
+test "$(wc -l < "$run_log" | tr -d ' ')" -eq 1
+grep -q '"outcome": "already-cross-provider"' "$fixture_root/state/paseo-recovery/done/agent-source-duplicate.json"
+
+echo "cross-provider recovery fixture passed"

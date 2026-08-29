@@ -17,6 +17,9 @@ export const LimitEventSchema = z.object({
   account: z.string().optional(),
   model: z.string().optional(),
   limit: z.string().optional(),
+  targetAgentId: z.string().optional(),
+  targetProvider: z.string().optional(),
+  targetModel: z.string().optional(),
 });
 export type LimitEvent = z.infer<typeof LimitEventSchema>;
 
@@ -51,6 +54,6 @@ export const limitsSetAuto = defineRpc({
 
 export const limitsResume = defineRpc({
   name: "agent-link.limits-resume",
-  input: z.object({ agentId: z.string() }),
+  input: z.object({ agentId: z.string(), account: z.string().optional() }),
   output: z.object({ ok: z.boolean(), error: z.string().nullable() }),
 });

@@ -1730,6 +1730,8 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                     <Tag label={event.provider} />
                     {event.account ? <Tag label={event.account} tone="attention" /> : null}
                     {event.model ? <Tag label={event.model} /> : null}
+                    {event.targetProvider && event.targetModel ? <Tag label={`continued on ${event.targetProvider} / ${event.targetModel}`} tone="ok" /> : null}
+                    {event.targetAgentId ? <Tag label={`linked agent ${event.targetAgentId}`} /> : null}
                     <Tag label={agoLabel(Math.floor(new Date(event.at).getTime() / 1000)) } />
                   </>
                 }
