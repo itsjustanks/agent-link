@@ -30,13 +30,13 @@ provider_bin="$fixture_root/provider-bin"
 run_log="$fixture_root/run.log"
 mkdir -p "$provider_bin"
 printf '%s\n' '#!/usr/bin/env bash' \
-  'if [ "$1" = inspect ]; then printf '\''{"Status":"closed","Name":"Interrupted build","Cwd":"/tmp/project"}'\''; exit 0; fi' \
+  'if [ "$1" = inspect ]; then [ -f "$AGENT_LINK_TEST_INSPECT_FAIL" ] && exit 2; printf '\''{"Status":"closed","Name":"Interrupted build","Cwd":"/tmp/project"}'\''; exit 0; fi' \
   'if [ "$1 $2" = "agent run" ]; then printf '\''%s\n'\'' "$*" >> "$AGENT_LINK_TEST_RUN_LOG"; printf '\''{"id":"agent-sol"}'\''; exit 0; fi' \
   'exit 2' > "$provider_bin/paseo"
 chmod +x "$provider_bin/paseo"
 
 HOME="$fixture_root" PATH="$provider_bin:$PATH" AGENT_LINK_HOME="$fixture_root" \
-  AGENT_LINK_TEST_RUN_LOG="$run_log" "$repo_root/agent-link" recover >/dev/null
+  AGENT_LINK_TEST_RUN_LOG="$run_log" AGENT_LINK_TEST_INSPECT_FAIL="$fixture_root/inspect-fail" "$repo_root/agent-link" recover >/dev/null
 
 test "$(wc -l < "$run_log" | tr -d ' ')" -eq 1
 grep -q -- '--provider codex-auto/gpt-5.6-sol' "$run_log"
@@ -60,8 +60,9 @@ request["createdAt"] = time.time()
 request["notBefore"] = 0
 json.dump(request, open(sys.argv[2], "w"))
 PY
+touch "$fixture_root/inspect-fail"
 HOME="$fixture_root" PATH="$provider_bin:$PATH" AGENT_LINK_HOME="$fixture_root" \
-  AGENT_LINK_TEST_RUN_LOG="$run_log" "$repo_root/agent-link" recover >/dev/null
+  AGENT_LINK_TEST_RUN_LOG="$run_log" AGENT_LINK_TEST_INSPECT_FAIL="$fixture_root/inspect-fail" "$repo_root/agent-link" recover >/dev/null
 test "$(wc -l < "$run_log" | tr -d ' ')" -eq 1
 grep -q '"outcome": "already-cross-provider"' "$fixture_root/state/paseo-recovery/done/agent-source-duplicate.json"
 

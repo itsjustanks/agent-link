@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.5.42"
+VERSION="0.5.43"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -891,6 +891,12 @@ for path in sorted(glob.glob(os.path.join(pending, "*.json")))[:8]:
         rc, target, _ = run([self_bin, "pick", family, "dry", str(request.get("model") or "")], 30)
         target = target.strip().splitlines()[-1] if rc == 0 and target.strip() else ""
         if not target or target == request.get("account"):
+            prior = prior_cross_provider(agent_id)
+            if prior:
+                request.update({key: prior.get(key) for key in ("targetAgentId", "targetProvider", "targetModel") if prior.get(key)})
+                finish(path, request, "already-cross-provider")
+                accepted += 1
+                continue
             rc, output, inspect_error = run([paseo, "inspect", agent_id, "--json"], 15)
             source_detail = load_json(output) if rc == 0 else None
             source_status = str((source_detail or {}).get("Status") or (source_detail or {}).get("status") or "").lower()
