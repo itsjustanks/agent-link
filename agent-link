@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.5.44"
+VERSION="0.5.45"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -1619,7 +1619,7 @@ router_write_files() {
 # These refine target choice; they cannot disable route evidence.
 
 ## Overrides
-- if the user names a provider or model, use exactly that
+- if the user names a provider, model, or account, use exactly that
 - prefer subscription-backed auto pools before independent backups
 - pair implementation and verification on different provider families
 
@@ -1634,27 +1634,29 @@ import json, os, sys
 config_path, policy_path = sys.argv[1:]
 defaults = {
     "controllerProvider": "claude-auto",
+    "controllerAccount": "auto",
+    "controllerConfigDir": "",
     "controllerModel": "claude-fable-5",
     "targetGroups": [
         {"name": "fast", "purpose": "Explanations, summaries, formatting and tiny edits", "targets": [
-            {"provider": "claude-auto", "model": "claude-haiku-4-5"},
-            {"provider": "codex-auto", "model": "gpt-5.6-luna"},
-            {"provider": "kimi", "model": "kimi-code/kimi-for-coding-highspeed"},
-            {"provider": "grok", "model": "grok-4.5"}]},
+            {"provider": "claude", "account": "auto", "resolvedProvider": "claude-auto", "model": "claude-haiku-4-5"},
+            {"provider": "codex", "account": "auto", "resolvedProvider": "codex-auto", "model": "gpt-5.6-luna"},
+            {"provider": "kimi", "account": "provider", "resolvedProvider": "kimi", "model": "kimi-code/kimi-for-coding-highspeed"},
+            {"provider": "grok", "account": "provider", "resolvedProvider": "grok", "model": "grok-4.5"}]},
         {"name": "planning", "purpose": "Product and implementation plans", "targets": [
-            {"provider": "claude-auto", "model": "claude-fable-5"},
-            {"provider": "codex-auto", "model": "gpt-5.6-terra"},
-            {"provider": "grok", "model": "grok-4.6"}]},
+            {"provider": "claude", "account": "auto", "resolvedProvider": "claude-auto", "model": "claude-fable-5"},
+            {"provider": "codex", "account": "auto", "resolvedProvider": "codex-auto", "model": "gpt-5.6-terra"},
+            {"provider": "grok", "account": "provider", "resolvedProvider": "grok", "model": "grok-4.6"}]},
         {"name": "judgment", "purpose": "Architecture, UI/UX, audit and final review", "targets": [
-            {"provider": "claude-auto", "model": "claude-opus-5"},
-            {"provider": "grok", "model": "grok-4.6"},
-            {"provider": "codex-auto", "model": "gpt-5.6-sol"}]},
+            {"provider": "claude", "account": "auto", "resolvedProvider": "claude-auto", "model": "claude-opus-5"},
+            {"provider": "grok", "account": "provider", "resolvedProvider": "grok", "model": "grok-4.6"},
+            {"provider": "codex", "account": "auto", "resolvedProvider": "codex-auto", "model": "gpt-5.6-sol"}]},
         {"name": "build", "purpose": "Multi-file implementation, debugging, migrations and refactors", "targets": [
-            {"provider": "codex-auto", "model": "gpt-5.6-sol"},
-            {"provider": "kimi", "model": "kimi-code/k3"},
-            {"provider": "claude-auto", "model": "claude-opus-5"}]},
+            {"provider": "codex", "account": "auto", "resolvedProvider": "codex-auto", "model": "gpt-5.6-sol"},
+            {"provider": "kimi", "account": "provider", "resolvedProvider": "kimi", "model": "kimi-code/k3"},
+            {"provider": "claude", "account": "auto", "resolvedProvider": "claude-auto", "model": "claude-opus-5"}]},
         {"name": "browser", "purpose": "Browser-driving verification", "targets": [
-            {"provider": "codex-auto", "model": "gpt-5.6-sol"}]},
+            {"provider": "codex", "account": "auto", "resolvedProvider": "codex-auto", "model": "gpt-5.6-sol"}]},
     ],
 }
 try:
@@ -1672,10 +1674,10 @@ except Exception:
 lines = [
     "# AgentRouter managed orchestration policy",
     "",
-    "Every request resolves to one concrete Paseo provider/model target. Groups",
+    "Every request resolves to one concrete Paseo provider/model/account target. Groups",
     "are ordered: skip unavailable targets, try the first healthy target, then",
-    "move only after a real launch failure. AgentLink handles account selection",
-    "inside claude-auto and codex-auto.",
+    "move only after a real launch failure. Automatic account targets use",
+    "AgentLink health routing; fixed targets use the selected account only.",
     "",
 ]
 for group in config.get("targetGroups", []):
@@ -1683,7 +1685,9 @@ for group in config.get("targetGroups", []):
     purpose = str(group.get("purpose") or "User-defined work")
     lines.append(f"## {name} — {purpose}")
     for index, target in enumerate(group.get("targets", []), 1):
-        lines.append(f"{index}. {target.get('provider', '')}/{target.get('model', '')}")
+        provider = target.get("resolvedProvider") or target.get("provider", "")
+        account = target.get("account") or ("auto" if str(provider).endswith("-auto") else "provider")
+        lines.append(f"{index}. {provider}/{target.get('model', '')} · account: {account}")
     lines.append("")
 lines += [
     "Model-specific quota may be unknowable until a target answers. A refusal is",
@@ -1697,16 +1701,17 @@ PY
   cat > "$(router_dir)/prompt.md" <<'EOF'
 You are AgentRouter, a prompt interpreter and cross-provider orchestrator. The
 controller process hosting you is NOT the answer model. On EVERY user message
-you must resolve and run one concrete Paseo provider/model target.
+you must resolve and run one concrete Paseo provider/model/account target.
 
 1. Read the managed target policy and user rules below.
-2. Classify the request into one target group. If the user named a model, that
-   exact target wins.
+2. Classify the request into one target group. If the user named a provider,
+   model, or account, that exact compatible target wins.
 3. Use Paseo's provider/profile discovery to skip unavailable targets. Do not
    claim quota health when the runtime does not expose it.
 4. Before launch, call Paseo `inspect_provider` for the target and select a mode
    ID it actually reports. Then delegate only with the Paseo MCP `create_agent`
-   tool in THIS workspace. Pass the exact `provider/model`, compatible mode in
+   tool in THIS workspace. Pass the exact resolved `provider/model` (the
+   provider already encodes automatic, primary, or fixed account choice), compatible mode in
    `settings`, full task context, and a title beginning
    `AgentRouter · <exact provider/model> ·`. NEVER
    use Claude's built-in Agent/Task subagent tool: Paseo cannot expose that
@@ -1717,9 +1722,9 @@ you must resolve and run one concrete Paseo provider/model target.
 6. Do not inspect repositories, edit files, or answer the task on this control
    model. If Paseo tools are unavailable or every target fails, fail closed.
 
-Before delegation, say `Routing: <group> -> <provider/model>`.
+Before delegation, say `Routing: <group> -> <provider/model> · account <choice>`.
 End every final response with exactly:
-`Routed: <actual provider/model> · Paseo agent <id> — <short reason>`
+`Routed: <actual provider/model> · account <actual-or-policy-choice> · Paseo agent <id> — <short reason>`
 If no Paseo child ran, use:
 `Routed: none — routing failed; no answer model ran`
 EOF
@@ -1747,6 +1752,20 @@ try: print(json.load(open(sys.argv[1])).get("controllerProvider") or "claude-aut
 except Exception: print("claude-auto")
 PY
 )"
+aa_account="\$(python3 - "\$aa_config" <<'PY'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+    print(data.get("controllerAccount") or ("auto" if data.get("controllerProvider") == "claude-auto" else "primary"))
+except Exception: print("auto")
+PY
+)"
+aa_config_dir="\$(python3 - "\$aa_config" <<'PY'
+import json, sys
+try: print(json.load(open(sys.argv[1])).get("controllerConfigDir") or "")
+except Exception: print("")
+PY
+)"
 aa_model="\$(python3 - "\$aa_config" <<'PY'
 import json, sys
 try: print(json.load(open(sys.argv[1])).get("controllerModel") or "claude-fable-5")
@@ -1759,6 +1778,10 @@ case "\$aa_controller" in
   *) echo "agent-link: unsupported AgentRouter controller '\$aa_controller'" >&2; exit 75 ;;
 esac
 [ -x "\$aa_command" ] || { echo "agent-link: AgentRouter controller '\$aa_controller' is unavailable" >&2; exit 75; }
+if [ "\$aa_account" != auto ] && [ "\$aa_account" != primary ]; then
+  [ -d "\$aa_config_dir" ] || { echo "agent-link: AgentRouter account '\$aa_account' is unavailable" >&2; exit 75; }
+  export CLAUDE_CONFIG_DIR="\$aa_config_dir"
+fi
 # Paseo diagnostics call these directly. They do not launch an agent and must
 # not acquire a routing lock or fire a recovery probe.
 case "\${1:-}" in
@@ -2633,7 +2656,7 @@ cmd_auto() { # write auto launchers and print the provider snippet
 Point ONE provider at each launcher and it spreads new agents across your
 accounts automatically (health gate, priority groups, then least-recently-used).
 
-Paseo — ~/.paseo/config.json under agents.providers (restart the daemon after):
+Paseo — ~/.paseo/config.json under agents.providers (then reload the plugin):
 
   "claude-auto": {
     "extends": "claude",

@@ -1,5 +1,5 @@
 import type { PluginTheme } from "@getpaseo/plugin";
-import React, { createContext, useContext, useMemo, useState } from "react";
+import React, { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Clipboard, Image, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 
 /**
@@ -79,7 +79,7 @@ const WARNING = { dark: "#e0a33e", light: "#a16207" };
 
 export type Tokens = ReturnType<typeof tokens>;
 
-export function tokens(theme: PluginTheme, compact: boolean) {
+export function tokens(theme: PluginTheme, compact: boolean, platform: "ios" | "android" | "web" = "web") {
   const dark = isDarkSurface(theme.colors.surface0);
   const ink = dark ? "#ffffff" : "#000000";
   const colors = theme.colors as PluginTheme["colors"] & Partial<{
@@ -144,7 +144,12 @@ export function tokens(theme: PluginTheme, compact: boolean) {
     },
     space: { xs: 4, sm: 8, md: 12, lg: 16, xl: 24, indent: 18 },
     radius: { sm: 6, md: 10, pill: 999 },
-    control: { min: compact ? 40 : 28, hit: { top: 6, bottom: 6, left: 6, right: 6 } },
+    // Native clients need real platform-sized targets. Web keeps the denser
+    // desktop rhythm, while hitSlop still protects its smallest controls.
+    control: {
+      min: platform === "android" ? 48 : platform === "ios" || compact ? 44 : 32,
+      hit: { top: 6, bottom: 6, left: 6, right: 6 },
+    },
     maxWidth: 1100,
   };
 }
@@ -161,8 +166,8 @@ export function useTokens(): Tokens {
   return value;
 }
 
-export function useUi(theme: PluginTheme, compact: boolean): Tokens {
-  return useMemo(() => tokens(theme, compact), [theme, compact]);
+export function useUi(theme: PluginTheme, compact: boolean, platform: "ios" | "android" | "web" = "web"): Tokens {
+  return useMemo(() => tokens(theme, compact, platform), [theme, compact, platform]);
 }
 
 // ---------------------------------------------------------------- status map
@@ -247,7 +252,7 @@ export function Section({ title, trailing, children }: { title?: string; trailin
     <View style={{ gap: t.space.sm }}>
       {title ? (
         <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: t.space.sm }}>
-          <Text style={t.text.label}>{title.toUpperCase()}</Text>
+          <Text style={t.text.label}>{title}</Text>
           {trailing}
         </View>
       ) : null}
@@ -366,6 +371,7 @@ export function Row({
   return (
     <Pressable
       accessibilityRole="button"
+      accessibilityLabel={typeof title === "string" ? `${title}${typeof subtitle === "string" ? `. ${subtitle}` : ""}` : undefined}
       accessibilityState={{ selected: Boolean(selected) }}
       onPress={onPress}
       style={({ pressed }) => [style, pressed ? { backgroundColor: alpha(t.color.muted, 0.1) } : null]}
@@ -535,6 +541,7 @@ export function Segmented<T extends string>({
           <Pressable
             key={option.value}
             accessibilityRole="tab"
+            accessibilityLabel={option.label}
             accessibilityState={{ selected: active, disabled: Boolean(option.disabled) }}
             disabled={option.disabled}
             onPress={() => onChange(option.value)}
@@ -678,6 +685,9 @@ export function ComboBox({
           {matches.map((option, index) => (
             <Pressable
               key={option.value}
+              accessibilityRole="button"
+              accessibilityLabel={`${option.label}${option.description ? `. ${option.description}` : ""}`}
+              accessibilityState={{ disabled: Boolean(option.disabled), selected: option.value === value }}
               disabled={option.disabled}
               onPress={() => {
                 onChange(option.value);
@@ -686,6 +696,8 @@ export function ComboBox({
               style={({ pressed }) => ({
                 paddingVertical: t.compact ? 10 : 7,
                 paddingHorizontal: 10,
+                minHeight: t.control.min,
+                justifyContent: "center",
                 borderTopWidth: index === 0 ? 0 : 1,
                 borderTopColor: t.color.borderSubtle,
                 backgroundColor: pressed ? t.color.accentWash : option.value === value ? t.color.surface0 : "transparent",
@@ -818,10 +830,14 @@ export function ErrorText({ children }: { children: string }) {
 export function Disclosure({ title, children, open: initial = false }: { title: string; children: React.ReactNode; open?: boolean }) {
   const t = useTokens();
   const [open, setOpen] = useState(initial);
+  useEffect(() => {
+    if (initial) setOpen(true);
+  }, [initial]);
   return (
     <View style={{ gap: t.space.sm }}>
       <Pressable
         accessibilityRole="button"
+        accessibilityLabel={title}
         accessibilityState={{ expanded: open }}
         onPress={() => setOpen((value) => !value)}
         hitSlop={t.control.hit}

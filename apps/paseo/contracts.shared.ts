@@ -69,14 +69,27 @@ export const scan = defineRpc({
     recentRoutes: z.array(RouteEventSchema),
     autoRouters: z.array(AutoRouterSchema),
     agentAuthInstalled: z.boolean(),
-    needsRestart: z.boolean(),
   }),
 });
 
 export const RouterTargetSchema = z.object({
+  /** Logical Paseo provider. Claude/Codex account choice is kept separate. */
   provider: z.string().regex(/^[a-z][a-z0-9-]*$/),
   model: z.string().min(1).max(160),
+  /** auto, primary, a saved pool key, or provider for single-account providers. */
+  account: z.string().min(1).max(320).default("provider"),
+  /** Concrete provider ID AgentRouter passes to Paseo after account resolution. */
+  resolvedProvider: z.string().regex(/^[a-z][a-z0-9-]*$/).optional(),
   available: z.boolean().nullable().optional(),
+});
+
+export const RouterAccountOptionSchema = z.object({
+  provider: z.enum(["claude", "codex"]),
+  id: z.string(),
+  label: z.string(),
+  description: z.string(),
+  available: z.boolean(),
+  resolvedProvider: z.string(),
 });
 
 export const RouterTargetGroupSchema = z.object({
@@ -95,15 +108,10 @@ export const RouterProviderStatusSchema = z.object({
   baseProvider: z.string(),
   baseModel: z.string(),
   controllerProvider: z.enum(["claude-auto", "claude"]),
+  controllerAccount: z.string(),
   controllerModel: z.string(),
-  controllerOptions: z.array(
-    z.object({
-      provider: z.enum(["claude-auto", "claude"]),
-      label: z.string(),
-      available: z.boolean(),
-      models: z.array(z.object({ id: z.string(), label: z.string() })),
-    }),
-  ),
+  controllerAccountOptions: z.array(RouterAccountOptionSchema),
+  controllerModels: z.array(z.object({ id: z.string(), label: z.string() })),
   providerOptions: z.array(
     z.object({
       id: z.string(),
@@ -111,6 +119,7 @@ export const RouterProviderStatusSchema = z.object({
       available: z.boolean(),
     }),
   ),
+  accountOptions: z.array(RouterAccountOptionSchema),
   targetGroups: z.array(RouterTargetGroupSchema),
   userRules: z.string(),
   message: z.string(),
@@ -132,7 +141,7 @@ export const routerInstall = defineRpc({
 export const routerConfigure = defineRpc({
   name: "agent-link.router-configure",
   input: z.object({
-    controllerProvider: z.enum(["claude-auto", "claude"]),
+    controllerAccount: z.string().min(1).max(320),
     controllerModel: z.string().min(1).max(160),
     targetGroups: z.array(RouterTargetGroupSchema).min(1).max(12),
     userRules: z.string().max(12_000),
@@ -168,6 +177,7 @@ export const routerTrace = defineRpc({
   input: z.object({ agentId: z.string().min(1) }),
   output: z.object({
     isAgentRouter: z.boolean(),
+    canMoveAccount: z.boolean(),
     summary: z.string(),
     nodes: z.array(RouterTraceNodeSchema),
   }),
@@ -179,6 +189,7 @@ export const agentContinue = defineRpc({
     agentId: z.string().min(1),
     provider: z.string().regex(/^[a-z][a-z0-9-]*$/),
     model: z.string().min(1).max(160),
+    account: z.string().min(1).max(320).default("provider"),
     thinking: z.string().min(1).max(40),
   }),
   output: z.object({
@@ -191,7 +202,7 @@ export const agentContinue = defineRpc({
 export const wireAuto = defineRpc({
   name: "agent-link.wire-auto",
   input: z.object({ provider: z.enum(["claude", "codex"]) }),
-  output: z.object({ ok: z.boolean(), message: z.string() }),
+  output: z.object({ ok: z.boolean(), providerId: z.string().nullable(), message: z.string() }),
 });
 
 export const addAccount = defineRpc({
@@ -229,7 +240,7 @@ export const wireProvider = defineRpc({
     email: z.string(),
     dir: z.string(),
   }),
-  output: z.object({ providerId: z.string(), needsRestart: z.boolean() }),
+  output: z.object({ providerId: z.string() }),
 });
 
 export const diagnoseProvider = defineRpc({
@@ -345,6 +356,7 @@ export const ProviderHeartbeatSchema = z.object({
   available: z.boolean(),
   kind: z.enum(["pooled", "single"]),
   quotaTelemetry: z.boolean(),
+  autoProviderId: z.string().nullable(),
   aliases: z.array(z.string()),
   summary: z.string(),
 });

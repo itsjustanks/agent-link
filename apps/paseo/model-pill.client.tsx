@@ -38,12 +38,13 @@ export function AgentModelPill({ theme, layout, agentId }: PluginComposerPillPro
   const [open, setOpen] = useState(false);
   const identity = resolveRuntimeModel(agent?.provider, agent?.model);
   const isRouter = identity.provider === "agent-router";
+  const agentActive = agent?.status === "running" || agent?.status === "initializing";
   const readTrace = useRpc(routerTrace);
   const trace = useQuery({
     queryKey: ["agent-link", "model-pill", agentId],
     queryFn: () => readTrace({ agentId }),
     enabled: isRouter || open,
-    refetchInterval: isRouter || open ? 15_000 : false,
+    refetchInterval: open ? 15_000 : isRouter && agentActive ? 5_000 : false,
   });
   const answer = activeAnswerModel(trace.data?.nodes ?? []);
   const answerIdentity = answer ? resolveRuntimeModel(answer.provider, answer.model) : null;
@@ -76,10 +77,13 @@ export function AgentModelPill({ theme, layout, agentId }: PluginComposerPillPro
         agentId={agentId}
         agentStatus={agent?.status ?? "idle"}
         provider={identity.provider}
-        model={identity.model}
+        model={isRouter && answerIdentity ? answerIdentity.model : identity.model}
+        isRouter={isRouter}
+        canMoveAccount={trace.data?.canMoveAccount ?? false}
         currentAccount={answer?.account ?? trace.data?.nodes.find((node) => node.account)?.account ?? ""}
         theme={theme}
         compact={layout.compact}
+        platform={layout.platform}
       />
     </>
   );
@@ -107,9 +111,12 @@ function AccountModal({
   agentStatus,
   provider,
   model,
+  isRouter,
+  canMoveAccount,
   currentAccount,
   theme,
   compact,
+  platform,
 }: {
   open: boolean;
   onOpenChange(open: boolean): void;
@@ -117,11 +124,14 @@ function AccountModal({
   agentStatus: string;
   provider: string;
   model: string;
+  isRouter: boolean;
+  canMoveAccount: boolean;
   currentAccount: string;
   theme: PluginComposerPillProps["theme"];
   compact: boolean;
+  platform: PluginComposerPillProps["layout"]["platform"];
 }) {
-  const t = useUi(theme, compact);
+  const t = useUi(theme, compact, platform);
   const toast = useToast();
   const queryClient = useQueryClient();
   const callCapacity = useRpc(accountCapacity);
@@ -133,13 +143,14 @@ function AccountModal({
   const callContinue = useRpc(agentContinue);
   const [targetProvider, setTargetProvider] = useState("");
   const [targetModel, setTargetModel] = useState("");
+  const [targetAccount, setTargetAccount] = useState("provider");
   const family = provider.replace(/-auto$/, "");
   const pooled = family === "claude" || family === "codex";
   const capacity = useQuery({
     queryKey: ["agent-link", "composer-capacity"],
     queryFn: () => callCapacity({}),
-    enabled: open,
-    refetchInterval: open ? 30_000 : false,
+    enabled: open && !isRouter,
+    refetchInterval: open && !isRouter ? 30_000 : false,
   });
   const limits = useQuery({
     queryKey: ["agent-link", "limits"],
@@ -149,19 +160,19 @@ function AccountModal({
   const providers = useQuery({
     queryKey: ["agent-link", "composer-providers"],
     queryFn: () => callProviders({}),
-    enabled: open,
-    refetchInterval: open ? 30_000 : false,
+    enabled: open && !isRouter,
+    refetchInterval: open && !isRouter ? 30_000 : false,
   });
   const providerOptions = useMemo(
-    () => (providers.data?.providers ?? []).filter((entry) => entry.available).map((entry) => {
-      const dynamic = entry.kind === "pooled" && entry.aliases.includes(`${entry.id}-auto`);
+    () => (providers.data?.providers ?? []).filter((entry) => entry.available && (entry.id !== family || !canMoveAccount)).map((entry) => {
+      const dynamic = entry.kind === "pooled" && Boolean(entry.autoProviderId);
       return {
-        value: dynamic ? `${entry.id}-auto` : entry.id,
-        label: dynamic ? `${entry.label} · dynamic accounts` : entry.label,
+        value: entry.id,
+        label: dynamic ? `${entry.label} · account choice` : entry.label,
         description: entry.summary,
       };
     }),
-    [providers.data?.providers],
+    [canMoveAccount, family, providers.data?.providers],
   );
   useEffect(() => {
     if (!open || providerOptions.length === 0) return;
@@ -171,7 +182,7 @@ function AccountModal({
   const models = useQuery({
     queryKey: ["agent-link", "composer-models", targetProvider],
     queryFn: () => callModels({ provider: targetProvider }),
-    enabled: open && Boolean(targetProvider),
+    enabled: open && !isRouter && Boolean(targetProvider),
   });
   const modelOptions = useMemo(
     () => (models.data?.models ?? []).map((entry) => ({ value: entry.id, label: entry.label, description: entry.description })),
@@ -183,9 +194,35 @@ function AccountModal({
     setTargetModel(modelOptions[0]!.value);
   }, [modelOptions, open, targetModel]);
   const entries = useMemo(
-    () => (capacity.data?.accounts ?? []).filter((entry) => !pooled || entry.provider === family),
+    () => pooled ? (capacity.data?.accounts ?? []).filter((entry) => entry.provider === family) : [],
     [capacity.data?.accounts, family, pooled],
   );
+  const targetPooled = targetProvider === "claude" || targetProvider === "codex";
+  const targetAccountOptions = useMemo(() => {
+    if (!targetPooled) return [];
+    const matching = (capacity.data?.accounts ?? []).filter((entry) => entry.provider === targetProvider);
+    return [
+      {
+        value: "auto",
+        label: "Automatic healthy account",
+        description: "Uses health, priority and least recent use",
+      },
+      ...matching.map((entry) => ({
+        value: entry.poolKey,
+        label: entry.isPrimary ? `${entry.email} · primary` : entry.email,
+        description: accountStatus(entry).label,
+        disabled: entry.state === "held" || entry.state === "parked",
+      })),
+    ];
+  }, [capacity.data?.accounts, targetPooled, targetProvider]);
+  useEffect(() => {
+    if (!open) return;
+    if (!targetPooled) {
+      setTargetAccount("provider");
+      return;
+    }
+    if (!targetAccountOptions.some((entry) => entry.value === targetAccount)) setTargetAccount("auto");
+  }, [open, targetAccount, targetAccountOptions, targetPooled]);
   const currentEvent = limits.data?.events.find((entry) => entry.agentId === agentId);
   const prefer = useMutation({
     mutationFn: (entry: CapacityAccount) => callPreference({ provider: entry.provider, email: entry.poolKey, preference: "preferred" }),
@@ -210,6 +247,7 @@ function AccountModal({
       agentId,
       provider: targetProvider,
       model: targetModel,
+      account: targetAccount,
       thinking: targetProvider.startsWith("codex") && targetModel === "gpt-5.6-sol" ? "ultra" : "high",
     }),
     onSuccess: (result) => {
@@ -222,7 +260,7 @@ function AccountModal({
 
   return (
     <Modal
-      title="Model and account"
+      title={isRouter ? "AgentRouter route" : "Model and account"}
       icon={<Icon name="Route" size={18} color={theme.colors.foreground} />}
       open={open}
       onOpenChange={onOpenChange}
@@ -231,22 +269,33 @@ function AccountModal({
         <TokensProvider value={t}>
           <ScrollView style={{ maxHeight: 620 }} contentContainerStyle={{ padding: 16, gap: 12 }}>
             <View style={{ gap: 4 }}>
-              <Text style={t.text.heading}>{friendlyModelName(model)}</Text>
+              <Text style={t.text.heading}>{isRouter ? `Answered by ${friendlyModelName(model)}` : friendlyModelName(model)}</Text>
               <Text style={t.text.caption}>
-                {currentAccount ? `Current sign-in: ${currentAccount}` : "The current sign-in has not been reported yet."}
+                {currentAccount
+                  ? `${isRouter ? "Answering" : "Current"} sign-in: ${currentAccount}`
+                  : "The sign-in has not been reported yet."}
               </Text>
-              <Text style={t.text.caption}>
-                Running turns stay on their account. A move copies the provider session, then starts the next turn on the selected sign-in.
-              </Text>
+              {!isRouter && pooled ? (
+                <Text style={t.text.caption}>
+                  {canMoveAccount
+                    ? "Running turns stay pinned. After a turn stops, this routed chat can move accounts in the same tab."
+                    : "This chat has a fixed provider identity. Changing its account or provider creates a linked tab."}
+                </Text>
+              ) : null}
             </View>
-            {!pooled ? (
+            {isRouter ? (
               <View style={{ padding: 12, borderRadius: t.radius.md, backgroundColor: t.color.surface2, gap: 4 }}>
-                <Text style={t.text.bodyStrong}>Account switching is managed by AgentRouter</Text>
-                <Text style={t.text.caption}>Open a Claude or Codex Dynamic Agent Link chat to choose one of those account pools directly.</Text>
+                <Text style={t.text.bodyStrong}>One control tab, different answer routes</Text>
+                <Text style={t.text.caption}>AgentRouter can choose another provider, model and account on the next turn. Name one in your message to override its saved route.</Text>
+              </View>
+            ) : !pooled ? (
+              <View style={{ padding: 12, borderRadius: t.radius.md, backgroundColor: t.color.surface2, gap: 4 }}>
+                <Text style={t.text.bodyStrong}>This provider has one visible sign-in</Text>
+                <Text style={t.text.caption}>AgentLink can move native sessions between saved accounts only for Claude Code and Codex.</Text>
               </View>
             ) : null}
-            {capacity.isLoading ? <Text style={t.text.caption}>Reading account limits…</Text> : null}
-            {capacity.error ? <Text style={[t.text.caption, { color: t.color.danger }]}>{String(capacity.error)}</Text> : null}
+            {pooled && capacity.isLoading ? <Text style={t.text.caption}>Reading account limits…</Text> : null}
+            {pooled && capacity.error ? <Text style={[t.text.caption, { color: t.color.danger }]}>{String(capacity.error)}</Text> : null}
             {entries.map((entry) => {
               const status = accountStatus(entry);
               const isCurrent = entry.poolKey === currentAccount || entry.email === currentAccount;
@@ -279,13 +328,13 @@ function AccountModal({
                         loading={prefer.isPending}
                         onPress={() => prefer.mutate(entry)}
                       />
-                      {pooled && !unavailable && agentStatus !== "running" && agentStatus !== "initializing" ? (
+                      {pooled && canMoveAccount && !unavailable && agentStatus !== "running" && agentStatus !== "initializing" ? (
                         <ConfirmButton
                           label="Move chat here"
                           confirmLabel="Confirm move & continue"
                           onConfirm={() => move.mutate(entry)}
                         />
-                      ) : pooled ? (
+                      ) : pooled && canMoveAccount ? (
                         <Button
                           label={agentStatus === "running" || agentStatus === "initializing" ? "Wait for current turn" : "Account unavailable"}
                           disabled
@@ -297,10 +346,10 @@ function AccountModal({
                 </View>
               );
             })}
-            <View style={{ padding: 12, borderRadius: t.radius.md, backgroundColor: t.color.surface2, gap: 10 }}>
+            {!isRouter ? <View style={{ padding: 12, borderRadius: t.radius.md, backgroundColor: t.color.surface2, gap: 10 }}>
               <View style={{ gap: 4 }}>
-                <Text style={t.text.bodyStrong}>Continue in another provider</Text>
-                <Text style={t.text.caption}>Creates a linked Paseo agent in this workspace. The original chat stays intact as history.</Text>
+                <Text style={t.text.bodyStrong}>Continue in a linked tab</Text>
+                <Text style={t.text.caption}>Choose another provider, or another account when this chat is fixed. The original stays intact as history.</Text>
               </View>
               <ComboBox
                 label="Provider"
@@ -308,11 +357,23 @@ function AccountModal({
                 onChange={(value) => {
                   setTargetProvider(value);
                   setTargetModel("");
+                  setTargetAccount(value === "claude" || value === "codex" ? "auto" : "provider");
                 }}
                 options={providerOptions}
                 placeholder="Choose provider"
                 allowCustom={false}
               />
+              {targetPooled ? (
+                <ComboBox
+                  label="Account"
+                  value={targetAccount}
+                  onChange={setTargetAccount}
+                  options={targetAccountOptions}
+                  placeholder="Choose account routing"
+                  allowCustom={false}
+                  hint="Automatic keeps failover; a named account pins the linked continuation."
+                />
+              ) : null}
               <ComboBox
                 label="Model"
                 value={targetModel}
@@ -331,12 +392,12 @@ function AccountModal({
                 />
               ) : (
                 <Button
-                  label={agentStatus === "running" || agentStatus === "initializing" ? "Wait for current turn" : "Choose provider and model"}
+                  label={agentStatus === "running" || agentStatus === "initializing" ? "Wait for current turn" : "Choose a route"}
                   disabled
                   onPress={() => {}}
                 />
               )}
-            </View>
+            </View> : null}
             {currentEvent ? (
               <View style={{ padding: 12, borderRadius: t.radius.md, backgroundColor: t.color.warningWash, gap: 4 }}>
                 <Text style={t.text.bodyStrong}>Recovery</Text>

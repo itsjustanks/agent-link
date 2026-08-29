@@ -41,10 +41,6 @@ const EXTERNAL_ROOTS: Array<{ provider: "claude" | "codex"; root: string }> = [
   { provider: "codex", root: join(HOME, ".codex-accounts") },
 ];
 
-// Set after a provider is wired; Paseo builds its provider registry at startup,
-// so new providers appear only after a daemon restart.
-let needsRestart = false;
-
 // ---------------------------------------------------------------- fs helpers
 
 function listDirs(root: string): string[] {
@@ -188,6 +184,7 @@ type ProviderOverrides = Record<
     env?: Record<string, string>;
     enabled?: boolean;
     label?: string;
+    description?: string;
     command?: string[];
     models?: Array<{ id: string; label?: string; description?: string; isDefault?: boolean }>;
   } | undefined
@@ -203,12 +200,36 @@ async function providerOverrides(paseo: PluginHandlerContext["paseo"]): Promise<
   return (shape.providers ?? shape.agents?.providers ?? {}) as ProviderOverrides;
 }
 
+async function refreshProviders(paseo: PluginHandlerContext["paseo"], providers: string[]): Promise<boolean> {
+  if (providers.length === 0) return true;
+  try {
+    await paseo.providers.refresh({ providers: [...new Set(providers)] } as never);
+    await paseo.providers.waitForReady({ timeoutMs: 20_000 } as never);
+    return true;
+  } catch {
+    // The persisted config is still valid. A later catalog refresh or Paseo
+    // reload will pick it up; never restart the daemon and kill live agents.
+    return false;
+  }
+}
+
 function providerIdForDir(overrides: ProviderOverrides, provider: "claude" | "codex", dir: string): string | null {
   const envVar = envVarFor(provider);
   for (const [id, override] of Object.entries(overrides)) {
     if (override?.env?.[envVar] === dir) return id;
   }
   return null;
+}
+
+function accountForProvider(provider: string, overrides: ProviderOverrides): string {
+  if (provider === "claude") return claudeAccountEmail(HOME) || "primary";
+  if (provider === "codex") return codexAccountEmail(join(HOME, ".codex")) || "primary";
+  const override = overrides[provider];
+  const claudeDir = override?.env?.CLAUDE_CONFIG_DIR;
+  if (claudeDir) return claudeAccountEmail(claudeDir) || basename(claudeDir);
+  const codexDir = override?.env?.CODEX_HOME;
+  if (codexDir) return codexAccountEmail(codexDir) || basename(codexDir);
+  return "Provider-managed sign-in (not exposed)";
 }
 
 function slugForEmail(provider: string, email: string): string {
@@ -543,7 +564,6 @@ export async function handleScan(_input: Record<string, never>, { paseo }: Plugi
     recentRoutes: recentRouteEvents(),
     autoRouters,
     agentAuthInstalled: agentLinkInstalled(),
-    needsRestart,
   };
 }
 
@@ -552,10 +572,12 @@ export async function handleWireAuto({ provider }: { provider: "claude" | "codex
   if (!existsSync(launcher)) {
     return {
       ok: false,
+      providerId: null,
       message: `Automatic account selection is not ready. Run 'agent-link auto' in a terminal.`,
     };
   }
-  const providerId = `${provider}-auto`;
+  const overrides = await providerOverrides(paseo);
+  const providerId = autoWiredId(overrides, provider) ?? `${provider}-auto`;
   await paseo.config.patch({
     agents: {
       providers: {
@@ -568,34 +590,65 @@ export async function handleWireAuto({ provider }: { provider: "claude" | "codex
       },
     },
   } as never);
-  needsRestart = true;
-  return { ok: true, message: `Installed '${providerId}'. Restart Paseo when no chat is running to make it available.` };
+  const refreshed = await refreshProviders(paseo, [providerId]);
+  return {
+    ok: true,
+    providerId,
+    message: refreshed
+      ? `Installed '${providerId}'. It is available for new chats.`
+      : `Installed '${providerId}'. Use Paseo reload if it does not appear yet.`,
+  };
 }
 
 const ROUTER_PROVIDER_ID = "agent-router";
 const ROUTER_VIRTUAL_MODEL = "agent-router-auto";
 type RouterController = "claude-auto" | "claude";
+type RouterTarget = {
+  provider: string;
+  model: string;
+  account: string;
+  resolvedProvider: string;
+};
+type RouterTargetInput = Omit<RouterTarget, "resolvedProvider"> & {
+  resolvedProvider?: string;
+  available?: boolean | null;
+};
 type RouterTargetGroup = {
   name: string;
   purpose: string;
   selector: "in_order";
-  targets: Array<{ provider: string; model: string }>;
+  targets: RouterTarget[];
 };
+type RouterTargetGroupInput = Omit<RouterTargetGroup, "targets"> & { targets: RouterTargetInput[] };
 type RouterConfig = {
   controllerProvider: RouterController;
+  controllerAccount: string;
+  controllerConfigDir: string;
   controllerModel: string;
   targetGroups: RouterTargetGroup[];
 };
+const autoTarget = (provider: "claude" | "codex", model: string): RouterTarget => ({
+  provider,
+  model,
+  account: "auto",
+  resolvedProvider: `${provider}-auto`,
+});
+const providerTarget = (provider: string, model: string): RouterTarget => ({
+  provider,
+  model,
+  account: "provider",
+  resolvedProvider: provider,
+});
 const ROUTER_TARGET_GROUPS: RouterTargetGroup[] = [
   {
     name: "fast",
     purpose: "Explanations, summaries, formatting and tiny edits",
     selector: "in_order" as const,
     targets: [
-      { provider: "claude-auto", model: "claude-haiku-4-5" },
-      { provider: "codex-auto", model: "gpt-5.6-luna" },
-      { provider: "kimi", model: "kimi-code/kimi-for-coding-highspeed" },
-      { provider: "grok", model: "grok-4.5" },
+      autoTarget("claude", "claude-haiku-4-5"),
+      autoTarget("codex", "gpt-5.6-luna"),
+      providerTarget("kimi", "kimi-code/kimi-for-coding-highspeed"),
+      providerTarget("grok", "grok-4.5"),
     ],
   },
   {
@@ -603,9 +656,9 @@ const ROUTER_TARGET_GROUPS: RouterTargetGroup[] = [
     purpose: "Product and implementation plans",
     selector: "in_order" as const,
     targets: [
-      { provider: "claude-auto", model: "claude-fable-5" },
-      { provider: "codex-auto", model: "gpt-5.6-terra" },
-      { provider: "grok", model: "grok-4.6" },
+      autoTarget("claude", "claude-fable-5"),
+      autoTarget("codex", "gpt-5.6-terra"),
+      providerTarget("grok", "grok-4.6"),
     ],
   },
   {
@@ -613,9 +666,9 @@ const ROUTER_TARGET_GROUPS: RouterTargetGroup[] = [
     purpose: "Architecture, UI/UX, audit and final review",
     selector: "in_order" as const,
     targets: [
-      { provider: "claude-auto", model: "claude-opus-5" },
-      { provider: "grok", model: "grok-4.6" },
-      { provider: "codex-auto", model: "gpt-5.6-sol" },
+      autoTarget("claude", "claude-opus-5"),
+      providerTarget("grok", "grok-4.6"),
+      autoTarget("codex", "gpt-5.6-sol"),
     ],
   },
   {
@@ -623,20 +676,22 @@ const ROUTER_TARGET_GROUPS: RouterTargetGroup[] = [
     purpose: "Multi-file implementation, debugging, migrations and refactors",
     selector: "in_order" as const,
     targets: [
-      { provider: "codex-auto", model: "gpt-5.6-sol" },
-      { provider: "kimi", model: "kimi-code/k3" },
-      { provider: "claude-auto", model: "claude-opus-5" },
+      autoTarget("codex", "gpt-5.6-sol"),
+      providerTarget("kimi", "kimi-code/k3"),
+      autoTarget("claude", "claude-opus-5"),
     ],
   },
   {
     name: "browser",
     purpose: "Browser-driving verification",
     selector: "in_order" as const,
-    targets: [{ provider: "codex-auto", model: "gpt-5.6-sol" }],
+    targets: [autoTarget("codex", "gpt-5.6-sol")],
   },
 ];
 const ROUTER_DEFAULT_CONFIG: RouterConfig = {
   controllerProvider: "claude-auto",
+  controllerAccount: "auto",
+  controllerConfigDir: "",
   controllerModel: "claude-fable-5",
   targetGroups: ROUTER_TARGET_GROUPS,
 };
@@ -653,6 +708,10 @@ function currentRouterConfig(): RouterConfig {
   const raw = readJson(routerConfigPath());
   if (!raw) return ROUTER_DEFAULT_CONFIG;
   const controllerProvider = raw.controllerProvider === "claude" ? "claude" : "claude-auto";
+  const controllerAccount = typeof raw.controllerAccount === "string" && raw.controllerAccount
+    ? raw.controllerAccount
+    : controllerProvider === "claude-auto" ? "auto" : "primary";
+  const controllerConfigDir = typeof raw.controllerConfigDir === "string" ? raw.controllerConfigDir : "";
   const controllerModel = typeof raw.controllerModel === "string" && raw.controllerModel ? raw.controllerModel : ROUTER_DEFAULT_CONFIG.controllerModel;
   const groups = Array.isArray(raw.targetGroups) ? raw.targetGroups : [];
   const targetGroups = groups.flatMap((entry): RouterTargetGroup[] => {
@@ -662,13 +721,34 @@ function currentRouterConfig(): RouterConfig {
     const targets = group.targets.flatMap((item) => {
       if (!item || typeof item !== "object") return [];
       const target = item as Record<string, unknown>;
-      return typeof target.provider === "string" && typeof target.model === "string"
-        ? [{ provider: target.provider, model: target.model }]
-        : [];
+      if (typeof target.provider !== "string" || typeof target.model !== "string") return [];
+      const legacyProvider = target.provider;
+      const migratedProvider = legacyProvider === "claude-auto"
+        ? "claude"
+        : legacyProvider === "codex-auto"
+          ? "codex"
+          : legacyProvider;
+      const account = typeof target.account === "string" && target.account
+        ? target.account
+        : legacyProvider.endsWith("-auto")
+          ? "auto"
+          : legacyProvider === "claude" || legacyProvider === "codex"
+            ? "primary"
+            : "provider";
+      const resolvedProvider = typeof target.resolvedProvider === "string" && target.resolvedProvider
+        ? target.resolvedProvider
+        : legacyProvider;
+      return [{ provider: migratedProvider, model: target.model, account, resolvedProvider }];
     });
     return targets.length > 0 ? [{ name: group.name, purpose: group.purpose, selector: "in_order", targets }] : [];
   });
-  return { controllerProvider, controllerModel, targetGroups: targetGroups.length > 0 ? targetGroups : ROUTER_TARGET_GROUPS };
+  return {
+    controllerProvider,
+    controllerAccount,
+    controllerConfigDir,
+    controllerModel,
+    targetGroups: targetGroups.length > 0 ? targetGroups : ROUTER_TARGET_GROUPS,
+  };
 }
 
 function currentRouterRules(): string {
@@ -683,6 +763,91 @@ function agentLinkBinary(): string | null {
   return searchPath()
     .flatMap((directory) => [join(directory, "agent-link"), join(directory, "agent-auth")])
     .find(existsSync) ?? null;
+}
+
+type RouterAccountOption = {
+  provider: "claude" | "codex";
+  id: string;
+  label: string;
+  description: string;
+  available: boolean;
+  resolvedProvider: string;
+};
+
+function routerAccountOptions(overrides: ProviderOverrides, availability: Map<string, boolean>): RouterAccountOption[] {
+  const slots = collectSlots();
+  const options: RouterAccountOption[] = [];
+  for (const provider of ["claude", "codex"] as const) {
+    const providerReady = availability.get(provider) !== false;
+    const primaryDir = provider === "claude" ? HOME : join(HOME, ".codex");
+    const primaryEmail = provider === "claude" ? claudeAccountEmail(HOME) : codexAccountEmail(primaryDir);
+    const familySlots = slots.filter((slot) => slot.provider === provider);
+    const primaryAvailable = providerReady && Boolean(primaryEmail) && !activelyParked(provider, "primary") && cooldownUntil(provider, "primary") === 0;
+    const slotAvailable = (slot: (typeof familySlots)[number]) =>
+      providerReady && slot.loggedIn && !slot.wrongAccount && !activelyParked(provider, slot.email) && cooldownUntil(provider, slot.email) === 0;
+    const autoId = autoWiredId(overrides, provider) ?? `${provider}-auto`;
+    const anyAvailable = primaryAvailable || familySlots.some(slotAvailable);
+    options.push({
+      provider,
+      id: "auto",
+      label: "Automatic healthy account",
+      description: anyAvailable
+        ? "Chooses by health, priority and least recent use"
+        : "No healthy account is currently available",
+      available: existsSync(autoLauncherPath(provider)) && availability.get(autoId) !== false && anyAvailable,
+      resolvedProvider: autoId,
+    });
+    options.push({
+      provider,
+      id: "primary",
+      label: primaryEmail ? `${primaryEmail} · primary` : "Primary sign-in",
+      description: primaryAvailable ? "Available now" : primaryEmail ? "Cooling down or blocked" : "Not signed in",
+      available: primaryAvailable,
+      resolvedProvider: provider,
+    });
+    for (const slot of familySlots) {
+      const available = slotAvailable(slot);
+      options.push({
+        provider,
+        id: slot.email,
+        label: slot.actualEmail || slot.email,
+        description: slot.wrongAccount
+          ? `Folder is signed in as ${slot.actualEmail}`
+          : !slot.loggedIn
+            ? "Sign-in needed"
+            : available
+              ? "Available now · fixed to this account"
+              : parkReason(provider, slot.email) || "Cooling down or blocked",
+        available,
+        resolvedProvider: providerIdForDir(overrides, provider, slot.dir) ?? slugForEmail(provider, slot.email),
+      });
+    }
+  }
+  return options;
+}
+
+function logicalProviderOptions(
+  availability: Map<string, boolean>,
+  labels: Map<string, string>,
+  accounts: RouterAccountOption[],
+) {
+  const hidden = new Set(accounts.flatMap((entry) => entry.resolvedProvider === entry.provider ? [] : [entry.resolvedProvider]));
+  const options = [...availability.entries()]
+    .filter(([id]) => id !== ROUTER_PROVIDER_ID && !hidden.has(id) && id !== "claude-auto" && id !== "codex-auto")
+    .map(([id, available]) => ({ id, label: labels.get(id) ?? id, available }));
+  for (const provider of ["claude", "codex"] as const) {
+    const family = accounts.filter((entry) => entry.provider === provider);
+    const available = family.some((entry) => entry.available);
+    const existing = options.find((entry) => entry.id === provider);
+    if (existing) {
+      existing.available = available || existing.available;
+      existing.label = provider === "claude" ? "Claude Code" : "Codex";
+    } else {
+      options.push({ id: provider, label: provider === "claude" ? "Claude Code" : "Codex", available });
+    }
+  }
+  const rank = (id: string) => id === "claude" ? 0 : id === "codex" ? 1 : 2;
+  return options.sort((a, b) => rank(a.id) - rank(b.id) || Number(b.available) - Number(a.available) || a.label.localeCompare(b.label));
 }
 
 async function routerProviderStatus(paseo: PluginHandlerContext["paseo"], message = "") {
@@ -710,6 +875,10 @@ async function routerProviderStatus(paseo: PluginHandlerContext["paseo"], messag
   } catch {
     // Configured remains useful when an older daemon cannot report availability.
   }
+  const accountOptions = routerAccountOptions(overrides, availability);
+  const selectedController = accountOptions.find(
+    (entry) => entry.provider === "claude" && entry.id === config.controllerAccount,
+  );
   const installed = existsSync(launcherPath) && existsSync(rulesPath);
   const configured = Boolean(overrides[ROUTER_PROVIDER_ID]);
   return {
@@ -718,23 +887,20 @@ async function routerProviderStatus(paseo: PluginHandlerContext["paseo"], messag
     loaded,
     launcherPath,
     rulesPath,
-    baseProvider: config.controllerProvider === "claude-auto" ? "Claude · automatic sign-in" : "Claude · default sign-in",
+    baseProvider: selectedController?.label ?? (config.controllerProvider === "claude-auto" ? "Claude · automatic sign-in" : "Claude · default sign-in"),
     baseModel: config.controllerModel,
     controllerProvider: config.controllerProvider,
+    controllerAccount: config.controllerAccount,
     controllerModel: config.controllerModel,
-    controllerOptions: ([
-      { provider: "claude-auto", label: "Claude · choose an available sign-in", available: availability.get("claude-auto") === true, models: controllerModels },
-      { provider: "claude", label: "Claude · always use the default sign-in", available: availability.get("claude") === true, models: controllerModels },
-    ] satisfies Array<{ provider: RouterController; label: string; available: boolean; models: Array<{ id: string; label: string }> }>),
-    providerOptions: [...availability.entries()]
-      .filter(([id]) => id !== ROUTER_PROVIDER_ID)
-      .map(([id, available]) => ({ id, label: providerLabels.get(id) ?? providerLabel(id, overrides), available }))
-      .sort((a, b) => Number(b.available) - Number(a.available) || a.label.localeCompare(b.label)),
+    controllerAccountOptions: accountOptions.filter((entry) => entry.provider === "claude"),
+    controllerModels,
+    providerOptions: logicalProviderOptions(availability, providerLabels, accountOptions),
+    accountOptions,
     targetGroups: config.targetGroups.map((group) => ({
       ...group,
       targets: group.targets.map((target) => ({
         ...target,
-        available: availability.has(target.provider) ? availability.get(target.provider) ?? false : null,
+        available: availability.has(target.resolvedProvider) ? availability.get(target.resolvedProvider) ?? false : null,
       })),
     })),
     userRules: currentRouterRules(),
@@ -743,7 +909,7 @@ async function routerProviderStatus(paseo: PluginHandlerContext["paseo"], messag
       (loaded
         ? "AgentRouter is ready in Paseo's provider picker."
         : configured
-          ? "AgentRouter is saved. Reload Paseo to make it available."
+          ? "AgentRouter is saved. Refresh providers if it does not appear yet."
           : installed
             ? "The AgentRouter command is ready. Add it to Paseo's provider list."
             : "AgentRouter is not installed."),
@@ -785,8 +951,13 @@ export async function handleRouterInstall(_input: Record<string, never>, { paseo
         },
       },
     } as never);
-    needsRestart = true;
-    return routerProviderStatus(paseo, "AgentRouter installed. Reload Paseo, then choose AgentRouter and Automatic route.");
+    const refreshed = await refreshProviders(paseo, [ROUTER_PROVIDER_ID]);
+    return routerProviderStatus(
+      paseo,
+      refreshed
+        ? "AgentRouter is ready for new chats."
+        : "AgentRouter is installed. Use Paseo reload if it does not appear yet.",
+    );
   } catch (caught) {
     return routerProviderStatus(
       paseo,
@@ -797,9 +968,9 @@ export async function handleRouterInstall(_input: Record<string, never>, { paseo
 
 export async function handleRouterConfigure(
   input: {
-    controllerProvider: RouterController;
+    controllerAccount: string;
     controllerModel: string;
-    targetGroups: RouterTargetGroup[];
+    targetGroups: RouterTargetGroupInput[];
     userRules: string;
   },
   context: PluginHandlerContext,
@@ -807,13 +978,84 @@ export async function handleRouterConfigure(
   if (new Set(input.targetGroups.map((group) => group.name)).size !== input.targetGroups.length) {
     return routerProviderStatus(context.paseo, "Every work type needs a different name.");
   }
+  const overrides = await providerOverrides(context.paseo);
+  const slots = collectSlots();
+  const providerPatches: Record<string, NonNullable<ProviderOverrides[string]>> = {};
+  const resolveTarget = (target: RouterTargetInput): RouterTarget => {
+    if (target.provider !== "claude" && target.provider !== "codex") {
+      return { ...target, account: "provider", resolvedProvider: target.provider };
+    }
+    const provider = target.provider;
+    if (target.account === "auto") {
+      const launcher = autoLauncherPath(provider);
+      if (!existsSync(launcher)) throw new Error(`${provider} automatic account selection is not installed.`);
+      const providerId = autoWiredId(overrides, provider) ?? `${provider}-auto`;
+      providerPatches[providerId] = {
+        extends: provider,
+        label: `${provider === "claude" ? "Claude" : "Codex"} (Dynamic Agent Link)`,
+        command: [launcher],
+      };
+      return { ...target, resolvedProvider: providerId };
+    }
+    if (target.account === "primary") {
+      const primaryDir = provider === "claude" ? HOME : join(HOME, ".codex");
+      const email = provider === "claude" ? claudeAccountEmail(HOME) : codexAccountEmail(primaryDir);
+      if (!email || activelyParked(provider, "primary") || cooldownUntil(provider, "primary") > 0) {
+        throw new Error(`${provider} primary account is not available. Choose Automatic or another healthy account.`);
+      }
+      return { ...target, resolvedProvider: provider };
+    }
+    const slot = slots.find((entry) => entry.provider === provider && entry.email === target.account);
+    if (!slot) throw new Error(`${provider} account '${target.account}' was not found.`);
+    if (!slot.loggedIn || slot.wrongAccount || activelyParked(provider, slot.email) || cooldownUntil(provider, slot.email) > 0) {
+      throw new Error(`${slot.actualEmail || slot.email} is not available. Choose Automatic or another healthy account.`);
+    }
+    const providerId = providerIdForDir(overrides, provider, slot.dir) ?? slugForEmail(provider, slot.email);
+    providerPatches[providerId] = {
+      extends: provider,
+      label: `${provider === "claude" ? "Claude" : "Codex"} · ${slot.actualEmail || slot.email}`,
+      description: `${provider} pinned to ${slot.actualEmail || slot.email} by AgentLink`,
+      env: { [envVarFor(provider)]: slot.dir },
+    };
+    return { ...target, resolvedProvider: providerId };
+  };
+  let resolvedGroups: RouterTargetGroup[];
+  try {
+    resolvedGroups = input.targetGroups.map((group) => ({
+      ...group,
+      targets: group.targets.map(resolveTarget),
+    }));
+  } catch (error) {
+    return routerProviderStatus(context.paseo, error instanceof Error ? error.message : String(error));
+  }
+  let controllerProvider: RouterController = "claude-auto";
+  let controllerConfigDir = "";
+  if (input.controllerAccount === "primary") {
+    if (!claudeAccountEmail(HOME) || activelyParked("claude", "primary") || cooldownUntil("claude", "primary") > 0) {
+      return routerProviderStatus(context.paseo, "The primary Claude account is unavailable. Use Automatic or another healthy request-reader account.");
+    }
+    controllerProvider = "claude";
+  } else if (input.controllerAccount !== "auto") {
+    const slot = slots.find((entry) => entry.provider === "claude" && entry.email === input.controllerAccount);
+    if (!slot || !slot.loggedIn || slot.wrongAccount || activelyParked("claude", slot.email) || cooldownUntil("claude", slot.email) > 0) {
+      return routerProviderStatus(context.paseo, "That request-reader account is unavailable. Use Automatic or another healthy Claude account.");
+    }
+    controllerProvider = "claude";
+    controllerConfigDir = slot.dir;
+  }
+  if (Object.keys(providerPatches).length > 0) {
+    await context.paseo.config.patch({ agents: { providers: providerPatches } } as never);
+    await refreshProviders(context.paseo, Object.keys(providerPatches));
+  }
   mkdirSync(join(AGENT_LINK_HOME_DIR, "router"), { recursive: true });
   backupFile(routerConfigPath());
   backupFile(routerRulesPath());
   writeJsonAtomic(routerConfigPath(), {
-    controllerProvider: input.controllerProvider,
+    controllerProvider,
+    controllerAccount: input.controllerAccount,
+    controllerConfigDir,
     controllerModel: input.controllerModel,
-    targetGroups: input.targetGroups.map((group) => ({ ...group, selector: undefined })),
+    targetGroups: resolvedGroups.map((group) => ({ ...group, selector: undefined })),
   });
   writeTextAtomic(routerRulesPath(), input.userRules.endsWith("\n") ? input.userRules : `${input.userRules}\n`);
   const status = await handleRouterInstall({}, context);
@@ -869,10 +1111,11 @@ export async function handleRouterTrace({ agentId }: { agentId: string }, { pase
   const handle = paseo.agents.ref(agentId);
   const refreshed = await handle.refresh();
   const agent = refreshed?.agent;
-  if (!agent) return { isAgentRouter: false, summary: "Agent is no longer available.", nodes: [] };
+  if (!agent) return { isAgentRouter: false, canMoveAccount: false, summary: "Agent is no longer available.", nodes: [] };
   const controlIdentity = resolveRuntimeModel(agent.provider, agent.model);
   const isAgentRouter = controlIdentity.provider === ROUTER_PROVIDER_ID;
   const controlRoute = routeForAgent(agent.id);
+  const overrides = await providerOverrides(paseo);
 
   const nodes: RouterTraceNode[] = [
     {
@@ -882,7 +1125,11 @@ export async function handleRouterTrace({ agentId }: { agentId: string }, { pase
       ...controlIdentity,
       status: agent.status,
       note: isAgentRouter ? "Reads the request and chooses the model that will answer." : controlRoute?.decision ?? "This chat uses its selected provider directly.",
-      account: displayedRouteAccount(controlRoute),
+      account: controlRoute
+        ? displayedRouteAccount(controlRoute)
+        : isAgentRouter
+          ? currentRouterConfig().controllerAccount
+          : accountForProvider(controlIdentity.provider, overrides),
       routedAt: controlRoute?.at ?? 0,
     },
   ];
@@ -903,7 +1150,7 @@ export async function handleRouterTrace({ agentId }: { agentId: string }, { pase
       ...identity,
       status: child.archivedAt ? "archived" : child.status ?? "unknown",
       note: "This provider and model performed the delegated work.",
-      account: displayedRouteAccount(childRoute),
+      account: childRoute ? displayedRouteAccount(childRoute) : accountForProvider(identity.provider, overrides),
       routedAt: childRoute?.at ?? 0,
     });
   }
@@ -941,7 +1188,7 @@ export async function handleRouterTrace({ agentId }: { agentId: string }, { pase
       : isAgentRouter
         ? "No answering model is recorded yet; only the request reader ran."
         : "This agent runs directly; its provider and model are shown below.";
-  return { isAgentRouter, summary, nodes };
+  return { isAgentRouter, canMoveAccount: Boolean(controlRoute), summary, nodes };
 }
 
 export async function handleAgentContinue(
@@ -949,8 +1196,9 @@ export async function handleAgentContinue(
     agentId,
     provider,
     model,
+    account,
     thinking,
-  }: { agentId: string; provider: string; model: string; thinking: string },
+  }: { agentId: string; provider: string; model: string; account: string; thinking: string },
   { paseo }: PluginHandlerContext,
 ) {
   try {
@@ -961,9 +1209,35 @@ export async function handleAgentContinue(
     if (source.status === "running" || source.status === "initializing") {
       return { ok: false, agentId: null, message: "Wait for the current turn to stop before continuing in another provider." };
     }
-    const target = `${provider}/${model}`;
+    let resolvedProvider = provider;
+    let accountLabel = "provider account";
+    if (provider === "claude" || provider === "codex") {
+      if (account === "auto") {
+        const result = await handleWireAuto({ provider }, { paseo } as PluginHandlerContext);
+        if (!result.ok) return { ok: false, agentId: null, message: result.message };
+        resolvedProvider = result.providerId ?? `${provider}-auto`;
+        accountLabel = "automatic healthy account";
+      } else if (account === "primary") {
+        if (activelyParked(provider, "primary") || cooldownUntil(provider, "primary") > 0) {
+          return { ok: false, agentId: null, message: `${provider} primary account is unavailable.` };
+        }
+        accountLabel = "primary account";
+      } else {
+        const slot = collectSlots().find((entry) => entry.provider === provider && entry.email === account);
+        if (!slot || !slot.loggedIn || slot.wrongAccount || activelyParked(provider, account) || cooldownUntil(provider, account) > 0) {
+          return { ok: false, agentId: null, message: `${provider} account '${account}' is unavailable.` };
+        }
+        const wired = await handleWireProvider(
+          { provider, email: slot.actualEmail || slot.email, dir: slot.dir },
+          { paseo } as PluginHandlerContext,
+        );
+        resolvedProvider = wired.providerId;
+        accountLabel = slot.actualEmail || slot.email;
+      }
+    }
+    const target = `${resolvedProvider}/${model}`;
     const prompt =
-      `AgentLink provider continuation for Paseo agent ${agentId}. Continue this chat using ${target}. ` +
+      `AgentLink provider continuation for Paseo agent ${agentId}. Continue this chat using ${target} (${accountLabel}). ` +
       `First run \`paseo agent logs ${agentId}\` and inspect the current workspace and git diff. ` +
       "Continue from the first incomplete step; do not redo completed work. Preserve every user constraint and existing agent/subagent result. " +
       `Begin with one short line: \`Continued from ${agentId} on ${target}\` and then take the next action.`;
@@ -979,7 +1253,7 @@ export async function handleAgentContinue(
     const created = source.workspaceId
       ? await paseo.workspaces.ref(source.workspaceId).agents.create(options)
       : await paseo.agents.create({ ...options, cwd: source.cwd });
-    return { ok: true, agentId: created.id, message: `Created linked agent ${created.id} on ${target}.` };
+    return { ok: true, agentId: created.id, message: `Created linked agent ${created.id} on ${target} · ${accountLabel}.` };
   } catch (error) {
     return { ok: false, agentId: null, message: error instanceof Error ? error.message : String(error) };
   }
@@ -1180,8 +1454,8 @@ export async function handleWireProvider(
       },
     },
   } as never);
-  needsRestart = true;
-  return { providerId, needsRestart };
+  await refreshProviders(paseo, [providerId]);
+  return { providerId };
 }
 
 // Diagnostic payloads are provider-shaped and may echo env values back. Mask
@@ -1808,13 +2082,15 @@ export async function handleProviderHeartbeat(_input: Record<string, never>, { p
     const pooled = id === "claude" || id === "codex";
     const aliases = [...ids].filter((candidate) => candidate !== id).sort();
     const familyAvailable = [...ids].some((candidate) => availableIds.has(candidate));
-    const routeLoaded = availableIds.has(`${id}-auto`);
+    const autoProviderId = pooled ? autoWiredId(overrides, id) : null;
+    const routeLoaded = Boolean(autoProviderId && availableIds.has(autoProviderId));
     return {
       id,
       label: providerLabel(id, overrides),
       available: familyAvailable,
       kind: pooled ? ("pooled" as const) : ("single" as const),
       quotaTelemetry: pooled,
+      autoProviderId,
       aliases,
       summary: !familyAvailable
         ? "Paseo cannot find this provider. Check its command location, then reload Paseo"
