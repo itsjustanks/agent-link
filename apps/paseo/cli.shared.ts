@@ -45,16 +45,14 @@ export const cliInstall = defineRpc({
   output: z.object({ ok: z.boolean(), message: z.string(), status: CliStatusSchema }),
 });
 
-/**
- * The plugin's own updates, from the panel. No release ceremony: main IS the
- * release channel, so "update ready" means the latest commit on main differs
- * from the sha the installer stamped into build.json at install time.
- */
+/** The plugin's own release update, separate from provider quota probes. */
 export const cliUpdateCheck = defineRpc({
   name: "agent-link.update-check",
   input: z.object({}),
   output: z.object({
-    /** Sha stamped at install; empty when the stamp predates this feature. */
+    installedVersion: z.string(),
+    latestVersion: z.string(),
+    /** Kept for ancestry checks and older build stamps; never shown as the release identity. */
     installedSha: z.string(),
     latestSha: z.string(),
     updateReady: z.boolean(),

@@ -26,6 +26,24 @@ grep -q 'AgentRouter · <exact provider/model> ·' "$fixture_root/router/prompt.
 grep -q 'MANAGED TARGET POLICY' "$fixture_root/router/system.md"
 grep -q 'if the user names a provider or model, use exactly that' "$fixture_root/router/rules.md"
 ! grep -q 'Stay on the base (cheap) model' "$fixture_root/router/rules.md"
+grep -q '"controllerModel": "claude-fable-5"' "$fixture_root/router/config.json"
+
+python3 - "$fixture_root/router/config.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+data["controllerProvider"] = "claude"
+data["controllerModel"] = "claude-opus-5"
+data["targetGroups"] = [{
+    "name": "research",
+    "purpose": "Provider-agnostic research",
+    "targets": [{"provider": "gemini", "model": "gemini-3-pro"}],
+}]
+json.dump(data, open(path, "w"), indent=2)
+PY
+AGENT_LINK_HOME="$fixture_root" "$repo_root/agent-link" router install >/dev/null
+grep -q 'gemini/gemini-3-pro' "$fixture_root/router/policy.md"
+grep -q 'controllerProvider' "$fixture_root/bin/agent-router"
 
 printf '%s\n' '# keep my custom routing rule' > "$fixture_root/router/rules.md"
 AGENT_LINK_HOME="$fixture_root" "$repo_root/agent-link" router install >/dev/null

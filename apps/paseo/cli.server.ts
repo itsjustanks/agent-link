@@ -73,7 +73,7 @@ const COMPARE_URL = (base: string, head: string) =>
 // The plugin cannot ask Paseo where it is installed, so it looks in the places
 // the daemon actually uses. ponytail: fixed candidate list — extend it if a
 // platform ever stores plugins elsewhere.
-function buildStamp(): string {
+function buildStamp(): { sha: string; version: string } {
   const candidates = [
     join(HOME, ".paseo", "plugins", "agent-link", "build.json"),
     join(HOME, "Library", "Application Support", "paseo", "plugins", "agent-link", "build.json"),
@@ -81,22 +81,32 @@ function buildStamp(): string {
   ];
   for (const candidate of candidates) {
     try {
-      const parsed = JSON.parse(readFileSync(candidate, "utf8")) as { sha?: string };
-      if (typeof parsed.sha === "string") return parsed.sha;
+      const parsed = JSON.parse(readFileSync(candidate, "utf8")) as { sha?: string; version?: string };
+      if (typeof parsed.sha === "string" || typeof parsed.version === "string") {
+        return {
+          sha: typeof parsed.sha === "string" ? parsed.sha : "",
+          version: typeof parsed.version === "string" ? parsed.version : "",
+        };
+      }
     } catch {
       // next
     }
   }
-  return "";
+  return { sha: "", version: "" };
 }
 
 export async function handleCliUpdateCheck(): Promise<{
+  installedVersion: string;
+  latestVersion: string;
   installedSha: string;
   latestSha: string;
   updateReady: boolean;
   note: string;
 }> {
-  const installedSha = buildStamp();
+  const installed = buildStamp();
+  const installedSha = installed.sha;
+  let installedVersion = installed.version;
+  let latestVersion = "";
   let latestSha = "";
   try {
     let ref = "main";
@@ -104,7 +114,10 @@ export async function handleCliUpdateCheck(): Promise<{
       const release = await fetch(LATEST_RELEASE_URL, { signal: AbortSignal.timeout(8_000) });
       if (release.ok) {
         const tag = ((await release.json()) as { tag_name?: string }).tag_name;
-        if (typeof tag === "string" && tag) ref = tag;
+        if (typeof tag === "string" && tag) {
+          ref = tag;
+          latestVersion = tag.replace(/^v/, "");
+        }
       }
     } catch {
       // No release info — main is still an honest comparison point.
@@ -118,6 +131,8 @@ export async function handleCliUpdateCheck(): Promise<{
     latestSha = (await response.text()).trim();
   } catch (caught) {
     return {
+      installedVersion,
+      latestVersion,
       installedSha,
       latestSha: "",
       updateReady: false,
@@ -126,14 +141,17 @@ export async function handleCliUpdateCheck(): Promise<{
   }
   if (!installedSha) {
     return {
+      installedVersion,
+      latestVersion,
       installedSha,
       latestSha,
       updateReady: true,
-      note: "This install predates the version stamp, so one update from here brings it current and stamps it.",
+      note: "This install predates release-number stamps. Updating once brings it current and records the release number.",
     };
   }
   if (installedSha === latestSha) {
-    return { installedSha, latestSha, updateReady: false, note: "" };
+    if (!installedVersion) installedVersion = latestVersion;
+    return { installedVersion, latestVersion, installedSha, latestSha, updateReady: false, note: "" };
   }
   // A developer/local install can be newer than the latest published release.
   // Equality alone called that an update and offered to downgrade it. Ask GitHub
@@ -143,13 +161,22 @@ export async function handleCliUpdateCheck(): Promise<{
     if (comparison.ok) {
       const status = ((await comparison.json()) as { status?: string }).status;
       if (status === "ahead" || status === "identical") {
-        return { installedSha, latestSha, updateReady: false, note: "Installed build is newer than the latest release." };
+        return {
+          installedVersion: installedVersion || "development",
+          latestVersion,
+          installedSha,
+          latestSha,
+          updateReady: false,
+          note: "Installed build is newer than the latest release.",
+        };
       }
     }
   } catch {
     // Fall through to the conservative mismatch check below.
   }
   return {
+    installedVersion,
+    latestVersion,
     installedSha,
     latestSha,
     updateReady: installedSha !== latestSha,

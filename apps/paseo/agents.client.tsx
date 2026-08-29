@@ -7,6 +7,14 @@ import { cliInstall, cliStatus, cliUpdateApply, cliUpdateCheck } from "./cli.sha
 import { limitsResume, limitsSetAuto, limitsStatus, type LimitEvent } from "./limits.shared";
 import { resourceSetEnabled, resourceStatus } from "./resources.shared";
 import {
+  toolchainConfigure,
+  toolchainRemove,
+  toolchainRun,
+  toolchainSetEnabled,
+  toolchainStatus,
+  type ToolchainProvider,
+} from "./toolchain.shared";
+import {
   accountUsage,
   accountCapacity,
   probeAccounts,
@@ -18,6 +26,7 @@ import {
   setCooldown,
   setPreference,
   routerInstall,
+  routerConfigure,
   routerStatus,
   routerTrace,
   wireAuto,
@@ -25,6 +34,7 @@ import {
   type AccountUsage,
   type CapacityAccount,
   type ProviderHeartbeat,
+  type RouterProviderStatus,
   type AutoRouter,
   type Slot,
 } from "./contracts.shared";
@@ -62,6 +72,7 @@ import {
 
 type ProviderId = "claude" | "codex";
 type PanelTab = "accounts" | "limits" | "memory" | "router" | "help";
+type RouterDraftGroup = { name: string; purpose: string; targetsText: string };
 
 const CARD_TITLE: Record<ProviderId, string> = { claude: "Claude Code", codex: "Codex" };
 const SHORT: Record<ProviderId, string> = { claude: "Claude", codex: "Codex" };
@@ -248,6 +259,104 @@ function CapacityDetail({ entry }: { entry: CapacityAccount }) {
   );
 }
 
+type ToolchainDraft = {
+  id: string;
+  label: string;
+  binary: string;
+  versionArgs: string[];
+  updateArgs: string[];
+  processPattern: string;
+};
+
+function ToolchainRow({
+  entry,
+  first,
+  busy,
+  onSave,
+  onRemove,
+}: {
+  entry: ToolchainProvider;
+  first: boolean;
+  busy: boolean;
+  onSave: (draft: ToolchainDraft) => void;
+  onRemove: (id: string) => void;
+}) {
+  const t = useTokens();
+  const [open, setOpen] = useState(false);
+  const [binary, setBinary] = useState(entry.binary || entry.id);
+  const [versionArgs, setVersionArgs] = useState(entry.versionArgs.join("\n") || "--version");
+  const [updateArgs, setUpdateArgs] = useState(entry.updateArgs.join("\n"));
+  const [processPattern, setProcessPattern] = useState(entry.processPattern);
+  useEffect(() => {
+    setBinary(entry.binary || entry.id);
+    setVersionArgs(entry.versionArgs.join("\n") || "--version");
+    setUpdateArgs(entry.updateArgs.join("\n"));
+    setProcessPattern(entry.processPattern);
+  }, [entry]);
+  const tone: Status = entry.managed ? (entry.installed ? "ok" : "attention") : "neutral";
+  return (
+    <Row
+      first={first}
+      title={entry.label}
+      subtitle={entry.version || (entry.installed ? "version unavailable" : "CLI not installed")}
+      tone={tone}
+      meta={
+        <Facts
+          items={[
+            { value: entry.availableInPaseo ? "available in Paseo" : "not currently available" },
+            { value: entry.managed ? (entry.builtIn ? "verified updater" : "custom updater") : "manual updates", tone: entry.managed ? "ok" : "attention" },
+            entry.lastResult ? { value: `last: ${entry.lastResult}`, tone: entry.lastResult === "failed" ? "error" : undefined } : null,
+          ]}
+        />
+      }
+      trailing={<Button label={open ? "Hide" : entry.managed ? "Details" : "Configure"} variant="ghost" onPress={() => setOpen((value) => !value)} />}
+      expanded={
+        open ? (
+          <View style={{ gap: t.space.sm }}>
+            {entry.builtIn ? (
+              <>
+                <Facts items={[{ value: entry.binary }, { value: `update: ${entry.updateArgs.join(" ")}` }]} />
+                <Text style={t.text.caption}>Built-in update recipes are release-tested. Live processes are skipped and retried on the next run.</Text>
+              </>
+            ) : (
+              <>
+                <Field label="Executable" value={binary} onChangeText={setBinary} placeholder={entry.id} mono />
+                <View style={{ flexDirection: t.compact ? "column" : "row", gap: t.space.sm }}>
+                  <View style={{ flex: 1 }}>
+                    <Field label="Version arguments · one per line" value={versionArgs} onChangeText={setVersionArgs} multiline mono minHeight={72} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Field label="Update arguments · one per line" value={updateArgs} onChangeText={setUpdateArgs} multiline mono minHeight={72} />
+                  </View>
+                </View>
+                <Field label="Process match" value={processPattern} onChangeText={setProcessPattern} mono hint="The updater skips this provider whenever this process pattern or a live Paseo agent matches." />
+                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: t.space.sm }}>
+                  <Button
+                    label="Save updater"
+                    variant="secondary"
+                    loading={busy}
+                    disabled={!binary.trim() || !updateArgs.trim() || !processPattern.trim()}
+                    onPress={() => onSave({
+                      id: entry.id,
+                      label: entry.label,
+                      binary: binary.trim(),
+                      versionArgs: versionArgs.split("\n").map((value) => value.trim()).filter(Boolean),
+                      updateArgs: updateArgs.split("\n").map((value) => value.trim()).filter(Boolean),
+                      processPattern: processPattern.trim(),
+                    })}
+                  />
+                  {entry.managed ? <ConfirmButton label="Use manual updates" confirmLabel="Remove updater" onConfirm={() => onRemove(entry.id)} /> : null}
+                </View>
+              </>
+            )}
+            {entry.detail ? <Text style={t.text.caption}>{entry.detail}</Text> : null}
+          </View>
+        ) : undefined
+      }
+    />
+  );
+}
+
 export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const t = useUi(theme, layout.compact);
   const queryClient = useQueryClient();
@@ -262,6 +371,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const callWireAuto = useRpc(wireAuto);
   const callRouterStatus = useRpc(routerStatus);
   const callRouterInstall = useRpc(routerInstall);
+  const callRouterConfigure = useRpc(routerConfigure);
   const callCooldown = useRpc(setCooldown);
   const callAddAccount = useRpc(addAccount);
   const callRemoveAccount = useRpc(removeAccount);
@@ -274,6 +384,11 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const callLimitsResume = useRpc(limitsResume);
   const callResourceStatus = useRpc(resourceStatus);
   const callResourceSetEnabled = useRpc(resourceSetEnabled);
+  const callToolchainStatus = useRpc(toolchainStatus);
+  const callToolchainConfigure = useRpc(toolchainConfigure);
+  const callToolchainRemove = useRpc(toolchainRemove);
+  const callToolchainRun = useRpc(toolchainRun);
+  const callToolchainSetEnabled = useRpc(toolchainSetEnabled);
 
   const [diagnosis, setDiagnosis] = useState<Record<string, string>>({});
   const [diagnosing, setDiagnosing] = useState<string | null>(null);
@@ -281,9 +396,14 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const [notice, setNotice] = useState<string | null>(null);
   const [addingFor, setAddingFor] = useState<ProviderId | null>(null);
   const [newEmail, setNewEmail] = useState("");
-  const [panelTab, setPanelTab] = useState<PanelTab>("accounts");
+  const [panelTab, setPanelTab] = useState<PanelTab>("router");
   const [providerTab, setProviderTab] = useState("claude");
   const [probeLogs, setProbeLogs] = useState<Record<string, string>>({});
+  const [routerController, setRouterController] = useState<"claude-auto" | "claude">("claude-auto");
+  const [routerModel, setRouterModel] = useState("claude-fable-5");
+  const [routerGroups, setRouterGroups] = useState<RouterDraftGroup[]>([]);
+  const [routerRules, setRouterRules] = useState("");
+  const [routerDirty, setRouterDirty] = useState(false);
 
   const scanQuery = useQuery({
     queryKey: ["agent-link", "scan"],
@@ -334,6 +454,11 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
     queryFn: () => callRouterStatus({}),
     refetchInterval: 30000,
   });
+  const toolchainQuery = useQuery({
+    queryKey: ["agent-link", "toolchain"],
+    queryFn: () => callToolchainStatus({}),
+    refetchInterval: 60_000,
+  });
   const resourceMutation = useMutation({
     mutationFn: (enabled: boolean) => callResourceSetEnabled({ enabled }),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["agent-link", "resources"] }),
@@ -344,6 +469,52 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
       setNotice(result.message);
       void queryClient.invalidateQueries({ queryKey: ["agent-link"] });
     },
+  });
+  const routerConfigureMutation = useMutation({
+    mutationFn: (input: {
+      controllerProvider: "claude-auto" | "claude";
+      controllerModel: string;
+      targetGroups: RouterProviderStatus["targetGroups"];
+      userRules: string;
+    }) => callRouterConfigure(input),
+    onSuccess: (result) => {
+      setNotice(result.message);
+      setRouterDirty(false);
+      void queryClient.invalidateQueries({ queryKey: ["agent-link"] });
+    },
+    onError: (error: Error) => setNotice(error.message),
+  });
+  const toolchainConfigureMutation = useMutation({
+    mutationFn: (input: ToolchainDraft) => callToolchainConfigure(input),
+    onSuccess: (result) => {
+      setNotice(result.message);
+      queryClient.setQueryData(["agent-link", "toolchain"], result.status);
+    },
+    onError: (error: Error) => setNotice(error.message),
+  });
+  const toolchainRemoveMutation = useMutation({
+    mutationFn: (id: string) => callToolchainRemove({ id }),
+    onSuccess: (result) => {
+      setNotice(result.message);
+      queryClient.setQueryData(["agent-link", "toolchain"], result.status);
+    },
+    onError: (error: Error) => setNotice(error.message),
+  });
+  const toolchainRunMutation = useMutation({
+    mutationFn: () => callToolchainRun({}),
+    onSuccess: (result) => {
+      setNotice(result.message);
+      globalThis.setTimeout(() => void queryClient.invalidateQueries({ queryKey: ["agent-link", "toolchain"] }), 3000);
+    },
+    onError: (error: Error) => setNotice(error.message),
+  });
+  const toolchainEnabledMutation = useMutation({
+    mutationFn: (enabled: boolean) => callToolchainSetEnabled({ enabled }),
+    onSuccess: (result) => {
+      setNotice(result.message);
+      queryClient.setQueryData(["agent-link", "toolchain"], result.status);
+    },
+    onError: (error: Error) => setNotice(error.message),
   });
   const limitsResumeMutation = useMutation({
     mutationFn: (agentId: string) => callLimitsResume({ agentId }),
@@ -453,6 +624,62 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
       setProviderTab(heartbeatProviders[0]!.id);
     }
   }, [heartbeatProviders, providerTab]);
+  useEffect(() => {
+    const state = routerProviderQuery.data;
+    if (!state || routerDirty) return;
+    setRouterController(state.controllerProvider);
+    setRouterModel(state.controllerModel);
+    setRouterRules(state.userRules);
+    setRouterGroups(
+      state.targetGroups.map((group) => ({
+        name: group.name,
+        purpose: group.purpose,
+        targetsText: group.targets.map((target) => `${target.provider}/${target.model}`).join("\n"),
+      })),
+    );
+  }, [routerProviderQuery.data, routerDirty]);
+
+  const updateRouterGroup = (index: number, patch: Partial<RouterDraftGroup>) => {
+    setRouterDirty(true);
+    setRouterGroups((groups) => groups.map((group, groupIndex) => (groupIndex === index ? { ...group, ...patch } : group)));
+  };
+  const saveRouter = () => {
+    const names = new Set<string>();
+    const targetGroups: RouterProviderStatus["targetGroups"] = [];
+    for (const group of routerGroups) {
+      const name = group.name.trim().toLowerCase();
+      if (!/^[a-z][a-z0-9-]*$/.test(name) || names.has(name)) {
+        setNotice("Route group names must be unique lowercase slugs, such as planning or browser-check.");
+        return;
+      }
+      names.add(name);
+      const targets = group.targetsText
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .flatMap((line) => {
+          const slash = line.indexOf("/");
+          const provider = slash > 0 ? line.slice(0, slash) : "";
+          const model = slash > 0 ? line.slice(slash + 1) : "";
+          return /^[a-z][a-z0-9-]*$/.test(provider) && model ? [{ provider, model }] : [];
+        });
+      if (!group.purpose.trim() || targets.length !== group.targetsText.split("\n").filter((line) => line.trim()).length || targets.length === 0) {
+        setNotice(`Fix ${name || "the unnamed route"}: add a purpose and one provider/model target per line.`);
+        return;
+      }
+      targetGroups.push({ name, purpose: group.purpose.trim(), selector: "in_order", targets });
+    }
+    if (targetGroups.length === 0) {
+      setNotice("Add at least one orchestration group.");
+      return;
+    }
+    routerConfigureMutation.mutate({
+      controllerProvider: routerController,
+      controllerModel: routerModel,
+      targetGroups,
+      userRules: routerRules,
+    });
+  };
   const maxLaunches = Math.max(
     1,
     ...slots.map((slot) => slot.launches),
@@ -652,7 +879,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
         <Text style={t.text.heading}>Plugin update ready</Text>
         <Text style={[t.text.body, { color: t.color.muted }]}>
           {update.data.note ||
-            `agent-link on GitHub has moved on (${update.data.installedSha.slice(0, 7) || "unstamped"} → ${update.data.latestSha.slice(0, 7)}). Updating fetches the latest, typechecks it, and reinstalls this panel — Paseo itself is untouched.`}
+            `Agent Link ${update.data.installedVersion ? `v${update.data.installedVersion}` : "legacy install"} → v${update.data.latestVersion}. Updating fetches that published release, typechecks it, and reinstalls this panel — Paseo itself is untouched.`}
         </Text>
         <View style={{ flexDirection: "row", gap: t.space.sm, alignItems: "center", flexWrap: "wrap" }}>
           <Button label="Update now" variant="primary" loading={applyUpdate.isPending} onPress={() => applyUpdate.mutate()} />
@@ -660,6 +887,47 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
         </View>
       </Card>
     ) : null;
+
+  const toolchainCard = toolchainQuery.data ? (
+    <Card padded={false}>
+      <View style={{ padding: pad, gap: t.space.md }}>
+        <View style={{ flexDirection: t.compact ? "column" : "row", alignItems: t.compact ? "stretch" : "center", justifyContent: "space-between", gap: t.space.sm }}>
+          <View style={{ flex: 1, minWidth: 0, gap: t.space.xs }}>
+            <Text style={t.text.heading}>Provider CLI updates</Text>
+            <Text style={t.text.caption}>Every Paseo provider appears below. Verified recipes update automatically; any other CLI can be given a safe argument-by-argument updater.</Text>
+          </View>
+          <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: t.space.sm }}>
+            <Segmented
+              options={[{ value: "on", label: "Daily" }, { value: "off", label: "Manual" }]}
+              value={toolchainQuery.data.enabled ? "on" : "off"}
+              onChange={(value) => toolchainEnabledMutation.mutate(value === "on")}
+            />
+            <Button label="Check now" variant="secondary" loading={toolchainRunMutation.isPending} onPress={() => toolchainRunMutation.mutate()} />
+          </View>
+        </View>
+        <Facts
+          items={[
+            { value: toolchainQuery.data.schedule, tone: toolchainQuery.data.enabled ? "ok" : "neutral" },
+            { value: "live providers are always skipped", tone: "ok" },
+          ]}
+        />
+      </View>
+      {toolchainQuery.data.providers.map((provider, index) => (
+        <ToolchainRow
+          key={provider.id}
+          entry={provider}
+          first={index === 0}
+          busy={toolchainConfigureMutation.isPending || toolchainRemoveMutation.isPending}
+          onSave={(draft) => toolchainConfigureMutation.mutate(draft)}
+          onRemove={(id) => toolchainRemoveMutation.mutate(id)}
+        />
+      ))}
+    </Card>
+  ) : toolchainQuery.isLoading ? (
+    <Loading label="Reading provider updaters…" />
+  ) : toolchainQuery.error ? (
+    <ErrorText>{`Provider updater status failed: ${String(toolchainQuery.error)}`}</ErrorText>
+  ) : null;
 
   // ----------------------------------------------------------------- accounts
 
@@ -1232,12 +1500,15 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   );
 
   const panelOptions: Array<{ value: PanelTab; label: string }> = [
+    { value: "router", label: "AgentRouter" },
     { value: "accounts", label: "Accounts" },
     { value: "limits", label: "Limit sentry" },
     { value: "memory", label: "Memory guard" },
-    { value: "router", label: "AgentRouter" },
     { value: "help", label: "FAQs" },
   ];
+
+  const selectedController = routerProviderQuery.data?.controllerOptions.find((option) => option.provider === routerController);
+  const controllerModels = selectedController?.models ?? [];
 
   return (
     <Screen t={t}>
@@ -1265,6 +1536,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
         <>
           {updateCard}
           {cliCard}
+          {toolchainCard}
           {providersSection}
         </>
       ) : panelTab === "accounts" && scanQuery.isLoading ? (
@@ -1426,57 +1698,158 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
 
       {panelTab === "router" && routerProviderQuery.data ? (
         <Card padded={false}>
-          <View style={{ padding: pad, gap: t.space.xs }}>
-            <Text style={t.text.heading}>AgentRouter</Text>
-            <Text style={t.text.caption}>
-              Optional one-entry automation. Haiku selects the route; a concrete Paseo child performs every answer. Direct Paseo profiles are faster when you already know the model you want.
-            </Text>
+          <View style={{ padding: pad, gap: t.space.md }}>
+            <View style={{ flexDirection: t.compact ? "column" : "row", alignItems: t.compact ? "stretch" : "center", justifyContent: "space-between", gap: t.space.sm }}>
+              <View style={{ flex: 1, minWidth: 0, gap: t.space.xs }}>
+                <Text style={t.text.heading}>AgentRouter</Text>
+                <Text style={t.text.caption}>
+                  One Paseo provider that interprets the prompt, chooses an ordered route, then launches the concrete provider/model that performs the work.
+                </Text>
+              </View>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: t.space.sm }}>
+                <StatusPill
+                  status={routerProviderQuery.data.loaded ? "ok" : routerProviderQuery.data.configured ? "attention" : "neutral"}
+                  label={routerProviderQuery.data.loaded ? "ready" : routerProviderQuery.data.configured ? "reload required" : "not installed"}
+                />
+                <Button
+                  label={routerProviderQuery.data.installed ? "Save routes" : "Save & install"}
+                  variant="primary"
+                  loading={routerConfigureMutation.isPending}
+                  onPress={saveRouter}
+                />
+              </View>
+            </View>
+            <Facts
+              items={[
+                { value: "interpret" },
+                { value: "health filter" },
+                { value: "ordered fallback" },
+                { value: "auditable Paseo child", tone: "ok" },
+              ]}
+            />
           </View>
           <Row
             first
-            title="Plexus-style target routing"
-            subtitle="Targets are tried in order. Unavailable providers are skipped; AgentLink applies account health and cooldown inside Claude and Codex."
-            meta={
-              <Facts
-                items={[
-                  { value: `control: ${routerProviderQuery.data.baseModel}` },
-                  { value: routerProviderQuery.data.loaded ? "available in Paseo" : routerProviderQuery.data.configured ? "reload required" : "not configured", tone: routerProviderQuery.data.loaded ? "ok" : "attention" },
-                ]}
-              />
-            }
-            trailing={
-              routerProviderQuery.data.loaded ? (
-                <StatusPill status="ok" label="ready" />
-              ) : (
-                <Button
-                  label={routerProviderQuery.data.configured ? "Repair provider" : "Install provider"}
-                  variant="primary"
-                  loading={routerProviderMutation.isPending}
-                  onPress={() => routerProviderMutation.mutate()}
-                />
-              )
-            }
+            title="Controller"
+            subtitle="The controller only interprets and delegates; it never performs the requested task. Fable is the planning-safe default."
             expanded={
               <View style={{ gap: t.space.md }}>
-                <Text style={t.text.caption}>{routerProviderQuery.data.message}</Text>
-                {routerProviderQuery.data.targetGroups.map((group) => (
-                  <View key={group.name} style={{ gap: t.space.xs }}>
-                    <Facts items={[{ value: group.name }, { value: group.purpose }, { value: group.selector }]} />
-                    {group.targets.map((target, index) => (
-                      <View key={`${group.name}-${target.provider}-${target.model}`} style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: t.space.sm }}>
-                        <Text style={t.text.caption}>{`${index + 1}. ${target.provider} / ${target.model}`}</Text>
-                        <StatusPill
-                          status={target.available === true ? "ok" : target.available === false ? "attention" : "neutral"}
-                          label={target.available === true ? "available" : target.available === false ? "unavailable" : "unknown"}
-                        />
-                      </View>
-                    ))}
-                  </View>
-                ))}
-                <CodeBlock>{routerProviderQuery.data.rulesPath}</CodeBlock>
+                <Segmented
+                  options={routerProviderQuery.data.controllerOptions.map((option) => ({
+                    value: option.provider,
+                    label: option.label,
+                    disabled: !option.available,
+                  }))}
+                  value={routerController}
+                  onChange={(value) => {
+                    setRouterController(value);
+                    setRouterDirty(true);
+                  }}
+                />
+                <Field
+                  label="Controller model"
+                  value={routerModel}
+                  onChangeText={(value) => {
+                    setRouterModel(value);
+                    setRouterDirty(true);
+                  }}
+                  hint="This model interprets the request. The selected target below performs the work."
+                />
+                {controllerModels.length > 0 ? (
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                    <Segmented
+                      options={controllerModels.map((model) => ({ value: model.id, label: model.label }))}
+                      value={routerModel}
+                      onChange={(value) => {
+                        setRouterModel(value);
+                        setRouterDirty(true);
+                      }}
+                    />
+                  </ScrollView>
+                ) : null}
+                <Notice tone="attention">
+                  The boot controller is Claude-compatible because one Paseo adapter must start first. Once running, its targets can be any native, custom, or ACP provider.
+                </Notice>
               </View>
             }
           />
+          {routerGroups.map((group, index) => (
+            <Row
+              key={`${group.name}-${index}`}
+              title={`${index + 1}. ${group.name || "Unnamed route"}`}
+              subtitle="Targets run top to bottom; unavailable or genuinely failed targets fall through."
+              trailing={
+                routerGroups.length > 1 ? (
+                  <ConfirmButton
+                    label="Remove"
+                    confirmLabel="Remove route"
+                    onConfirm={() => {
+                      setRouterGroups((groups) => groups.filter((_, groupIndex) => groupIndex !== index));
+                      setRouterDirty(true);
+                    }}
+                  />
+                ) : undefined
+              }
+              expanded={
+                <View style={{ gap: t.space.sm }}>
+                  <View style={{ flexDirection: t.compact ? "column" : "row", gap: t.space.sm }}>
+                    <View style={{ flex: 1 }}>
+                      <Field label="Route name" value={group.name} onChangeText={(value) => updateRouterGroup(index, { name: value })} placeholder="planning" />
+                    </View>
+                    <View style={{ flex: 2 }}>
+                      <Field label="When to use it" value={group.purpose} onChangeText={(value) => updateRouterGroup(index, { purpose: value })} placeholder="Product and implementation plans" />
+                    </View>
+                  </View>
+                  <Field
+                    label="Ordered provider/model targets · one per line"
+                    value={group.targetsText}
+                    onChangeText={(value) => updateRouterGroup(index, { targetsText: value })}
+                    placeholder={"claude-auto/claude-fable-5\ncodex-auto/gpt-5.6-terra"}
+                    mono
+                    multiline
+                    minHeight={84}
+                    hint="Provider IDs come from Paseo. Custom and ACP providers work here too."
+                  />
+                </View>
+              }
+            />
+          ))}
+          <View style={{ padding: pad, gap: t.space.md }}>
+            <Button
+              label="Add route group"
+              variant="secondary"
+              onPress={() => {
+                setRouterGroups((groups) => [...groups, { name: `route-${groups.length + 1}`, purpose: "Describe when this route should be used", targetsText: "provider/model" }]);
+                setRouterDirty(true);
+              }}
+            />
+            <Field
+              label="Global routing rules"
+              value={routerRules}
+              onChangeText={(value) => {
+                setRouterRules(value);
+                setRouterDirty(true);
+              }}
+              multiline
+              mono
+              minHeight={120}
+              hint="Applied after the managed groups. Named provider/model requests still win."
+            />
+            <Facts
+              items={[
+                { value: routerProviderQuery.data.message, tone: routerProviderQuery.data.loaded ? "ok" : "attention" },
+                routerDirty ? { value: "unsaved changes", tone: "attention" } : { value: "saved" },
+              ]}
+            />
+            {!routerProviderQuery.data.loaded && routerProviderQuery.data.configured ? (
+              <Button
+                label="Repair provider files"
+                variant="ghost"
+                loading={routerProviderMutation.isPending}
+                onPress={() => routerProviderMutation.mutate()}
+              />
+            ) : null}
+          </View>
         </Card>
       ) : panelTab === "router" ? (
         <Loading label="Reading AgentRouter provider…" />

@@ -1013,8 +1013,20 @@ export async function handleWireAuto({ provider }: { provider: "claude" | "codex
 }
 
 const ROUTER_PROVIDER_ID = "agent-router";
-const ROUTER_BASE_MODEL = "claude-haiku-4-5";
-const ROUTER_TARGET_GROUPS = [
+const ROUTER_VIRTUAL_MODEL = "agent-router-auto";
+type RouterController = "claude-auto" | "claude";
+type RouterTargetGroup = {
+  name: string;
+  purpose: string;
+  selector: "in_order";
+  targets: Array<{ provider: string; model: string }>;
+};
+type RouterConfig = {
+  controllerProvider: RouterController;
+  controllerModel: string;
+  targetGroups: RouterTargetGroup[];
+};
+const ROUTER_TARGET_GROUPS: RouterTargetGroup[] = [
   {
     name: "fast",
     purpose: "Explanations, summaries, formatting and tiny edits",
@@ -1062,7 +1074,50 @@ const ROUTER_TARGET_GROUPS = [
     selector: "in_order" as const,
     targets: [{ provider: "codex-auto", model: "gpt-5.6-sol" }],
   },
-] as const;
+];
+const ROUTER_DEFAULT_CONFIG: RouterConfig = {
+  controllerProvider: "claude-auto",
+  controllerModel: "claude-fable-5",
+  targetGroups: ROUTER_TARGET_GROUPS,
+};
+
+function routerConfigPath(): string {
+  return join(AGENT_LINK_HOME_DIR, "router", "config.json");
+}
+
+function routerRulesPath(): string {
+  return join(AGENT_LINK_HOME_DIR, "router", "rules.md");
+}
+
+function currentRouterConfig(): RouterConfig {
+  const raw = readJson(routerConfigPath());
+  if (!raw) return ROUTER_DEFAULT_CONFIG;
+  const controllerProvider = raw.controllerProvider === "claude" ? "claude" : "claude-auto";
+  const controllerModel = typeof raw.controllerModel === "string" && raw.controllerModel ? raw.controllerModel : ROUTER_DEFAULT_CONFIG.controllerModel;
+  const groups = Array.isArray(raw.targetGroups) ? raw.targetGroups : [];
+  const targetGroups = groups.flatMap((entry): RouterTargetGroup[] => {
+    if (!entry || typeof entry !== "object") return [];
+    const group = entry as Record<string, unknown>;
+    if (typeof group.name !== "string" || typeof group.purpose !== "string" || !Array.isArray(group.targets)) return [];
+    const targets = group.targets.flatMap((item) => {
+      if (!item || typeof item !== "object") return [];
+      const target = item as Record<string, unknown>;
+      return typeof target.provider === "string" && typeof target.model === "string"
+        ? [{ provider: target.provider, model: target.model }]
+        : [];
+    });
+    return targets.length > 0 ? [{ name: group.name, purpose: group.purpose, selector: "in_order", targets }] : [];
+  });
+  return { controllerProvider, controllerModel, targetGroups: targetGroups.length > 0 ? targetGroups : ROUTER_TARGET_GROUPS };
+}
+
+function currentRouterRules(): string {
+  try {
+    return readFileSync(routerRulesPath(), "utf8");
+  } catch {
+    return "";
+  }
+}
 
 function agentLinkBinary(): string | null {
   return searchPath()
@@ -1072,14 +1127,22 @@ function agentLinkBinary(): string | null {
 
 async function routerProviderStatus(paseo: PluginHandlerContext["paseo"], message = "") {
   const launcherPath = join(AGENT_LINK_HOME_DIR, "bin", ROUTER_PROVIDER_ID);
-  const rulesPath = join(AGENT_LINK_HOME_DIR, "router", "rules.md");
+  const rulesPath = routerRulesPath();
+  const config = currentRouterConfig();
   const overrides = await providerOverrides(paseo);
   let loaded = false;
   const availability = new Map<string, boolean>();
+  let controllerModels: Array<{ id: string; label: string }> = [];
   try {
     const available = await paseo.providers.listAvailable();
     for (const entry of available.providers) availability.set(entry.provider, entry.available);
     loaded = availability.get(ROUTER_PROVIDER_ID) === true;
+    const modelResult = (await paseo.providers.listModels("claude" as never)) as unknown as {
+      models?: Array<{ id?: string; label?: string; name?: string }>;
+    };
+    controllerModels = (modelResult.models ?? []).flatMap((model) =>
+      typeof model.id === "string" ? [{ id: model.id, label: model.label ?? model.name ?? model.id }] : [],
+    );
   } catch {
     // Configured remains useful when an older daemon cannot report availability.
   }
@@ -1091,15 +1154,22 @@ async function routerProviderStatus(paseo: PluginHandlerContext["paseo"], messag
     loaded,
     launcherPath,
     rulesPath,
-    baseProvider: "AgentRouter control plane · Claude Dynamic Agent Link",
-    baseModel: "Haiku 4.5 (control only)",
-    targetGroups: ROUTER_TARGET_GROUPS.map((group) => ({
+    baseProvider: config.controllerProvider === "claude-auto" ? "Claude · AgentLink account pool" : "Claude · primary account",
+    baseModel: config.controllerModel,
+    controllerProvider: config.controllerProvider,
+    controllerModel: config.controllerModel,
+    controllerOptions: ([
+      { provider: "claude-auto", label: "Claude account pool", available: availability.get("claude-auto") === true, models: controllerModels },
+      { provider: "claude", label: "Claude primary", available: availability.get("claude") === true, models: controllerModels },
+    ] satisfies Array<{ provider: RouterController; label: string; available: boolean; models: Array<{ id: string; label: string }> }>),
+    targetGroups: config.targetGroups.map((group) => ({
       ...group,
       targets: group.targets.map((target) => ({
         ...target,
         available: availability.has(target.provider) ? availability.get(target.provider) ?? false : null,
       })),
     })),
+    userRules: currentRouterRules(),
     message:
       message ||
       (loaded
@@ -1133,13 +1203,13 @@ export async function handleRouterInstall(_input: Record<string, never>, { paseo
           [ROUTER_PROVIDER_ID]: {
             extends: "claude",
             label: "AgentRouter",
-            description: "Plexus-style virtual route across healthy Paseo provider/model targets",
+            description: "Interprets each request, then delegates it to an ordered healthy Paseo provider/model target",
             command: [launcherPath],
             models: [
               {
-                id: ROUTER_BASE_MODEL,
+                id: ROUTER_VIRTUAL_MODEL,
                 label: "Automatic route",
-                description: "AgentRouter selects and records the concrete answer model; Haiku is control-plane only",
+                description: "AgentRouter selects and records the concrete provider/model that performs the answer",
                 isDefault: true,
               },
             ],
@@ -1155,6 +1225,31 @@ export async function handleRouterInstall(_input: Record<string, never>, { paseo
       `AgentRouter install failed: ${caught instanceof Error ? caught.message.split("\n")[0] : String(caught)}`,
     );
   }
+}
+
+export async function handleRouterConfigure(
+  input: {
+    controllerProvider: RouterController;
+    controllerModel: string;
+    targetGroups: RouterTargetGroup[];
+    userRules: string;
+  },
+  context: PluginHandlerContext,
+) {
+  if (new Set(input.targetGroups.map((group) => group.name)).size !== input.targetGroups.length) {
+    return routerProviderStatus(context.paseo, "Every orchestration group needs a unique name.");
+  }
+  mkdirSync(join(AGENT_LINK_HOME_DIR, "router"), { recursive: true });
+  backupFile(routerConfigPath());
+  backupFile(routerRulesPath());
+  writeJsonAtomic(routerConfigPath(), {
+    controllerProvider: input.controllerProvider,
+    controllerModel: input.controllerModel,
+    targetGroups: input.targetGroups.map((group) => ({ ...group, selector: undefined })),
+  });
+  writeTextAtomic(routerRulesPath(), input.userRules.endsWith("\n") ? input.userRules : `${input.userRules}\n`);
+  const status = await handleRouterInstall({}, context);
+  return { ...status, message: "AgentRouter orchestration saved for new launches." };
 }
 
 type ListedAgentRecord = {

@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.5.35"
+VERSION="0.5.36"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -1473,15 +1473,15 @@ pref_rank() { # $1 provider, $2 key
 # park/hold state and routing preference. Stale snapshots say so — an account
 # that has not run recently has no fresher truth to offer without a paid probe.
 # ------------------------------------------------------------ AgentRouter
-# An OPTIONAL Paseo provider profile: a cheap base model triages every prompt
-# and either answers directly or delegates to the right provider/model through
-# Paseo's own tools. It gets a dedicated Claude agent definition while still
-# launching through claude-auto, so account health routing remains intact.
+# An OPTIONAL Paseo provider profile: a configurable Claude-compatible
+# controller interprets every prompt and delegates the answer to a concrete
+# provider/model through Paseo. The default claude-auto controller keeps
+# account health routing intact.
 router_dir() { echo "$ROOT/router"; }
 
 router_write_files() {
   mkdir -p "$(router_dir)"
-  # Migrate only the stock pre-Plexus rules. A genuinely edited file remains
+  # Migrate only the old stock rules. A genuinely edited file remains
   # user-owned and is composed after the managed policy below.
   if [ ! -f "$(router_dir)/rules.md" ] || {
     grep -q "Stay on the base (cheap) model" "$(router_dir)/rules.md" 2>/dev/null &&
@@ -1501,47 +1501,76 @@ router_write_files() {
 - run more than 2 concrete targets for one request unless asked
 EOF
   fi
-  cat > "$(router_dir)/policy.md" <<'EOF'
-# AgentRouter managed policy — Plexus-style virtual model alias
+  python3 - "$(router_dir)/config.json" "$(router_dir)/policy.md" <<'PY'
+import json, os, sys
 
-Every user request resolves to one concrete Paseo provider/model target. Target
-groups are ordered and use `in_order`: skip unavailable targets, try the first
-healthy target, and move to the next target only after a real launch failure.
-Account selection inside `claude-auto` and `codex-auto` remains AgentLink's job.
+config_path, policy_path = sys.argv[1:]
+defaults = {
+    "controllerProvider": "claude-auto",
+    "controllerModel": "claude-fable-5",
+    "targetGroups": [
+        {"name": "fast", "purpose": "Explanations, summaries, formatting and tiny edits", "targets": [
+            {"provider": "claude-auto", "model": "claude-haiku-4-5"},
+            {"provider": "codex-auto", "model": "gpt-5.6-luna"},
+            {"provider": "kimi", "model": "kimi-code/kimi-for-coding-highspeed"},
+            {"provider": "grok", "model": "grok-4.5"}]},
+        {"name": "planning", "purpose": "Product and implementation plans", "targets": [
+            {"provider": "claude-auto", "model": "claude-fable-5"},
+            {"provider": "codex-auto", "model": "gpt-5.6-terra"},
+            {"provider": "grok", "model": "grok-4.6"}]},
+        {"name": "judgment", "purpose": "Architecture, UI/UX, audit and final review", "targets": [
+            {"provider": "claude-auto", "model": "claude-opus-5"},
+            {"provider": "grok", "model": "grok-4.6"},
+            {"provider": "codex-auto", "model": "gpt-5.6-sol"}]},
+        {"name": "build", "purpose": "Multi-file implementation, debugging, migrations and refactors", "targets": [
+            {"provider": "codex-auto", "model": "gpt-5.6-sol"},
+            {"provider": "kimi", "model": "kimi-code/k3"},
+            {"provider": "claude-auto", "model": "claude-opus-5"}]},
+        {"name": "browser", "purpose": "Browser-driving verification", "targets": [
+            {"provider": "codex-auto", "model": "gpt-5.6-sol"}]},
+    ],
+}
+try:
+    loaded = json.load(open(config_path, encoding="utf-8"))
+    config = loaded if isinstance(loaded, dict) else defaults
+except Exception:
+    config = defaults
+    os.makedirs(os.path.dirname(config_path), exist_ok=True)
+    tmp = config_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(config, handle, indent=2)
+        handle.write("\n")
+    os.replace(tmp, config_path)
 
-## fast — explanations, summaries, formatting, tiny edits
-1. claude-auto/claude-haiku-4-5
-2. codex-auto/gpt-5.6-luna
-3. kimi/kimi-code/kimi-for-coding-highspeed
-4. grok/grok-4.5
-
-## planning — product or implementation plans
-1. claude-auto/claude-fable-5
-2. codex-auto/gpt-5.6-terra
-3. grok/grok-4.6
-
-## judgment — architecture, UI/UX, audit, final review
-1. claude-auto/claude-opus-5
-2. grok/grok-4.6
-3. codex-auto/gpt-5.6-sol
-
-## build — multi-file implementation, debugging, migrations, refactors
-1. codex-auto/gpt-5.6-sol
-2. kimi/kimi-code/k3
-3. claude-auto/claude-opus-5
-
-## browser — browser-driving verification
-1. codex-auto/gpt-5.6-sol
-
-Model-specific quota may be unknowable until a target answers. A refusal is a
-failed target, never success; record it, let Limit Sentry cool its account, and
-try the next target. If the group is exhausted, fail closed and name every
-target attempted.
-EOF
+lines = [
+    "# AgentRouter managed orchestration policy",
+    "",
+    "Every request resolves to one concrete Paseo provider/model target. Groups",
+    "are ordered: skip unavailable targets, try the first healthy target, then",
+    "move only after a real launch failure. AgentLink handles account selection",
+    "inside claude-auto and codex-auto.",
+    "",
+]
+for group in config.get("targetGroups", []):
+    name = str(group.get("name") or "route")
+    purpose = str(group.get("purpose") or "User-defined work")
+    lines.append(f"## {name} — {purpose}")
+    for index, target in enumerate(group.get("targets", []), 1):
+        lines.append(f"{index}. {target.get('provider', '')}/{target.get('model', '')}")
+    lines.append("")
+lines += [
+    "Model-specific quota may be unknowable until a target answers. A refusal is",
+    "a failed target, never success; record it, let Limit Sentry cool its account,",
+    "and try the next target. If the group is exhausted, fail closed and name",
+    "every target attempted.",
+]
+with open(policy_path, "w", encoding="utf-8") as handle:
+    handle.write("\n".join(lines).rstrip() + "\n")
+PY
   cat > "$(router_dir)/prompt.md" <<'EOF'
-You are AgentRouter, the control plane for a Plexus-style virtual model alias.
-The Claude Haiku process hosting you is NOT the answer model. On EVERY user
-message you must resolve and run one concrete Paseo provider/model target.
+You are AgentRouter, a prompt interpreter and cross-provider orchestrator. The
+controller process hosting you is NOT the answer model. On EVERY user message
+you must resolve and run one concrete Paseo provider/model target.
 
 1. Read the managed target policy and user rules below.
 2. Classify the request into one target group. If the user named a model, that
@@ -1582,26 +1611,51 @@ EOF
 #!/usr/bin/env bash
 # AgentRouter provider launcher — managed by \`agent-link router install\`.
 aa_root="\${AGENT_LINK_HOME:-\${AGENT_AUTH_HOME:-$ROOT}}"
-aa_auto="\$aa_root/bin/claude-auto"
 aa_prompt="\$aa_root/router/system.md"
-[ -x "\$aa_auto" ] || { echo "agent-link: claude-auto is missing; run agent-link auto" >&2; exit 75; }
+aa_config="\$aa_root/router/config.json"
 [ -f "\$aa_prompt" ] || { echo "agent-link: AgentRouter prompt is missing; run agent-link router install" >&2; exit 75; }
+aa_controller="\$(python3 - "\$aa_config" <<'PY'
+import json, sys
+try: print(json.load(open(sys.argv[1])).get("controllerProvider") or "claude-auto")
+except Exception: print("claude-auto")
+PY
+)"
+aa_model="\$(python3 - "\$aa_config" <<'PY'
+import json, sys
+try: print(json.load(open(sys.argv[1])).get("controllerModel") or "claude-fable-5")
+except Exception: print("claude-fable-5")
+PY
+)"
+case "\$aa_controller" in
+  claude-auto) aa_command="\$aa_root/bin/claude-auto" ;;
+  claude) aa_command="\$(command -v claude 2>/dev/null || true)" ;;
+  *) echo "agent-link: unsupported AgentRouter controller '\$aa_controller'" >&2; exit 75 ;;
+esac
+[ -x "\$aa_command" ] || { echo "agent-link: AgentRouter controller '\$aa_controller' is unavailable" >&2; exit 75; }
 # Paseo diagnostics call these directly. They do not launch an agent and must
 # not acquire a routing lock or fire a recovery probe.
 case "\${1:-}" in
-  --version|-v|version|auth) exec claude "\$@" ;;
+  --version|-v|version|auth) exec "\$aa_command" "\$@" ;;
 esac
-aa_agents="\$(python3 - "\$aa_prompt" <<'PY'
+aa_agents="\$(python3 - "\$aa_prompt" "\$aa_model" <<'PY'
 import json, sys
 prompt = open(sys.argv[1], encoding="utf-8").read()
 print(json.dumps({"agent-router": {
-    "description": "Triage each request, answer cheap work directly, and delegate complex work through Paseo.",
+    "description": "Interpret each request and delegate the answer through Paseo.",
     "prompt": prompt,
-    "model": "haiku",
+    "model": sys.argv[2],
 }}))
 PY
 )" || exit 75
-exec "\$aa_auto" --agents "\$aa_agents" --agent agent-router "\$@"
+aa_args=()
+while [ "\$#" -gt 0 ]; do
+  case "\$1" in
+    --model) shift; [ "\$#" -gt 0 ] && shift ;;
+    --model=*) shift ;;
+    *) aa_args+=("\$1"); shift ;;
+  esac
+done
+exec "\$aa_command" --agents "\$aa_agents" --agent agent-router "\${aa_args[@]}"
 EOF
   chmod +x "$SHIM_BIN/agent-router"
 }
@@ -1918,7 +1972,7 @@ pick_slot() { # $1 provider, $2 dry|live, $3 requested model
       break
     fi
   done
-  # Plexus-style health filtering is fail-closed: handing out a known parked
+  # Health filtering is fail-closed: handing out a known parked
   # target only creates another doomed process and can start a restart loop.
   if [ -z "$best" ]; then
     [ "${2:-}" = dry ] || record_route_decision "$1" "-" "blocked · no healthy targets" fallback
@@ -1932,7 +1986,7 @@ pick_slot() { # $1 provider, $2 dry|live, $3 requested model
   n="$(cat "$(pools_dir)/count-$1-$best" 2>/dev/null || echo 0)"
   echo $(( n + 1 )) > "$(pools_dir)/count-$1-$best"
   case "$best_rank" in 0) rank_label="preferred" ;; 2) rank_label="reserve" ;; 9) rank_label="fallback" ;; esac
-  # Plexus-inspired decision trace: real launches only, never dry previews.
+  # Decision trace: real launches only, never dry previews.
   record_route_decision "$1" "$best" "$decision" "$rank_label"
   echo "$best"
 }
@@ -3106,6 +3160,7 @@ cmd_update() {
 toolchain_plist() { echo "$HOME/Library/LaunchAgents/com.agent-link.toolchain-updater.plist"; }
 toolchain_log() { echo "$STATE/toolchain-updater.log"; }
 toolchain_state() { echo "$STATE/toolchain-updates.json"; }
+toolchain_config() { echo "$ROOT/toolchain-providers.json"; }
 toolchain_cron_marker() { echo "# agent-link-toolchain-updater"; }
 toolchain_watchdog_marker() { echo "$STATE/toolchain-watchdog-enabled"; }
 toolchain_watchdog_stamp() { echo "$STATE/toolchain-watchdog-last-date"; }
@@ -3190,13 +3245,40 @@ toolchain_binary_path() { # $1 provider
       [ -n "$resolved" ] || [ ! -x "$HOME/.grok/bin/grok" ] || resolved="$HOME/.grok/bin/grok"
       ;;
     paseo) resolved="$(command -v paseo 2>/dev/null || true)" ;;
+    *)
+      resolved="$(python3 - "$(toolchain_config)" "$1" <<'PY2'
+import json, os, shutil, sys
+try: entries = json.load(open(sys.argv[1])).get("providers", [])
+except Exception: entries = []
+entry = next((item for item in entries if item.get("id") == sys.argv[2]), {})
+binary = str(entry.get("binary") or sys.argv[2])
+print(binary if os.path.isabs(binary) and os.access(binary, os.X_OK) else (shutil.which(binary) or ""))
+PY2
+)"
+      ;;
   esac
   [ -n "$resolved" ] && printf '%s\n' "$resolved"
 }
 
 toolchain_version() { # $1 provider, $2 binary
   local value
-  value="$("$2" --version 2>/dev/null | head -1 || true)"
+  if [ "$1" = claude ] || [ "$1" = codex ] || [ "$1" = kimi ] || [ "$1" = grok ] || [ "$1" = paseo ]; then
+    value="$("$2" --version 2>/dev/null | head -1 || true)"
+  else
+    value="$(python3 - "$(toolchain_config)" "$1" "$2" <<'PY2'
+import json, subprocess, sys
+try: entries = json.load(open(sys.argv[1])).get("providers", [])
+except Exception: entries = []
+entry = next((item for item in entries if item.get("id") == sys.argv[2]), {})
+args = entry.get("versionArgs") if isinstance(entry.get("versionArgs"), list) else ["--version"]
+try:
+    result = subprocess.run([sys.argv[3], *map(str, args)], text=True, capture_output=True, timeout=15)
+    print((result.stdout or result.stderr).splitlines()[0] if (result.stdout or result.stderr) else "")
+except Exception:
+    pass
+PY2
+)"
+  fi
   [ -n "$value" ] || value="unknown"
   printf '%s\n' "$value"
 }
@@ -3253,9 +3335,9 @@ for row in rows if isinstance(rows, list) else []:
     provider = str(row.get("provider") or "").lower().split("/", 1)[0]
     if "agent-router" in provider or "agentrouter" in provider:
         families.add("all")
+    families.add(provider.removesuffix("-auto"))
     for family in ("claude", "codex", "kimi", "grok"):
-        if provider.startswith(family) or family in provider:
-            families.add(family)
+        if provider.startswith(family) or family in provider: families.add(family)
 print(" ".join(sorted(families)))
 ' 2>/dev/null)" || TOOLCHAIN_PASEO_STATE=unavailable
 }
@@ -3272,7 +3354,16 @@ toolchain_idle() { # $1 provider; 0 idle, 1 active, 2 unknown
     codex)  pattern='(^|/)(codex|codex-auto)( |$)' ;;
     kimi)   pattern='(^|/)(kimi)( |$)' ;;
     grok)   pattern='(^|/)(grok)( |$)' ;;
-    *) return 2 ;;
+    *)
+      pattern="$(python3 - "$(toolchain_config)" "$provider" <<'PY2'
+import json, sys
+try: entries = json.load(open(sys.argv[1])).get("providers", [])
+except Exception: entries = []
+entry = next((item for item in entries if item.get("id") == sys.argv[2]), {})
+print(entry.get("processPattern") or rf"(^|/)({sys.argv[2]})( |$)")
+PY2
+)"
+      ;;
   esac
   pgrep -f "$pattern" >/dev/null 2>&1
   rc=$?
@@ -3320,6 +3411,26 @@ toolchain_update_one() { # $1 provider
       fi
       [ -z "${tmp_file:-}" ] || rm -f "$tmp_file"
       ;;
+    *)
+      output="$(python3 - "$(toolchain_config)" "$provider" "$binary" <<'PY2'
+import json, subprocess, sys
+try: entries = json.load(open(sys.argv[1])).get("providers", [])
+except Exception: entries = []
+entry = next((item for item in entries if item.get("id") == sys.argv[2]), {})
+args = entry.get("updateArgs") if isinstance(entry.get("updateArgs"), list) else []
+if not args:
+    print("no update arguments configured")
+    raise SystemExit(64)
+try:
+    result = subprocess.run([sys.argv[3], *map(str, args)], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=900)
+    print(result.stdout or "", end="")
+    raise SystemExit(result.returncode)
+except subprocess.TimeoutExpired:
+    print("updater timed out after 15 minutes")
+    raise SystemExit(124)
+PY2
+)" || rc=$?
+      ;;
   esac
   after="$(toolchain_version "$provider" "$binary")"
   detail="$(printf '%s' "$output" | tr '\n\t' '  ' | cut -c1-500)"
@@ -3355,7 +3466,13 @@ PY2
   trap 'rmdir "$lock" 2>/dev/null || true' EXIT INT TERM
   toolchain_snapshot_runtime
   echo "Provider CLI updates (live sessions are never touched):"
-  for provider in claude codex kimi grok; do
+  for provider in claude codex kimi grok $(python3 - "$(toolchain_config)" <<'PY2'
+import json, sys
+try: entries = json.load(open(sys.argv[1])).get("providers", [])
+except Exception: entries = []
+print(" ".join(str(item.get("id")) for item in entries if item.get("id") not in {"claude", "codex", "kimi", "grok"}))
+PY2
+); do
     toolchain_update_one "$provider" || failures=$((failures + 1))
   done
   self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
@@ -3388,7 +3505,13 @@ toolchain_status() {
     schedule="written but not loaded"
   fi
   echo "Automatic provider CLI updates: $schedule"
-  for provider in claude codex kimi grok; do
+  for provider in claude codex kimi grok $(python3 - "$(toolchain_config)" <<'PY2'
+import json, sys
+try: entries = json.load(open(sys.argv[1])).get("providers", [])
+except Exception: entries = []
+print(" ".join(str(item.get("id")) for item in entries if item.get("id") not in {"claude", "codex", "kimi", "grok"}))
+PY2
+); do
     binary="$(toolchain_binary_path "$provider")"
     if [ -n "$binary" ]; then
       current="$(toolchain_version "$provider" "$binary")"
@@ -3575,7 +3698,7 @@ install_paseo_plugin() { # $1 source dir, $2 plugin id, $3 "link" to run from so
     ( cd "$src" && tar --exclude=node_modules --exclude=.git -cf - . ) | ( cd "$dest" && tar -xf - ) || return 1
     # Stamp what was installed, so the panel can compare it with the release.
     local sha; sha="$(git -C "$src" rev-parse HEAD 2>/dev/null || true)"
-    [ -n "$sha" ] && printf '{ "sha": "%s", "builtAt": "%s" }\n' "$sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$dest/build.json"
+    printf '{ "sha": "%s", "version": "%s", "builtAt": "%s" }\n' "$sha" "$VERSION" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$dest/build.json"
   fi
 
   [ -d "$dest/node_modules" ] || { echo "installing dependencies…"; (cd "$dest" && npm install --silent --no-audit --no-fund) || return 1; }

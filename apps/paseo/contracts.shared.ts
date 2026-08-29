@@ -73,6 +73,19 @@ export const scan = defineRpc({
   }),
 });
 
+export const RouterTargetSchema = z.object({
+  provider: z.string().regex(/^[a-z][a-z0-9-]*$/),
+  model: z.string().min(1).max(160),
+  available: z.boolean().nullable().optional(),
+});
+
+export const RouterTargetGroupSchema = z.object({
+  name: z.string().min(1).max(40).regex(/^[a-z][a-z0-9-]*$/),
+  purpose: z.string().min(1).max(200),
+  selector: z.literal("in_order").default("in_order"),
+  targets: z.array(RouterTargetSchema).min(1).max(12),
+});
+
 export const RouterProviderStatusSchema = z.object({
   installed: z.boolean(),
   configured: z.boolean(),
@@ -81,20 +94,18 @@ export const RouterProviderStatusSchema = z.object({
   rulesPath: z.string(),
   baseProvider: z.string(),
   baseModel: z.string(),
-  targetGroups: z.array(
+  controllerProvider: z.enum(["claude-auto", "claude"]),
+  controllerModel: z.string(),
+  controllerOptions: z.array(
     z.object({
-      name: z.string(),
-      purpose: z.string(),
-      selector: z.literal("in_order"),
-      targets: z.array(
-        z.object({
-          provider: z.string(),
-          model: z.string(),
-          available: z.boolean().nullable(),
-        }),
-      ),
+      provider: z.enum(["claude-auto", "claude"]),
+      label: z.string(),
+      available: z.boolean(),
+      models: z.array(z.object({ id: z.string(), label: z.string() })),
     }),
   ),
+  targetGroups: z.array(RouterTargetGroupSchema),
+  userRules: z.string(),
   message: z.string(),
 });
 export type RouterProviderStatus = z.infer<typeof RouterProviderStatusSchema>;
@@ -108,6 +119,17 @@ export const routerStatus = defineRpc({
 export const routerInstall = defineRpc({
   name: "agent-link.router-install",
   input: z.object({}),
+  output: RouterProviderStatusSchema,
+});
+
+export const routerConfigure = defineRpc({
+  name: "agent-link.router-configure",
+  input: z.object({
+    controllerProvider: z.enum(["claude-auto", "claude"]),
+    controllerModel: z.string().min(1).max(160),
+    targetGroups: z.array(RouterTargetGroupSchema).min(1).max(12),
+    userRules: z.string().max(12_000),
+  }),
   output: RouterProviderStatusSchema,
 });
 

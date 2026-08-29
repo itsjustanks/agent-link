@@ -22,6 +22,7 @@ import {
   addAccount,
   removeAccount,
   routerInstall,
+  routerConfigure,
   routerStatus,
   routerTrace,
   scan,
@@ -50,6 +51,7 @@ import {
   handleAddAccount,
   handleRemoveAccount,
   handleRouterInstall,
+  handleRouterConfigure,
   handleRouterStatus,
   handleRouterTrace,
   handleScan,
@@ -63,6 +65,14 @@ import { limitsResume, limitsSetAuto, limitsStatus } from "./limits.shared";
 import { handleLimitsResume, handleLimitsSetAuto, handleLimitsStatus } from "./limits.server";
 import { resourceSetEnabled, resourceStatus } from "./resources.shared";
 import { handleResourceSetEnabled, handleResourceStatus } from "./resources.server";
+import { toolchainConfigure, toolchainRemove, toolchainRun, toolchainSetEnabled, toolchainStatus } from "./toolchain.shared";
+import {
+  handleToolchainConfigure,
+  handleToolchainRemove,
+  handleToolchainRun,
+  handleToolchainSetEnabled,
+  handleToolchainStatus,
+} from "./toolchain.server";
 import { McpSurface, McpWorkspacePanel } from "./mcp.client";
 import {
   mcpExport,
@@ -100,6 +110,7 @@ export default function contribute(plugin: PluginContext) {
   plugin.handle(wireAuto, handleWireAuto);
   plugin.handle(routerStatus, handleRouterStatus);
   plugin.handle(routerInstall, handleRouterInstall);
+  plugin.handle(routerConfigure, handleRouterConfigure);
   plugin.handle(routerTrace, handleRouterTrace);
   plugin.handle(setCooldown, handleSetCooldown);
   plugin.handle(addAccount, handleAddAccount);
@@ -141,6 +152,11 @@ export default function contribute(plugin: PluginContext) {
   plugin.handle(limitsResume, handleLimitsResume);
   plugin.handle(resourceStatus, handleResourceStatus);
   plugin.handle(resourceSetEnabled, handleResourceSetEnabled);
+  plugin.handle(toolchainStatus, handleToolchainStatus);
+  plugin.handle(toolchainConfigure, handleToolchainConfigure);
+  plugin.handle(toolchainRemove, handleToolchainRemove);
+  plugin.handle(toolchainRun, handleToolchainRun);
+  plugin.handle(toolchainSetEnabled, handleToolchainSetEnabled);
 
   plugin.addSurface("agent-sync", AgentSyncSurface);
   plugin.addSurface("mcp", McpSurface);

@@ -8,7 +8,7 @@ trap 'rm -rf "$fixture_root"' EXIT
 mkdir -p "$fixture_root/provider-bin" "$fixture_root/Library/LaunchAgents"
 update_log="$fixture_root/updates.log"
 
-for provider in claude codex kimi grok; do
+for provider in claude codex kimi grok gemini; do
   cat > "$fixture_root/provider-bin/$provider" <<EOF
 #!/usr/bin/env bash
 if [ "\${1:-}" = --version ]; then echo "$provider 1.0"; exit 0; fi
@@ -16,6 +16,21 @@ echo "$provider \$*" >> "$update_log"
 EOF
   chmod +x "$fixture_root/provider-bin/$provider"
 done
+
+cat > "$fixture_root/toolchain-providers.json" <<EOF
+{
+  "providers": [
+    {
+      "id": "gemini",
+      "label": "Gemini CLI",
+      "binary": "gemini",
+      "versionArgs": ["--version"],
+      "updateArgs": ["update", "now"],
+      "processPattern": "(^|/)(gemini)( |$)"
+    }
+  ]
+}
+EOF
 
 cat > "$fixture_root/provider-bin/paseo" <<'EOF'
 #!/usr/bin/env bash
@@ -68,6 +83,7 @@ fi
 grep -q '^codex update' "$update_log"
 grep -q '^grok update --stable' "$update_log"
 grep -q '^kimi installer' "$update_log"
+grep -q '^gemini update now' "$update_log"
 
 : > "$update_log"
 PATH="$fixture_root/provider-bin:/usr/bin:/bin" HOME="$fixture_root" AGENT_LINK_HOME="$fixture_root" \
