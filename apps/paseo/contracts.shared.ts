@@ -104,6 +104,13 @@ export const RouterProviderStatusSchema = z.object({
       models: z.array(z.object({ id: z.string(), label: z.string() })),
     }),
   ),
+  providerOptions: z.array(
+    z.object({
+      id: z.string(),
+      label: z.string(),
+      available: z.boolean(),
+    }),
+  ),
   targetGroups: z.array(RouterTargetGroupSchema),
   userRules: z.string(),
   message: z.string(),
@@ -131,6 +138,16 @@ export const routerConfigure = defineRpc({
     userRules: z.string().max(12_000),
   }),
   output: RouterProviderStatusSchema,
+});
+
+export const routerModels = defineRpc({
+  name: "agent-link.router-models",
+  input: z.object({ provider: z.string().regex(/^[a-z][a-z0-9-]*$/) }),
+  output: z.object({
+    provider: z.string(),
+    models: z.array(z.object({ id: z.string(), label: z.string(), description: z.string() })),
+    message: z.string(),
+  }),
 });
 
 export const RouterTraceNodeSchema = z.object({

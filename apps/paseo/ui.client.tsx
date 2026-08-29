@@ -613,6 +613,90 @@ export function Field({
   );
 }
 
+export function ComboBox({
+  label,
+  value,
+  onChange,
+  options,
+  placeholder,
+  hint,
+  allowCustom = true,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  options: Array<{ value: string; label: string; description?: string; disabled?: boolean }>;
+  placeholder?: string;
+  hint?: string;
+  allowCustom?: boolean;
+}) {
+  const t = useTokens();
+  const [open, setOpen] = useState(false);
+  const known = options.some((option) => option.value === value);
+  const query = known ? "" : value.trim().toLowerCase();
+  const matches = options
+    .filter((option) => !query || option.value.toLowerCase().includes(query) || option.label.toLowerCase().includes(query))
+    .slice(0, 12);
+  return (
+    <View style={{ gap: 4 }}>
+      <Text style={t.text.label}>{label}</Text>
+      <TextInput
+        value={value}
+        onChangeText={(next) => {
+          onChange(next);
+          setOpen(true);
+        }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => globalThis.setTimeout(() => setOpen(false), 150)}
+        placeholder={placeholder}
+        placeholderTextColor={t.color.placeholder}
+        accessibilityLabel={label}
+        autoCorrect={false}
+        autoCapitalize="none"
+        spellCheck={false}
+        style={{
+          borderWidth: 1,
+          borderColor: !allowCustom && value && !known ? t.color.danger : t.color.border,
+          borderRadius: t.radius.sm,
+          backgroundColor: t.color.surface0,
+          paddingVertical: t.compact ? 10 : 7,
+          paddingHorizontal: 10,
+          color: t.color.fg,
+          minHeight: t.control.min,
+          fontFamily: t.compact ? "monospace" : "Menlo",
+          fontSize: t.compact ? 12 : 11.5,
+        }}
+      />
+      {open && matches.length > 0 ? (
+        <View style={{ backgroundColor: t.color.surface2, borderRadius: t.radius.sm, overflow: "hidden" }}>
+          {matches.map((option, index) => (
+            <Pressable
+              key={option.value}
+              disabled={option.disabled}
+              onPress={() => {
+                onChange(option.value);
+                setOpen(false);
+              }}
+              style={({ pressed }) => ({
+                paddingVertical: t.compact ? 10 : 7,
+                paddingHorizontal: 10,
+                borderTopWidth: index === 0 ? 0 : 1,
+                borderTopColor: t.color.borderSubtle,
+                backgroundColor: pressed ? t.color.accentWash : option.value === value ? t.color.surface0 : "transparent",
+                opacity: option.disabled ? 0.45 : 1,
+              })}
+            >
+              <Text style={t.text.bodyStrong}>{option.label}</Text>
+              <Text style={t.text.caption}>{option.description ? `${option.value} · ${option.description}` : option.value}</Text>
+            </Pressable>
+          ))}
+        </View>
+      ) : null}
+      {!allowCustom && value && !known ? <Text style={[t.text.caption, { color: t.color.danger }]}>Choose a listed value.</Text> : hint ? <Text style={t.text.caption}>{hint}</Text> : null}
+    </View>
+  );
+}
+
 /**
  * No RPC copies arbitrary text, so this goes through the host's clipboard —
  * which a host is free not to have. The caller says so rather than pretending

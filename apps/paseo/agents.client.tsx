@@ -27,6 +27,7 @@ import {
   setPreference,
   routerInstall,
   routerConfigure,
+  routerModels,
   routerStatus,
   routerTrace,
   wireAuto,
@@ -42,6 +43,7 @@ import {
   Button,
   Card,
   CodeBlock,
+  ComboBox,
   ConfirmButton,
   ErrorText,
   Facts,
@@ -71,8 +73,9 @@ import {
  */
 
 type ProviderId = "claude" | "codex";
-type PanelTab = "accounts" | "limits" | "memory" | "router" | "help";
-type RouterDraftGroup = { name: string; purpose: string; targetsText: string };
+type PanelTab = "accounts" | "limits" | "memory" | "router";
+type RouterDraftTarget = { provider: string; model: string };
+type RouterDraftGroup = { name: string; purpose: string; targets: RouterDraftTarget[] };
 
 const CARD_TITLE: Record<ProviderId, string> = { claude: "Claude Code", codex: "Codex" };
 const SHORT: Record<ProviderId, string> = { claude: "Claude", codex: "Codex" };
@@ -298,11 +301,12 @@ function ToolchainRow({
     <Row
       first={first}
       title={entry.label}
-      subtitle={entry.version || (entry.installed ? "version unavailable" : "CLI not installed")}
+      subtitle={entry.binary}
       tone={tone}
       meta={
         <Facts
           items={[
+            { value: entry.version || (entry.installed ? "version unavailable" : "CLI not installed") },
             { value: entry.availableInPaseo ? "available in Paseo" : "not currently available" },
             { value: entry.managed ? (entry.builtIn ? "verified updater" : "custom updater") : "manual updates", tone: entry.managed ? "ok" : "attention" },
             entry.lastResult ? { value: `last: ${entry.lastResult}`, tone: entry.lastResult === "failed" ? "error" : undefined } : null,
@@ -313,6 +317,7 @@ function ToolchainRow({
       expanded={
         open ? (
           <View style={{ gap: t.space.sm }}>
+            <CodeBlock copy={false}>{entry.binary}</CodeBlock>
             {entry.builtIn ? (
               <>
                 <Facts items={[{ value: entry.binary }, { value: `update: ${entry.updateArgs.join(" ")}` }]} />
@@ -354,6 +359,70 @@ function ToolchainRow({
         ) : undefined
       }
     />
+  );
+}
+
+function RouterTargetEditor({
+  target,
+  providerOptions,
+  index,
+  count,
+  onChange,
+  onMove,
+  onRemove,
+}: {
+  target: RouterDraftTarget;
+  providerOptions: RouterProviderStatus["providerOptions"];
+  index: number;
+  count: number;
+  onChange: (target: RouterDraftTarget) => void;
+  onMove: (direction: -1 | 1) => void;
+  onRemove: () => void;
+}) {
+  const t = useTokens();
+  const callModels = useRpc(routerModels);
+  const models = useQuery({
+    queryKey: ["agent-link", "router-models", target.provider],
+    queryFn: () => callModels({ provider: target.provider }),
+    enabled: /^[a-z][a-z0-9-]*$/.test(target.provider),
+    staleTime: 5 * 60 * 1000,
+    retry: false,
+  });
+  const provider = providerOptions.find((option) => option.id === target.provider);
+  return (
+    <View style={{ padding: t.space.sm, borderRadius: t.radius.sm, backgroundColor: t.color.surface2, gap: t.space.sm }}>
+      <View style={{ flexDirection: t.compact ? "column" : "row", gap: t.space.sm }}>
+        <View style={{ flex: 1 }}>
+          <ComboBox
+            label={`${index + 1}. Provider`}
+            value={target.provider}
+            onChange={(value) => onChange({ provider: value, model: value === target.provider ? target.model : "" })}
+            options={providerOptions.map((option) => ({
+              value: option.id,
+              label: option.label,
+              description: option.available ? "available now" : "currently unavailable",
+            }))}
+            placeholder="Choose a Paseo provider"
+            hint={provider ? (provider.available ? "Available in Paseo now." : "Configured but unavailable; fallback will skip it.") : "Custom provider IDs are allowed."}
+          />
+        </View>
+        <View style={{ flex: 1 }}>
+          <ComboBox
+            label="Model"
+            value={target.model}
+            onChange={(value) => onChange({ ...target, model: value })}
+            options={(models.data?.models ?? []).map((model) => ({ value: model.id, label: model.label, description: model.description }))}
+            placeholder={models.isFetching ? "Loading models…" : "Choose a model"}
+            hint={models.data?.message ?? "Paseo will load this provider's model catalog."}
+          />
+        </View>
+      </View>
+      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: t.space.sm }}>
+        <Button label="Move up" variant="ghost" disabled={index === 0} onPress={() => onMove(-1)} />
+        <Button label="Move down" variant="ghost" disabled={index === count - 1} onPress={() => onMove(1)} />
+        <ConfirmButton label="Remove target" confirmLabel="Remove" onConfirm={onRemove} />
+      </View>
+    </View>
   );
 }
 
@@ -634,7 +703,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
       state.targetGroups.map((group) => ({
         name: group.name,
         purpose: group.purpose,
-        targetsText: group.targets.map((target) => `${target.provider}/${target.model}`).join("\n"),
+        targets: group.targets.map((target) => ({ provider: target.provider, model: target.model })),
       })),
     );
   }, [routerProviderQuery.data, routerDirty]);
@@ -642,6 +711,24 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const updateRouterGroup = (index: number, patch: Partial<RouterDraftGroup>) => {
     setRouterDirty(true);
     setRouterGroups((groups) => groups.map((group, groupIndex) => (groupIndex === index ? { ...group, ...patch } : group)));
+  };
+  const updateRouterTarget = (groupIndex: number, targetIndex: number, target: RouterDraftTarget) => {
+    setRouterDirty(true);
+    setRouterGroups((groups) => groups.map((group, currentGroup) => currentGroup === groupIndex ? {
+      ...group,
+      targets: group.targets.map((entry, currentTarget) => currentTarget === targetIndex ? target : entry),
+    } : group));
+  };
+  const moveRouterTarget = (groupIndex: number, targetIndex: number, direction: -1 | 1) => {
+    setRouterDirty(true);
+    setRouterGroups((groups) => groups.map((group, currentGroup) => {
+      if (currentGroup !== groupIndex) return group;
+      const nextIndex = targetIndex + direction;
+      if (nextIndex < 0 || nextIndex >= group.targets.length) return group;
+      const targets = [...group.targets];
+      [targets[targetIndex], targets[nextIndex]] = [targets[nextIndex]!, targets[targetIndex]!];
+      return { ...group, targets };
+    }));
   };
   const saveRouter = () => {
     const names = new Set<string>();
@@ -653,24 +740,19 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
         return;
       }
       names.add(name);
-      const targets = group.targetsText
-        .split("\n")
-        .map((line) => line.trim())
-        .filter(Boolean)
-        .flatMap((line) => {
-          const slash = line.indexOf("/");
-          const provider = slash > 0 ? line.slice(0, slash) : "";
-          const model = slash > 0 ? line.slice(slash + 1) : "";
-          return /^[a-z][a-z0-9-]*$/.test(provider) && model ? [{ provider, model }] : [];
-        });
-      if (!group.purpose.trim() || targets.length !== group.targetsText.split("\n").filter((line) => line.trim()).length || targets.length === 0) {
-        setNotice(`Fix ${name || "the unnamed route"}: add a purpose and one provider/model target per line.`);
+      const targets = group.targets.map((target) => ({ provider: target.provider.trim(), model: target.model.trim() }));
+      if (!group.purpose.trim() || targets.some((target) => !/^[a-z][a-z0-9-]*$/.test(target.provider) || !target.model) || targets.length === 0) {
+        setNotice(`Fix ${name || "the unnamed route"}: choose a provider and model for every target.`);
         return;
       }
       targetGroups.push({ name, purpose: group.purpose.trim(), selector: "in_order", targets });
     }
     if (targetGroups.length === 0) {
       setNotice("Add at least one orchestration group.");
+      return;
+    }
+    if (!routerModel.trim()) {
+      setNotice("Choose a controller model.");
       return;
     }
     routerConfigureMutation.mutate({
@@ -853,6 +935,16 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
           <Text style={t.text.caption}>or run it yourself:</Text>
         </View>
         <CodeBlock>{cli.data.command}</CodeBlock>
+      </Card>
+    ) : cli.data?.installed ? (
+      <Card padded={false}>
+        <Row
+          first
+          title="AgentLink CLI"
+          subtitle={cli.data.path}
+          meta={<Facts items={[{ value: `v${cli.data.version}` }, { value: cli.data.routersReady ? "routing launchers ready" : "routing launchers missing", tone: cli.data.routersReady ? "ok" : "attention" }]} />}
+          trailing={<StatusPill status="ok" label="installed" />}
+        />
       </Card>
     ) : null;
 
@@ -1504,17 +1596,22 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
     { value: "accounts", label: "Accounts" },
     { value: "limits", label: "Limit sentry" },
     { value: "memory", label: "Memory guard" },
-    { value: "help", label: "FAQs" },
   ];
 
   const selectedController = routerProviderQuery.data?.controllerOptions.find((option) => option.provider === routerController);
   const controllerModels = selectedController?.models ?? [];
+  const panelSubtitle: Record<PanelTab, string> = {
+    router: "Interpret once, delegate to a concrete Paseo provider/model, and keep the route auditable.",
+    accounts: "Provider availability, account quota, routing pools, CLI locations, and safe software updates.",
+    limits: "Detect real quota refusals, cool the affected account, and resume through a healthy route.",
+    memory: "Pause only Paseo-owned compiler work under pressure, then continue it without killing the agent.",
+  };
 
   return (
     <Screen t={t}>
       <Toolbar
         title="Agent Link"
-        subtitle="Live provider and account registry every 30 seconds; model and auth checks stay manual."
+        subtitle={panelSubtitle[panelTab]}
         actions={
           <Button label="Refresh" variant="ghost" loading={scanQuery.isFetching || heartbeatQuery.isFetching} onPress={refresh} />
         }
@@ -1734,64 +1831,65 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
             subtitle="The controller only interprets and delegates; it never performs the requested task. Fable is the planning-safe default."
             expanded={
               <View style={{ gap: t.space.md }}>
-                <Segmented
+                <ComboBox
+                  label="Controller account source"
                   options={routerProviderQuery.data.controllerOptions.map((option) => ({
                     value: option.provider,
                     label: option.label,
+                    description: option.available ? "available now" : "currently unavailable",
                     disabled: !option.available,
                   }))}
                   value={routerController}
+                  allowCustom={false}
                   onChange={(value) => {
+                    if (value !== "claude-auto" && value !== "claude") return;
                     setRouterController(value);
                     setRouterDirty(true);
                   }}
+                  hint="The account pool spreads new controller launches across healthy Claude accounts; primary pins one account."
                 />
-                <Field
+                <ComboBox
                   label="Controller model"
                   value={routerModel}
-                  onChangeText={(value) => {
+                  onChange={(value) => {
                     setRouterModel(value);
                     setRouterDirty(true);
                   }}
+                  options={controllerModels.map((model) => ({ value: model.id, label: model.label }))}
                   hint="This model interprets the request. The selected target below performs the work."
                 />
-                {controllerModels.length > 0 ? (
-                  <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-                    <Segmented
-                      options={controllerModels.map((model) => ({ value: model.id, label: model.label }))}
-                      value={routerModel}
-                      onChange={(value) => {
-                        setRouterModel(value);
-                        setRouterDirty(true);
-                      }}
-                    />
-                  </ScrollView>
-                ) : null}
                 <Notice tone="attention">
                   The boot controller is Claude-compatible because one Paseo adapter must start first. Once running, its targets can be any native, custom, or ACP provider.
                 </Notice>
               </View>
             }
           />
-          {routerGroups.map((group, index) => (
-            <Row
+          {routerGroups.map((group, index) => {
+            const groupKey = `router-group-${index}`;
+            const open = Boolean(openRows[groupKey]);
+            return (
+              <Row
               key={`${group.name}-${index}`}
               title={`${index + 1}. ${group.name || "Unnamed route"}`}
               subtitle="Targets run top to bottom; unavailable or genuinely failed targets fall through."
+              meta={<Facts items={[{ value: plural(group.targets.length, "target", "targets") }, group.targets[0] ? { value: `first: ${group.targets[0].provider}/${group.targets[0].model}` } : null]} />}
               trailing={
-                routerGroups.length > 1 ? (
-                  <ConfirmButton
-                    label="Remove"
-                    confirmLabel="Remove route"
-                    onConfirm={() => {
-                      setRouterGroups((groups) => groups.filter((_, groupIndex) => groupIndex !== index));
-                      setRouterDirty(true);
-                    }}
-                  />
-                ) : undefined
+                <>
+                  <Button label={open ? "Done" : "Edit"} variant="ghost" onPress={() => toggleRow(groupKey)} />
+                  {routerGroups.length > 1 ? (
+                    <ConfirmButton
+                      label="Remove"
+                      confirmLabel="Remove route"
+                      onConfirm={() => {
+                        setRouterGroups((groups) => groups.filter((_, groupIndex) => groupIndex !== index));
+                        setRouterDirty(true);
+                      }}
+                    />
+                  ) : null}
+                </>
               }
               expanded={
-                <View style={{ gap: t.space.sm }}>
+                open ? <View style={{ gap: t.space.sm }}>
                   <View style={{ flexDirection: t.compact ? "column" : "row", gap: t.space.sm }}>
                     <View style={{ flex: 1 }}>
                       <Field label="Route name" value={group.name} onChangeText={(value) => updateRouterGroup(index, { name: value })} placeholder="planning" />
@@ -1800,26 +1898,42 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                       <Field label="When to use it" value={group.purpose} onChangeText={(value) => updateRouterGroup(index, { purpose: value })} placeholder="Product and implementation plans" />
                     </View>
                   </View>
-                  <Field
-                    label="Ordered provider/model targets · one per line"
-                    value={group.targetsText}
-                    onChangeText={(value) => updateRouterGroup(index, { targetsText: value })}
-                    placeholder={"claude-auto/claude-fable-5\ncodex-auto/gpt-5.6-terra"}
-                    mono
-                    multiline
-                    minHeight={84}
-                    hint="Provider IDs come from Paseo. Custom and ACP providers work here too."
-                  />
-                </View>
+                  <View style={{ gap: t.space.sm }}>
+                    {group.targets.map((target, targetIndex) => (
+                      <RouterTargetEditor
+                        key={`${index}-${targetIndex}`}
+                        target={target}
+                        providerOptions={routerProviderQuery.data.providerOptions}
+                        index={targetIndex}
+                        count={group.targets.length}
+                        onChange={(next) => updateRouterTarget(index, targetIndex, next)}
+                        onMove={(direction) => moveRouterTarget(index, targetIndex, direction)}
+                        onRemove={() => {
+                          if (group.targets.length === 1) {
+                            setNotice("Each route group needs at least one target.");
+                            return;
+                          }
+                          updateRouterGroup(index, { targets: group.targets.filter((_, current) => current !== targetIndex) });
+                        }}
+                      />
+                    ))}
+                    <Button
+                      label="Add fallback target"
+                      variant="secondary"
+                      onPress={() => updateRouterGroup(index, { targets: [...group.targets, { provider: "", model: "" }] })}
+                    />
+                  </View>
+                </View> : undefined
               }
             />
-          ))}
+            );
+          })}
           <View style={{ padding: pad, gap: t.space.md }}>
             <Button
               label="Add route group"
               variant="secondary"
               onPress={() => {
-                setRouterGroups((groups) => [...groups, { name: `route-${groups.length + 1}`, purpose: "Describe when this route should be used", targetsText: "provider/model" }]);
+                setRouterGroups((groups) => [...groups, { name: `route-${groups.length + 1}`, purpose: "Describe when this route should be used", targets: [{ provider: "", model: "" }] }]);
                 setRouterDirty(true);
               }}
             />
@@ -1841,6 +1955,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                 routerDirty ? { value: "unsaved changes", tone: "attention" } : { value: "saved" },
               ]}
             />
+            <CodeBlock>{`launcher: ${routerProviderQuery.data.launcherPath}\nrules: ${routerProviderQuery.data.rulesPath}`}</CodeBlock>
             {!routerProviderQuery.data.loaded && routerProviderQuery.data.configured ? (
               <Button
                 label="Repair provider files"
@@ -1855,17 +1970,23 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
         <Loading label="Reading AgentRouter provider…" />
       ) : null}
 
-      {panelTab === "help" ? (
+      {panelTab === "router" ? (
         <Card>
-          <Text style={t.text.heading}>How does account routing work?</Text>
-          <Text style={t.text.body}>New agents go to a healthy account in the highest available priority group, then the least-recently-used one.</Text>
-          <Text style={t.text.heading}>Do running agents switch accounts?</Text>
-          <Text style={t.text.body}>No. A running process stays fixed. A failed resume moves its conversation before relaunch.</Text>
-          <Text style={t.text.heading}>Why can the first launch still hit a limit?</Text>
-          <Text style={t.text.body}>Claude does not expose fresh quota for every account without a model call. Routing uses its latest telemetry; a named-model refusal excludes that account only for that model, while spend and generic limits hold the whole account until a real probe serves.</Text>
-          <Text style={t.text.heading}>How do I add an account?</Text>
-          <Text style={t.text.body}>Open Accounts, choose its provider, press + Add account, then finish the browser sign-in using the command shown.</Text>
-          <CodeBlock>{"agent-link status\nagent-link auto\nagent-link login all\nagent-link cooldown"}</CodeBlock>
+          <Text style={t.text.heading}>How to use it</Text>
+          <Text style={t.text.bodyStrong}>1. Choose the interpreter</Text>
+          <Text style={t.text.body}>Use the Claude account pool for resilient controller launches. Fable is the default because interpreting and planning routes need judgment, not the cheapest model.</Text>
+          <Text style={t.text.bodyStrong}>2. Define ordered routes</Text>
+          <Text style={t.text.body}>Each group describes a kind of work. Add providers and models in preferred order; unavailable or genuinely failed targets fall through to the next entry.</Text>
+          <Text style={t.text.bodyStrong}>3. Start AgentRouter in Paseo</Text>
+          <Text style={t.text.body}>Choose AgentRouter → Automatic route. It states the selected provider/model, creates an auditable Paseo child, then relays that child's result.</Text>
+          <Text style={t.text.heading}>What stays fixed?</Text>
+          <Text style={t.text.body}>Running processes never switch accounts or models. Routing happens at launch; a failed resumable session is ended, then relaunched through a healthy account.</Text>
+          <Text style={t.text.heading}>Why can a launch still hit a limit?</Text>
+          <Text style={t.text.body}>Some providers do not expose fresh quota without a paid call. AgentLink uses the latest telemetry, records real refusals, cools that account, and tries the next configured target.</Text>
+          <Text style={t.text.heading}>Probe versus update</Text>
+          <Text style={t.text.body}>Probe spends one tiny model turn to prove account quota. Provider update only checks or replaces an idle CLI binary. Plugin update compares published Agent Link release numbers. They are independent.</Text>
+          <Text style={t.text.heading}>Direct provider or AgentRouter?</Text>
+          <Text style={t.text.body}>Choose a direct Paseo provider when you already know the model. Use AgentRouter when you want one entry point to interpret, delegate, fall back, and leave route evidence.</Text>
           {scanQuery.data && !scanQuery.data.agentAuthInstalled ? (
             <Text style={t.text.caption}>Install the AgentLink CLI to add dynamic routing and terminal account controls.</Text>
           ) : null}

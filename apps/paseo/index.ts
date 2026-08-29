@@ -23,6 +23,7 @@ import {
   removeAccount,
   routerInstall,
   routerConfigure,
+  routerModels,
   routerStatus,
   routerTrace,
   scan,
@@ -52,6 +53,7 @@ import {
   handleRemoveAccount,
   handleRouterInstall,
   handleRouterConfigure,
+  handleRouterModels,
   handleRouterStatus,
   handleRouterTrace,
   handleScan,
@@ -111,6 +113,7 @@ export default function contribute(plugin: PluginContext) {
   plugin.handle(routerStatus, handleRouterStatus);
   plugin.handle(routerInstall, handleRouterInstall);
   plugin.handle(routerConfigure, handleRouterConfigure);
+  plugin.handle(routerModels, handleRouterModels);
   plugin.handle(routerTrace, handleRouterTrace);
   plugin.handle(setCooldown, handleSetCooldown);
   plugin.handle(addAccount, handleAddAccount);

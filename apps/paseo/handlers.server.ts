@@ -1132,16 +1132,20 @@ async function routerProviderStatus(paseo: PluginHandlerContext["paseo"], messag
   const overrides = await providerOverrides(paseo);
   let loaded = false;
   const availability = new Map<string, boolean>();
+  const providerLabels = new Map<string, string>();
   let controllerModels: Array<{ id: string; label: string }> = [];
   try {
     const available = await paseo.providers.listAvailable();
-    for (const entry of available.providers) availability.set(entry.provider, entry.available);
+    for (const entry of available.providers as Array<{ provider: string; label?: string; available: boolean }>) {
+      availability.set(entry.provider, entry.available);
+      providerLabels.set(entry.provider, entry.label ?? providerLabel(entry.provider, overrides));
+    }
     loaded = availability.get(ROUTER_PROVIDER_ID) === true;
     const modelResult = (await paseo.providers.listModels("claude" as never)) as unknown as {
-      models?: Array<{ id?: string; label?: string; name?: string }>;
+      models?: Array<{ id?: string; label?: string; name?: string; model?: string }>;
     };
     controllerModels = (modelResult.models ?? []).flatMap((model) =>
-      typeof model.id === "string" ? [{ id: model.id, label: model.label ?? model.name ?? model.id }] : [],
+      typeof model.id === "string" ? [{ id: model.id, label: model.label ?? model.name ?? model.model ?? model.id }] : [],
     );
   } catch {
     // Configured remains useful when an older daemon cannot report availability.
@@ -1162,6 +1166,10 @@ async function routerProviderStatus(paseo: PluginHandlerContext["paseo"], messag
       { provider: "claude-auto", label: "Claude account pool", available: availability.get("claude-auto") === true, models: controllerModels },
       { provider: "claude", label: "Claude primary", available: availability.get("claude") === true, models: controllerModels },
     ] satisfies Array<{ provider: RouterController; label: string; available: boolean; models: Array<{ id: string; label: string }> }>),
+    providerOptions: [...availability.entries()]
+      .filter(([id]) => id !== ROUTER_PROVIDER_ID)
+      .map(([id, available]) => ({ id, label: providerLabels.get(id) ?? providerLabel(id, overrides), available }))
+      .sort((a, b) => Number(b.available) - Number(a.available) || a.label.localeCompare(b.label)),
     targetGroups: config.targetGroups.map((group) => ({
       ...group,
       targets: group.targets.map((target) => ({
@@ -1250,6 +1258,30 @@ export async function handleRouterConfigure(
   writeTextAtomic(routerRulesPath(), input.userRules.endsWith("\n") ? input.userRules : `${input.userRules}\n`);
   const status = await handleRouterInstall({}, context);
   return { ...status, message: "AgentRouter orchestration saved for new launches." };
+}
+
+export async function handleRouterModels({ provider }: { provider: string }, { paseo }: PluginHandlerContext) {
+  try {
+    const result = (await paseo.providers.listModels(provider as never)) as unknown as {
+      models?: Array<{ id?: string; label?: string; name?: string; model?: string; description?: string }>;
+    };
+    const models = (result.models ?? []).flatMap((model) => typeof model.id === "string" ? [{
+      id: model.id,
+      label: model.label ?? model.name ?? model.model ?? model.id,
+      description: model.description ?? "",
+    }] : []);
+    return {
+      provider,
+      models,
+      message: models.length > 0 ? `${models.length} models reported by Paseo.` : "This provider did not report a model catalog; a custom model ID is still allowed.",
+    };
+  } catch (error) {
+    return {
+      provider,
+      models: [],
+      message: `Model catalog unavailable: ${error instanceof Error ? error.message.split("\n")[0] : String(error)}`,
+    };
+  }
 }
 
 type ListedAgentRecord = {
