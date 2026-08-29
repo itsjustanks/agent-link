@@ -344,7 +344,7 @@ Routing is a small launcher script that picks an account and `exec`s the real CL
 
 `agent-link sync` copies MCP server definitions, project-trust flags, `settings.json` preferences (output style, permissions, env) and any custom output styles from your primary into each account — preferences and definitions only, never credentials. Run it after changing a setting you want everywhere, and after adding an account. OAuth-based MCP servers authorize once per account, since those grants belong to the account.
 
-`agent-link style install` applies one compact response contract to Claude output styles and Codex `AGENTS.md` across the primary and managed accounts. Task updates use only the relevant **Asked / Working on / Decision / Outcome / Goal** bullets; simple answers stay one short paragraph. Paseo's daemon system prompt covers other providers launched through Paseo.
+`agent-link style install` applies one compact response contract to Claude output styles and Codex `AGENTS.md` across the primary and managed accounts. Task updates use only the relevant **Asked / Working on / Decision / Outcome / Goal / Next** bullets; **Next** appears only when there is a useful immediate action. Simple answers stay one short paragraph. Paseo's daemon system prompt covers other providers launched through Paseo.
 
 ## Troubleshooting
 
