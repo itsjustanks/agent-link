@@ -125,5 +125,23 @@ probe_output="$(HOME="$fixture_root" PATH="$fixture_root/bin:$PATH" AGENT_LINK_H
   "$repo_root/agent-link" probe claude claude-fable-5 --park)"
 grep -q "CHECK FAILED" <<<"$probe_output"
 test -f "$fixture_root/state/pools/hold-claude-primary"
+test ! -f "$fixture_root/state/pools/holdmodel-claude-primary-fable-5"
+
+# A proven revoked login is account-wide, not model-specific. Fail closed so
+# every Claude model skips that config directory until interactive sign-in.
+printf '%s\n' '#!/usr/bin/env bash' \
+  'echo "Failed to authenticate. API Error: 401 OAuth access token has been revoked." >&2' \
+  'exit 1' > "$fixture_root/bin/claude"
+chmod +x "$fixture_root/bin/claude"
+probe_output="$(HOME="$fixture_root" PATH="$fixture_root/bin:$PATH" AGENT_LINK_HOME="$fixture_root" \
+  "$repo_root/agent-link" probe claude claude-opus-5 --park)"
+grep -q "AUTH FAILED" <<<"$probe_output"
+grep -q "authentication failed" "$fixture_root/state/pools/hold-claude-primary"
+grep -q "authentication failed" "$fixture_root/state/pools/hold-claude-$account"
+test ! -f "$fixture_root/state/pools/holdmodel-claude-primary-opus-5"
+status_output="$(HOME="$fixture_root" PATH="$fixture_root/bin:$PATH" AGENT_LINK_HOME="$fixture_root" \
+  "$repo_root/agent-link" status)"
+grep -q "primary.*HELD.*authentication failed" <<<"$status_output"
+grep -q "$account.*held.*authentication failed" <<<"$status_output"
 
 echo "refusal routing fixture passed"

@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.5.29"
+VERSION="0.5.30"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -1199,6 +1199,10 @@ is_limit_refusal_text() {
   printf '%s' "$1" | grep -Eqi "you.?ve (hit|reached) .{0,80}limit|usage limit|rate limit|spend limit|limit reached|credit balance|quota exceeded|out of credits"
 }
 
+is_auth_failure_text() {
+  printf '%s' "$1" | grep -Eqi "failed to authenticate|authentication failed|oauth access token has been revoked|access token.{0,40}(revoked|expired)|api error: *401|not logged in|login required|unauthori[sz]ed"
+}
+
 # Park an account that just refused, until the reset time when one was parsed.
 autopark() { # $1 provider, $2 key (email or "primary"), $3 until-epoch or hold:<reason>
   mkdir -p "$(pools_dir)"
@@ -1981,7 +1985,7 @@ fi
 
 # One place that knows how an account should look: dot colour + words.
 slot_state() { # $1 provider, $2 email -> "dot|state|note"
-  local dir got until now last mins runs held_models suffix
+  local dir got until now last mins runs held held_models suffix
   dir="$(slot_dir "$1" "$2")"
   if ! prov_logged_in "$1" "$dir"; then
     printf '%s|%s|%s' "${C_YELLOW}○${C_OFF}" "not logged in" "run 'l' to log in"
@@ -1990,6 +1994,11 @@ slot_state() { # $1 provider, $2 email -> "dot|state|note"
   got="$(prov_email "$1" "$dir")"
   if [ -n "$got" ] && [ "$got" != "$2" ]; then
     printf '%s|%s|%s' "${C_RED}●${C_OFF}" "WRONG ACCOUNT" "signed in as $got"
+    return
+  fi
+  held="$(hold_get "$1" "$2" 2>/dev/null || true)"
+  if [ -n "$held" ]; then
+    printf '%s|%s|%s' "${C_RED}●${C_OFF}" "held" "$held"
     return
   fi
   now="$(date +%s)"
@@ -2012,7 +2021,7 @@ slot_state() { # $1 provider, $2 email -> "dot|state|note"
 }
 
 cmd_status() {
-  local p e i pointer state dot words note auto right pad pemail pcov pruns pnote puntil pnow
+  local p e i pointer state dot words note auto right pad pemail pcov pruns pnote puntil pnow phold pdot
   for p in $PROVIDERS; do
     pointer="primary"
     [ -f "$(route_file "$p")" ] && pointer="$(cat "$(route_file "$p")")"
@@ -2030,14 +2039,20 @@ cmd_status() {
       pruns="$(cat "$(pools_dir)/count-$p-primary" 2>/dev/null || echo 0)"
       puntil="$(cat "$(pools_dir)/cooldown-$p-primary" 2>/dev/null || echo 0)"
       pnow="$(date +%s)"
-      if [ -n "$pcov" ]; then
+      phold="$(hold_get "$p" primary 2>/dev/null || true)"
+      pdot="${C_GREEN}●${C_OFF}"
+      if [ -n "$phold" ]; then
+        pdot="${C_RED}●${C_OFF}"
+        pnote="HELD — $phold"
+      elif [ -n "$pcov" ]; then
         pnote="duplicated by a slot below"
       elif [ "$puntil" -gt "$pnow" ]; then
+        pdot="${C_RED}●${C_OFF}"
         pnote="parked $(( (puntil - pnow + 59) / 60 ))m — $(cat "$(pools_dir)/reason-$p-primary" 2>/dev/null || echo 'routing skips it')"
       else
         pnote="in rotation · ${pruns} launches"
       fi
-      printf '    %s %-30s %-14s %s%s%s\n' "${C_GREEN}●${C_OFF}" "$pemail" "primary" "$C_DIM" "$pnote" "$C_OFF"
+      printf '    %s %-30s %-14s %s%s%s\n' "$pdot" "$pemail" "primary" "$C_DIM" "$pnote" "$C_OFF"
     fi
     i=0
     for e in $(slot_list "$p"); do
@@ -2641,7 +2656,7 @@ cmd_cooldown() { # provider email minutes — park an exhausted account
 # unreliable — an account marked "out of credits" can still serve, and one that
 # looks fine can refuse — so this measures instead of guessing.
 cmd_probe() { # $1 provider (default claude), $2 model, [--park]
-  local p="${1:-claude}" model="${2:-}" park="" e dir out rc ok model_slug
+  local p="${1:-claude}" model="${2:-}" park="" e dir out rc ok auth_failed limit_failed model_slug
   case "${3:-}" in --park) park=1 ;; esac
   prov_valid "$p" || { echo "usage: agent-link probe <claude|codex> [model] [--park]" >&2; return 1; }
   [ "$p" = claude ] || { echo "probe currently supports claude only" >&2; return 1; }
@@ -2662,10 +2677,16 @@ cmd_probe() { # $1 provider (default claude), $2 model, [--park]
       rc=$?
     fi
     out="$(printf '%s' "$out" | tr '\n' ' ')"
-    if [ "$rc" -ne 0 ]; then
+    auth_failed=""; limit_failed=""
+    if is_auth_failure_text "$out"; then
+      auth_failed=1
+      ok=""
+      printf '%sAUTH FAILED%s — login required\n' "$C_RED" "$C_OFF"
+    elif [ "$rc" -ne 0 ]; then
       ok=""
       printf '%sCHECK FAILED%s — account remains unavailable\n' "$C_RED" "$C_OFF"
     elif is_limit_refusal_text "$out"; then
+      limit_failed=1
       ok=""
       printf '%sCANNOT SERVE%s %s\n' "$C_RED" "$C_OFF" "${model:-default}"
     else
@@ -2683,7 +2704,11 @@ cmd_probe() { # $1 provider (default claude), $2 model, [--park]
         rm -f "$(pools_dir)/hold-$p-$e" "$(pools_dir)/cooldown-$p-$e" "$(pools_dir)/reason-$p-$e"
         echo "      released — it just served, so its park is over"
       fi
-    elif [ -n "$park" ]; then
+    elif [ -n "$park" ] && [ -n "$auth_failed" ]; then
+      hold_set "$p" "$e" "authentication failed — run: agent-link login all"
+      echo "auto: authentication failed — login required" > "$(pools_dir)/reason-$p-$e"
+      echo "      HELD (authentication) — run: agent-link login all"
+    elif [ -n "$park" ] && [ -n "$limit_failed" ]; then
       case "$out" in
         *"spend limit"*)
           hold_set "$p" "$e" "monthly spend limit — raise it at claude.ai/settings/usage, then: agent-link probe $p"
@@ -3224,14 +3249,20 @@ cmd_shims() { # numbered per-slot shims: claude-1, codex-2, ...
       pruns="$(cat "$(pools_dir)/count-$p-primary" 2>/dev/null || echo 0)"
       puntil="$(cat "$(pools_dir)/cooldown-$p-primary" 2>/dev/null || echo 0)"
       pnow="$(date +%s)"
-      if [ -n "$pcov" ]; then
+      phold="$(hold_get "$p" primary 2>/dev/null || true)"
+      pdot="${C_GREEN}●${C_OFF}"
+      if [ -n "$phold" ]; then
+        pdot="${C_RED}●${C_OFF}"
+        pnote="HELD — $phold"
+      elif [ -n "$pcov" ]; then
         pnote="duplicated by a slot below"
       elif [ "$puntil" -gt "$pnow" ]; then
+        pdot="${C_RED}●${C_OFF}"
         pnote="parked $(( (puntil - pnow + 59) / 60 ))m — $(cat "$(pools_dir)/reason-$p-primary" 2>/dev/null || echo 'routing skips it')"
       else
         pnote="in rotation · ${pruns} launches"
       fi
-      printf '    %s %-30s %-14s %s%s%s\n' "${C_GREEN}●${C_OFF}" "$pemail" "primary" "$C_DIM" "$pnote" "$C_OFF"
+      printf '    %s %-30s %-14s %s%s%s\n' "$pdot" "$pemail" "primary" "$C_DIM" "$pnote" "$C_OFF"
     fi
     i=0
     for e in $(slot_list "$p"); do

@@ -152,7 +152,7 @@ agent-link probe claude claude-fable-5 --park
 #       HELD for claude-fable-5 — other Claude models remain routable
 ```
 
-Each account answers one token on that model; `--park` holds the ones that refuse out of rotation. Re-run it after a reset; only a passing call releases the hold.
+Each account answers one token on that model; `--park` holds model refusals and revoked logins out of rotation. A transport or process error is reported but never treated as quota evidence. Re-run after a reset or sign-in; only a passing call releases the hold.
 
 Two guarantees that make this safe:
 
