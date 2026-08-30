@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.5.48"
+VERSION="0.5.49"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -567,7 +567,7 @@ def update_sentry_outcome(request, outcome):
     if not prior and not request.get("title") and not request.get("workspaceId"): return
     if outcome == "continuation-accepted" or outcome == "cross-provider-continuation" or outcome.startswith("already-routed") or outcome.startswith("already-cross-provider"):
         action = "auto-resumed"
-        suffix = "linked continuation started" if "cross-provider" in outcome else "retry accepted by Paseo"
+        suffix = "replacement session adopted the task" if "cross-provider" in outcome else "retry accepted by Paseo"
     elif outcome.endswith("3-times") or outcome in {"expired-or-invalid", "invalid-request"}:
         action, suffix = "resume-failed", outcome.replace("-", " ")
     else:
@@ -643,6 +643,79 @@ def extract_agent_id(payload):
             if found: return found
     return None
 
+def record_labels(record):
+    labels = record.get("labels") if isinstance(record, dict) else None
+    return labels if isinstance(labels, dict) else {}
+
+def continuation_root(agent_id, record):
+    labels = record_labels(record)
+    explicit = labels.get("agent-link-continuation-root")
+    if isinstance(explicit, str) and explicit: return explicit
+    current = agent_id
+    current_record = record
+    seen = set()
+    for _ in range(16):
+        if current in seen: break
+        seen.add(current)
+        prior = record_labels(current_record).get("agent-link-continuation-of")
+        if not isinstance(prior, str) or not prior: break
+        current = prior
+        current_record = agent_record(current)
+    return current
+
+def listed_agent_children(parent_id):
+    rc, output, _ = run([
+        paseo, "agent", "ls", "--global", "--all", "--json",
+        "--label", f"paseo.parent-agent-id={parent_id}",
+    ], 20)
+    payload = load_json(output) if rc == 0 else None
+    if isinstance(payload, dict): payload = payload.get("entries")
+    if not isinstance(payload, list): return []
+    children = []
+    for raw in payload:
+        if not isinstance(raw, dict): continue
+        child = raw.get("agent") if isinstance(raw.get("agent"), dict) else raw
+        child_id = child.get("id")
+        if not isinstance(child_id, str) or not child_id: continue
+        children.append(child)
+    return children
+
+def update_agent_labels(agent_id, labels):
+    args = [paseo, "agent", "update", agent_id, "--json"]
+    for key, value in labels.items():
+        if value is not None and str(value): args.extend(["--label", f"{key}={value}"])
+    rc, output, error = run(args, 20)
+    return rc == 0, (error or output)[-1000:]
+
+def adopt_continuation(source_id, target_id, root_id, children):
+    carried = []
+    detached = []
+    warnings = []
+    for child in children:
+        child_id = str(child.get("id") or "")
+        if not child_id or child_id in {source_id, target_id} or child.get("archivedAt"): continue
+        ok, error = update_agent_labels(child_id, {
+            "paseo.parent-agent-id": target_id,
+            "agent-link-continuation-root": root_id,
+        })
+        if ok:
+            carried.append(child_id)
+            continue
+        rc, _, detach_error = run([paseo, "agent", "detach", child_id, "--json"], 20)
+        if rc == 0:
+            detached.append(child_id)
+        else:
+            warnings.append(f"child {child_id}: {detach_error or error}")
+    ok, error = update_agent_labels(source_id, {
+        "paseo.parent-agent-id": target_id,
+        "agent-link-continuation-root": root_id,
+        "agent-link-superseded-by": target_id,
+        "agent-link-history-segment": "true",
+        "agent-link-continuation-current": "false",
+    })
+    if not ok: warnings.append(f"source {source_id}: {error}")
+    return carried, detached, warnings
+
 def start_cross_provider(request, detail, target):
     source_id = str(request.get("agentId") or "")
     prior = prior_cross_provider(source_id)
@@ -656,21 +729,31 @@ def start_cross_provider(request, detail, target):
     request.update({"workspaceId": workspace_id, "title": title, "cwd": cwd})
     source_provider = str(request.get("provider") or "unknown")
     source_model = str(request.get("model") or "unknown model")
+    root_id = continuation_root(source_id, stored)
+    source_labels = record_labels(stored)
+    source_parent = str(source_labels.get("paseo.parent-agent-id") or detail.get("ParentAgentId") or "")
+    children = listed_agent_children(source_id)
+    child_ids = [str(child.get("id")) for child in children if child.get("id") and not child.get("archivedAt")]
+    child_note = f" Existing live Paseo children to preserve: {', '.join(child_ids)}." if child_ids else ""
     prompt = (
-        f"AgentLink cross-provider continuation for Paseo agent {source_id}. "
+        f"AgentLink cross-provider continuation for logical task {root_id}, replacing Paseo execution segment {source_id}. "
         f"The {source_provider}/{source_model} account family is exhausted, so continue this incomplete task using "
         f"{target['provider']}/{target['model']}. First run `paseo agent logs {source_id}` and inspect the current workspace and git diff. "
-        "Continue from the first incomplete step; do not redo completed work. Preserve every user constraint and existing agent/subagent result. "
+        "Continue from the first incomplete step; do not redo completed work. Preserve every user constraint and existing agent/subagent result."
+        f"{child_note} "
         f"Begin with one short line: `Continued from {source_id} on {target['provider']}/{target['model']}` and then take the next action."
     )
     args = [
         paseo, "agent", "run", "--background", "--json",
         "--provider", f"{target['provider']}/{target['model']}",
         "--thinking", target["thinking"],
-        "--title", f"Continue: {title}"[:120],
+        "--title", title[:120],
         "--label", f"agent-link-continuation-of={source_id}",
+        "--label", f"agent-link-continuation-root={root_id}",
+        "--label", "agent-link-continuation-current=true",
         "--label", "agent-link-fallback-depth=1",
     ]
+    if source_parent: args.extend(["--label", f"paseo.parent-agent-id={source_parent}"])
     if workspace_id: args.extend(["--workspace", str(workspace_id)])
     elif cwd: args.extend(["--cwd", cwd])
     args.append(prompt)
@@ -679,6 +762,7 @@ def start_cross_provider(request, detail, target):
     target_id = extract_agent_id(payload)
     if rc != 0 or not target_id:
         return None, (error or output or "Paseo did not return the continuation agent id")[-1500:]
+    carried, detached, warnings = adopt_continuation(source_id, target_id, root_id, children)
     request.update({
         "targetAgentId": target_id,
         "targetProvider": target["provider"],
@@ -686,7 +770,13 @@ def start_cross_provider(request, detail, target):
         "targetAccount": target["account"],
         "detail": f"{request.get('detail') or 'provider limit'} — whole {source_provider} family unavailable; continued as {target['provider']}/{target['model']} in agent {target_id}",
         "acceptedOutput": output[-2000:],
+        "logicalRootAgentId": root_id,
+        "carriedChildAgentIds": carried,
+        "detachedChildAgentIds": detached,
+        "continuityWarnings": warnings,
     })
+    if warnings:
+        request["detail"] += f" — continuity warnings: {'; '.join(warnings)}"
     return "cross-provider-continuation", ""
 
 def limit_phrase(log_text, status):

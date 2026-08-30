@@ -1677,7 +1677,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
       />
       <View style={{ padding: pad, gap: t.space.sm }}>
         <Text style={t.text.bodyStrong}>Same-tab rule</Text>
-        <Text style={t.text.body}>AgentRouter can change its answering provider on later turns. A direct Claude or Codex chat can change accounts in place, but changing provider creates a linked tab because native provider sessions are incompatible.</Text>
+        <Text style={t.text.body}>AgentRouter can change its answering provider on later turns. A direct Claude or Codex chat can change accounts in place. Cross-provider recovery adopts the task in a replacement session, carries live Paseo subagents forward, and keeps the exhausted session underneath as history.</Text>
       </View>
     </Card>
   );
@@ -1774,7 +1774,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                     {event.account ? <Tag label={event.account} tone="attention" /> : null}
                     {event.model ? <Tag label={event.model} /> : null}
                     {event.targetProvider && event.targetModel ? <Tag label={`continued on ${event.targetProvider} / ${event.targetModel}`} tone="ok" /> : null}
-                    {event.targetAgentId ? <Tag label={`linked agent ${event.targetAgentId}`} /> : null}
+                    {event.targetAgentId ? <Tag label={`active agent ${event.targetAgentId}`} /> : null}
                     <Tag label={`${event.attempts ?? 0} recovery attempt${(event.attempts ?? 0) === 1 ? "" : "s"}`} />
                     <Tag label={agoLabel(Math.floor(new Date(event.at).getTime() / 1000)) } />
                   </>

@@ -19,6 +19,10 @@ json.dump({"tokens": {"id_token": f"x.{payload}.x"}}, open(sys.argv[1], "w"))
 PY
 printf '%s\n' '{"workspaceId":"workspace-1","title":"Interrupted build","cwd":"/tmp/project","persistence":{"metadata":{"model":"claude-fable-5"}}}' \
   > "$fixture_root/.paseo/agents/project/agent-source.json"
+printf '%s\n' '{"id":"child-live","workspaceId":"workspace-1","title":"Live child","status":"running","labels":{"paseo.parent-agent-id":"agent-source","track":"implementation"}}' \
+  > "$fixture_root/.paseo/agents/project/child-live.json"
+printf '%s\n' '{"id":"child-archived","workspaceId":"workspace-1","title":"Archived child","status":"closed","archivedAt":"2026-01-01T00:00:00Z","labels":{"paseo.parent-agent-id":"agent-source"}}' \
+  > "$fixture_root/.paseo/agents/project/child-archived.json"
 printf '%s\n' '{"fallbacks":{"claude/claude-fable-5":["claude-auto/claude-fable-5","codex/gpt-5.6-sol"]}}' \
   > "$fixture_root/.paseo/orchestration-preferences.json"
 
@@ -28,25 +32,39 @@ HOME="$fixture_root" AGENT_LINK_HOME="$fixture_root" CLAUDE_CONFIG_DIR="$claude_
 
 provider_bin="$fixture_root/provider-bin"
 run_log="$fixture_root/run.log"
+update_log="$fixture_root/update.log"
 mkdir -p "$provider_bin"
 printf '%s\n' '#!/usr/bin/env bash' \
   'if [ "$1" = inspect ]; then [ -f "$AGENT_LINK_TEST_INSPECT_FAIL" ] && exit 2; printf '\''{"Status":"closed","Name":"Interrupted build","Cwd":"/tmp/project"}'\''; exit 0; fi' \
+  'if [ "$1 $2" = "agent ls" ]; then printf '\''[{"id":"child-live","status":"running","labels":{"paseo.parent-agent-id":"agent-source"}},{"id":"child-archived","status":"closed","archivedAt":"2026-01-01T00:00:00Z","labels":{"paseo.parent-agent-id":"agent-source"}}]'\''; exit 0; fi' \
   'if [ "$1 $2" = "agent run" ]; then printf '\''%s\n'\'' "$*" >> "$AGENT_LINK_TEST_RUN_LOG"; printf '\''{"id":"agent-sol"}'\''; exit 0; fi' \
+  'if [ "$1 $2" = "agent update" ]; then printf '\''%s\n'\'' "$*" >> "$AGENT_LINK_TEST_UPDATE_LOG"; printf '\''{}'\''; exit 0; fi' \
+  'if [ "$1 $2" = "agent detach" ]; then exit 0; fi' \
   'exit 2' > "$provider_bin/paseo"
 chmod +x "$provider_bin/paseo"
 
 HOME="$fixture_root" PATH="$provider_bin:$PATH" AGENT_LINK_HOME="$fixture_root" \
-  AGENT_LINK_TEST_RUN_LOG="$run_log" AGENT_LINK_TEST_INSPECT_FAIL="$fixture_root/inspect-fail" "$repo_root/agent-link" recover >/dev/null
+  AGENT_LINK_TEST_RUN_LOG="$run_log" AGENT_LINK_TEST_UPDATE_LOG="$update_log" \
+  AGENT_LINK_TEST_INSPECT_FAIL="$fixture_root/inspect-fail" "$repo_root/agent-link" recover >/dev/null
 
 test "$(wc -l < "$run_log" | tr -d ' ')" -eq 1
 grep -q -- '--provider codex-auto/gpt-5.6-sol' "$run_log"
 grep -q -- '--thinking ultra' "$run_log"
 grep -q -- '--workspace workspace-1' "$run_log" || { printf 'missing workspace in: '; cat "$run_log"; exit 1; }
 grep -q -- '--label agent-link-continuation-of=agent-source' "$run_log"
+grep -q -- '--label agent-link-continuation-root=agent-source' "$run_log"
+grep -q -- '--title Interrupted build' "$run_log"
+grep -q -- 'agent update child-live .*--label paseo.parent-agent-id=agent-sol' "$update_log"
+grep -q -- 'agent update child-live .*--label agent-link-continuation-root=agent-source' "$update_log"
+grep -q -- 'agent update agent-source .*--label paseo.parent-agent-id=agent-sol' "$update_log"
+grep -q -- 'agent update agent-source .*--label agent-link-superseded-by=agent-sol' "$update_log"
+! grep -q 'child-archived' "$update_log"
 test "$(find "$fixture_root/state/paseo-recovery/pending" -type f -name '*.json' | wc -l | tr -d ' ')" -eq 0
 done_file="$(find "$fixture_root/state/paseo-recovery/done" -type f -name '*.json' -print -quit)"
 grep -q '"outcome": "cross-provider-continuation"' "$done_file"
 grep -q '"targetAgentId": "agent-sol"' "$done_file"
+grep -q '"logicalRootAgentId": "agent-source"' "$done_file"
+grep -q '"carriedChildAgentIds": \["child-live"\]' "$done_file"
 grep -q '"targetProvider": "codex-auto"' "$fixture_root/state/paseo-limit-sentry.json"
 
 # A duplicate refusal for the same source links to the existing continuation
@@ -62,7 +80,8 @@ json.dump(request, open(sys.argv[2], "w"))
 PY
 touch "$fixture_root/inspect-fail"
 HOME="$fixture_root" PATH="$provider_bin:$PATH" AGENT_LINK_HOME="$fixture_root" \
-  AGENT_LINK_TEST_RUN_LOG="$run_log" AGENT_LINK_TEST_INSPECT_FAIL="$fixture_root/inspect-fail" "$repo_root/agent-link" recover >/dev/null
+  AGENT_LINK_TEST_RUN_LOG="$run_log" AGENT_LINK_TEST_UPDATE_LOG="$update_log" \
+  AGENT_LINK_TEST_INSPECT_FAIL="$fixture_root/inspect-fail" "$repo_root/agent-link" recover >/dev/null
 test "$(wc -l < "$run_log" | tr -d ' ')" -eq 1
 grep -q '"outcome": "already-cross-provider"' "$fixture_root/state/paseo-recovery/done/agent-source-duplicate.json"
 

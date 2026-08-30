@@ -1107,6 +1107,69 @@ async function listedAgentChildren(parentAgentId: string, paseo: PluginHandlerCo
   });
 }
 
+function paseoCliPath(): string {
+  const candidates = [
+    ...searchPath().map((directory) => join(directory, "paseo")),
+    "/Applications/Paseo.app/Contents/Resources/bin/paseo",
+  ];
+  return candidates.find((candidate) => existsSync(candidate)) ?? "";
+}
+
+function updatePaseoAgentLabels(agentId: string, labels: Record<string, string>): void {
+  const paseoCli = paseoCliPath();
+  if (!paseoCli) throw new Error("Paseo CLI was not found on the daemon machine");
+  const args = ["agent", "update", agentId, "--json"];
+  for (const [key, value] of Object.entries(labels)) args.push("--label", `${key}=${value}`);
+  execFileSync(paseoCli, args, { encoding: "utf8", timeout: 20_000 });
+}
+
+async function adoptContinuationTree({
+  sourceId,
+  targetId,
+  rootId,
+  children,
+  paseo,
+}: {
+  sourceId: string;
+  targetId: string;
+  rootId: string;
+  children: ListedAgentRecord[];
+  paseo: PluginHandlerContext["paseo"];
+}): Promise<{ carried: string[]; detached: string[]; warnings: string[] }> {
+  const carried: string[] = [];
+  const detached: string[] = [];
+  const warnings: string[] = [];
+  for (const child of children) {
+    if (!child.id || child.archivedAt || child.id === targetId) continue;
+    try {
+      updatePaseoAgentLabels(child.id, {
+        "paseo.parent-agent-id": targetId,
+        "agent-link-continuation-root": rootId,
+      });
+      carried.push(child.id);
+    } catch (error) {
+      try {
+        await paseo.agents.ref(child.id).detach();
+        detached.push(child.id);
+      } catch (detachError) {
+        warnings.push(`${child.id}: ${detachError instanceof Error ? detachError.message : String(detachError || error)}`);
+      }
+    }
+  }
+  try {
+    updatePaseoAgentLabels(sourceId, {
+      "paseo.parent-agent-id": targetId,
+      "agent-link-continuation-root": rootId,
+      "agent-link-superseded-by": targetId,
+      "agent-link-history-segment": "true",
+      "agent-link-continuation-current": "false",
+    });
+  } catch (error) {
+    warnings.push(`source ${sourceId}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return { carried, detached, warnings };
+}
+
 export async function handleRouterTrace({ agentId }: { agentId: string }, { paseo }: PluginHandlerContext) {
   const handle = paseo.agents.ref(agentId);
   const refreshed = await handle.refresh();
@@ -1209,6 +1272,10 @@ export async function handleAgentContinue(
     if (source.status === "running" || source.status === "initializing") {
       return { ok: false, agentId: null, message: "Wait for the current turn to stop before continuing in another provider." };
     }
+    const rootId = source.labels["agent-link-continuation-root"] ?? source.labels["agent-link-continuation-of"] ?? source.id;
+    const sourceParentId = source.labels["paseo.parent-agent-id"] ?? "";
+    const children = await listedAgentChildren(source.id, paseo);
+    const activeChildIds = children.flatMap((child) => child.id && !child.archivedAt ? [child.id] : []);
     let resolvedProvider = provider;
     let accountLabel = "provider account";
     if (provider === "claude" || provider === "codex") {
@@ -1236,24 +1303,43 @@ export async function handleAgentContinue(
       }
     }
     const target = `${resolvedProvider}/${model}`;
+    const childNote = activeChildIds.length > 0
+      ? ` Existing live Paseo children to preserve: ${activeChildIds.join(", ")}.`
+      : "";
     const prompt =
-      `AgentLink provider continuation for Paseo agent ${agentId}. Continue this chat using ${target} (${accountLabel}). ` +
+      `AgentLink provider continuation for logical task ${rootId}, replacing Paseo execution segment ${agentId}. Continue using ${target} (${accountLabel}). ` +
       `First run \`paseo agent logs ${agentId}\` and inspect the current workspace and git diff. ` +
-      "Continue from the first incomplete step; do not redo completed work. Preserve every user constraint and existing agent/subagent result. " +
+      `Continue from the first incomplete step; do not redo completed work. Preserve every user constraint and existing agent/subagent result.${childNote} ` +
       `Begin with one short line: \`Continued from ${agentId} on ${target}\` and then take the next action.`;
     const options = {
       config: { provider: target, thinkingOptionId: thinking },
-      title: `Continue: ${source.title ?? "Agent"}`.slice(0, 120),
+      title: (source.title ?? "Agent").slice(0, 120),
       prompt,
       labels: {
         "agent-link-continuation-of": agentId,
+        "agent-link-continuation-root": rootId,
+        "agent-link-continuation-current": "true",
         "agent-link-manual-provider-switch": "true",
+        ...(sourceParentId ? { "paseo.parent-agent-id": sourceParentId } : {}),
       },
     };
     const created = source.workspaceId
       ? await paseo.workspaces.ref(source.workspaceId).agents.create(options)
       : await paseo.agents.create({ ...options, cwd: source.cwd });
-    return { ok: true, agentId: created.id, message: `Created linked agent ${created.id} on ${target} · ${accountLabel}.` };
+    const adoption = await adoptContinuationTree({
+      sourceId: source.id,
+      targetId: created.id,
+      rootId,
+      children,
+      paseo,
+    });
+    const carried = adoption.carried.length > 0 ? ` · carried ${adoption.carried.length} subagent${adoption.carried.length === 1 ? "" : "s"}` : "";
+    const warning = adoption.warnings.length > 0
+      ? ` Continuity warning: ${adoption.warnings.join("; ")}`
+      : adoption.detached.length > 0
+        ? ` ${adoption.detached.length} subagent${adoption.detached.length === 1 ? " was" : "s were"} detached safely because reparenting was unavailable.`
+        : "";
+    return { ok: true, agentId: created.id, message: `Continued task on ${target} · ${accountLabel}${carried}.${warning}` };
   } catch (error) {
     return { ok: false, agentId: null, message: error instanceof Error ? error.message : String(error) };
   }

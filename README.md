@@ -73,9 +73,9 @@ Accounts combine login state, usage evidence, model access, last use, priority, 
 
 ### Change model or account from a chat
 
-![Model and account composer modal with live usage and linked continuation controls](docs/screenshots/model-and-account.png)
+![Model and account composer modal with live usage and task-continuation controls](docs/screenshots/model-and-account.png)
 
-Every routed Claude or Codex chat gets a **model and account** composer pill. It shows the active provider, model, account, limits, and recovery state. A stopped chat can continue on another eligible account; changing provider creates a linked continuation so the original remains intact.
+Every routed Claude or Codex chat gets a **model and account** composer pill. It shows the active provider, model, account, limits, and recovery state. A stopped chat can continue on another eligible account in place. Cross-provider recovery creates the technically required replacement session, makes it the active task, carries live Paseo subagents forward, and retains the exhausted session underneath as history.
 
 ### AgentRouter or a normal Paseo agent?
 

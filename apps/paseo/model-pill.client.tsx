@@ -279,7 +279,7 @@ function AccountModal({
                 <Text style={t.text.caption}>
                   {canMoveAccount
                     ? "Running turns stay pinned. After a turn stops, this routed chat can move accounts in the same tab."
-                    : "This chat has a fixed provider identity. Changing its account or provider creates a linked tab."}
+                    : "This provider session is fixed. Switching providers preserves one active task and carries its live Paseo subagents forward."}
                 </Text>
               ) : null}
             </View>
@@ -348,8 +348,8 @@ function AccountModal({
             })}
             {!isRouter ? <View style={{ padding: 12, borderRadius: t.radius.md, backgroundColor: t.color.surface2, gap: 10 }}>
               <View style={{ gap: 4 }}>
-                <Text style={t.text.bodyStrong}>Continue in a linked tab</Text>
-                <Text style={t.text.caption}>Choose another provider, or another account when this chat is fixed. The original stays intact as history.</Text>
+                <Text style={t.text.bodyStrong}>Continue this task</Text>
+                <Text style={t.text.caption}>The new provider becomes the active task. This session moves underneath as history, and live Paseo subagents carry across.</Text>
               </View>
               <ComboBox
                 label="Provider"
@@ -371,7 +371,7 @@ function AccountModal({
                   options={targetAccountOptions}
                   placeholder="Choose account routing"
                   allowCustom={false}
-                  hint="Automatic keeps failover; a named account pins the linked continuation."
+                  hint="Automatic keeps failover; a named account pins the replacement session."
                 />
               ) : null}
               <ComboBox
@@ -385,8 +385,8 @@ function AccountModal({
               />
               {targetProvider && targetModel && agentStatus !== "running" && agentStatus !== "initializing" ? (
                 <ConfirmButton
-                  label="Continue in new tab"
-                  confirmLabel="Create linked continuation"
+                  label="Switch provider & continue"
+                  confirmLabel="Continue this task"
                   variant="secondary"
                   onConfirm={() => continueAgent.mutate()}
                 />
@@ -404,7 +404,7 @@ function AccountModal({
                 <Text style={t.text.caption}>{currentEvent.detail}</Text>
                 <Text style={t.text.caption}>
                   {`${currentEvent.attempts ?? 0} retry attempt${(currentEvent.attempts ?? 0) === 1 ? "" : "s"}${
-                    currentEvent.targetAgentId ? ` · linked agent ${currentEvent.targetAgentId}` : ""
+                    currentEvent.targetAgentId ? ` · active agent ${currentEvent.targetAgentId}` : ""
                   }`}
                 </Text>
               </View>
