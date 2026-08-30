@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.5.52"
+VERSION="0.5.53"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -2021,21 +2021,16 @@ EOF
 # Move a conversation to a healthy account and print the one command that
 # continues it there. This is the honest form of "switch accounts": a running
 # process can never change account, but its next resume can.
-# Sending a message to an agent whose process is ALREADY RUNNING never routes:
-# the orchestrator writes to that process's stdin, so a session pinned to an
-# exhausted account keeps answering "usage limit" forever. The process cannot
-# be re-pointed — but it can be ended, and the next message then relaunches it
-# through the launcher, which picks a live account. Only processes bound to a
-# HELD (refusing) account are touched: they cannot serve anything anyway.
+# A running process cannot change account. Retire only the exact Paseo agent
+# whose turn refused; account-wide eviction is deliberately impossible.
 cmd_evict() { # [provider] [model-slug] [agent-id] — end matching held processes
   local p="${1:-claude}" model_slug="${2:-}" agent_id="${3:-}" pid dir key ended=0 until_ts command process_env
-  prov_valid "$p" || { echo "usage: agent-link evict [claude]" >&2; return 1; }
+  prov_valid "$p" || return 1
   [ "$p" = claude ] || { echo "evict supports claude only" >&2; return 1; }
+  [ -n "$agent_id" ] || { echo "refusing unscoped process eviction" >&2; return 1; }
   for pid in $(ps -axo pid,command | grep "[c]laude " | awk '{print $1}'); do
     process_env="$(ps eww -p "$pid" 2>/dev/null || true)"
-    if [ -n "$agent_id" ]; then
-      case "$process_env" in *"PASEO_AGENT_ID=$agent_id"*) ;; *) continue ;; esac
-    fi
+    case "$process_env" in *"PASEO_AGENT_ID=$agent_id"*) ;; *) continue ;; esac
     dir="$(printf '%s' "$process_env" | tr ' ' '\n' | grep '^CLAUDE_CONFIG_DIR=' | head -1 | cut -d= -f2-)"
     [ -n "$dir" ] || continue
     key="$(basename "$dir")"
@@ -4768,7 +4763,6 @@ usage:
   agent-link usage                 /usage across accounts: live window %%, resets, park state
   agent-link router [install|status]   AgentRouter virtual route: ordered cross-provider Paseo targets
   agent-link switch [prov] [sid]   move this conversation to a healthy account and print the resume
-  agent-link evict [prov]          end processes stuck on a held account so their next message re-routes
   agent-link revalidate [prov]     re-prove HELD accounts; release any that serve again
   agent-link prefer <prov> [email|primary] [first|last|clear]  bias routing toward/away from an account
   agent-link cooldown <prov> <email> hold          park with NO expiry (release: clear, or a passing probe)
@@ -4814,7 +4808,6 @@ main() {
     router)  shift; cmd_router "$@" ;;
     revalidate) shift; cmd_revalidate "$@" ;;
     switch)  shift; cmd_switch "$@" ;;
-    evict)   shift; cmd_evict "$@" ;;
     refused) shift; cmd_refused "$@" ;;
     hooks)   shift; cmd_hooks "$@" ;;
     pools)   cmd_pools ;;
