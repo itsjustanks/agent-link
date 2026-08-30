@@ -2,7 +2,7 @@
   "name": "agent-link",
   "private": true,
   "type": "module",
-  "version": "0.5.47",
+  "version": "0.5.48",
   "scripts": {
     "typecheck": "tsc --noEmit"
   },

@@ -2,34 +2,20 @@
 
 # paseo-agent-link
 
-**Agent Link for Paseo — route multiple AI coding accounts, recover from usage limits, and keep agents running without switching credentials.**
+**Account-aware routing, limit recovery, and memory protection for Paseo.**
 
+[![Release](https://img.shields.io/github/v/release/itsjustanks/paseo-agent-link)](https://github.com/itsjustanks/paseo-agent-link/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 ![Platform](https://img.shields.io/badge/macOS%20%C2%B7%20Linux-informational)
-![Dependencies](https://img.shields.io/badge/deps-bash%20%2B%20python3-lightgrey)
-![Paseo](https://img.shields.io/badge/Paseo-plugin%20included-8A63D2)
+![Paseo](https://img.shields.io/badge/Paseo-plugin-8A63D2)
 
 </div>
 
-```
-  CLAUDE                              plain `claude` → primary
-    ● you@work.com                   primary        in rotation · 12 launches
-    ● you@home.com                   logged in      in rotation · 9 launches · last 4m ago
-    ● you@side.com                   logged in      spend limit reached — routing skips it
-    dynamic routing: ready (~/.agent-link/bin/claude-auto)
-```
+**Agent Link** keeps several Claude Code and Codex accounts signed in at once, sends new work to a healthy account, and recovers chats after a usage limit. The product and Paseo plugin are called **Agent Link**; the CLI remains `agent-link`.
 
-## Three problems this solves
+## Start here
 
-**You can only use one account at a time.** If you have more than one Claude or Codex account, you hit a usage limit on one while the others sit idle. Account-switcher tools swap credentials in and out, which logs running sessions out mid-task. agent-link instead gives each account its own config directory — `CLAUDE_CONFIG_DIR` for Claude Code, `CODEX_HOME` for Codex — so every account is live at the same time. **N accounts, N rate limits.** It never reads, copies or backs up a token, so nothing decays and no running agent is ever signed out.
-
-**A usage limit kills your afternoon.** As an account climbs toward its limit, agent-link drains new work off it; account-wide limits park the account while named-model limits exclude only that account/model pair; and a conversation that died mid-task continues on an eligible account with a plain `--resume` — or resumes itself, if it was a [Paseo](https://paseo.sh) agent. Claude reports through its statusline and hooks, Codex through its own rollout files. You stop noticing limits.
-
-It is one bash file with no dependencies beyond `python3`, plus an optional [Paseo](https://paseo.sh) plugin that puts all of it in a UI.
-
----
-
-## Install
+Install the CLI:
 
 ```sh
 mkdir -p ~/.local/bin
@@ -37,321 +23,214 @@ curl -fsSL https://raw.githubusercontent.com/itsjustanks/paseo-agent-link/main/a
 chmod +x ~/.local/bin/agent-link
 ```
 
-Make sure `~/.local/bin` is on your `PATH`. Delete the file to uninstall.
-
-You need whichever CLIs you want to manage — [Claude Code](https://claude.com/claude-code) (`npm i -g @anthropic-ai/claude-code`) and/or [Codex](https://github.com/openai/codex) (`npm i -g @openai/codex`). You do not need to be logged into them first.
+Add accounts and enable routing:
 
 ```sh
-agent-link                              # interactive dashboard
-agent-link add claude you@work.com      # create an account and sign in
+agent-link add claude you@work.com
 agent-link add claude you@home.com
-agent-link auto                         # enable automatic routing
-agent-link claude                       # Claude Code on the next account in rotation
+agent-link auto
+agent-link status
 ```
 
-`agent-link status` shows every account: signed in, in rotation, parked, out of credit, or the wrong account signed into a slot.
-
-**Updating** is one command — it installs the [latest release](https://github.com/itsjustanks/paseo-agent-link/releases) (CLI and app sources from the same tag) and reinstalls the apps you have, so the CLI and its UI never drift apart:
-
-```sh
-agent-link update
-```
-
-Keep the provider CLIs current automatically:
-
-```sh
-agent-link toolchain enable   # daily at 04:15, plus one safe run now
-agent-link toolchain status   # installed versions and the last update result
-```
-
-The updater handles Claude Code, Codex, Kimi Code and Grok. It checks both
-Paseo and the process table before each update; a live provider, or an
-unreadable runtime state, is skipped until the next day. It never kills or
-restarts an agent and never changes credentials. Paseo itself remains managed
-by the desktop app. Unknown providers are left untouched rather than invoking
-an unverified update command. macOS launchd is preferred; if registration is
-unavailable, AgentLink installs the same daily job through cron instead. On a
-Paseo host where both registration paths are restricted, the already-loaded
-Paseo watchdog triggers the low-priority daily run.
-
----
-
-## In Paseo
-
-`agent-link app install paseo` adds the Agent Link tab to [Paseo](https://paseo.sh). On Paseo 0.7+, this creates a Git-managed install, so Paseo can check, validate, update, and roll back the plugin itself.
-
-### 🔗 Agent Link
-
-![The Agent Link tab: a Routing card showing the auto-router installed for Claude and Codex, then each account with its state, park timer, credit note and launch count](docs/screenshots/agent-link.png)
-
-The panel opens on **AgentRouter**, followed by **Accounts, Limit recovery, and Memory protection**. Provider tabs — Claude, Codex, Kimi, Grok, and custom additions — appear only inside Accounts. Automatic account selection is the first collapsible row; every account row owns its usage limits, reset times, availability, pause, priority, and on-request 7-day activity. A free 30-second status check refreshes local state without starting a model. **Check setup** starts the provider only to verify its path, version, login, and models. **Test account limits** spends one tiny Claude turn per sign-in and releases only sign-ins that answer.
-
-One click installs a **Dynamic Agent Link** provider. Pick it and each new chat chooses an available account by priority, then least recent use. A running chat keeps the account it started with.
-
-Every agent's composer has a **model and account** pill. It opens Paseo's native modal with the actual provider/model, current sign-in, live usage windows, reset times, recovery attempts, and linked fallback. A routed Claude/Codex chat can move accounts in the same tab after its turn stops. A fixed chat can continue on another account or provider in a linked tab. The original stays intact as history. AgentRouter keeps its request reader and answer model separate; unavailable runtime data stays explicitly unknown.
-
-The **AgentRouter** tab starts with its three-step guide. Searchable pickers choose the request-reader account and every ordered provider/model/account answer route. Automatic account choices keep failover; named choices stay pinned. Every answer runs as a concrete Paseo child. Direct Paseo profiles remain faster when you already know the model. Claude and Codex choices use AgentLink's account availability and cooldown rules.
-
-The **Accounts** tab also shows AgentLink and provider app locations and manages updates. Claude, Codex, Kimi, and Grok have built-in update steps; every other Paseo provider can receive a custom one. Scheduled runs first prove the provider is idle. **Test account limits** spends a tiny model turn; checking for software updates does not.
-
-AgentRouter uses virtual aliases, healthy targets, ordered groups, cooldowns, failover, and decision evidence. It delegates to explicit Paseo child agents, while Agent Link separately routes CLI account launches. It never claims to switch an in-flight agent. Routed launches record the exact Paseo agent ID and working directory, so duplicate-account rows show which agent last consumed that shared quota. If every target is parked, the launch stops cleanly instead of silently falling onto a known-exhausted primary. Paseo binds a custom provider to one adapter, so the controller must boot through a Claude-compatible adapter; once running, its target groups can use any native, custom, or ACP provider.
-
-### 🔌 MCP companion
-
-MCP management is now the independent [**Paseo MCP**](https://github.com/itsjustanks/paseo-mcp) plugin. It works with standard provider accounts on its own and automatically discovers AgentLink account directories when installed:
-
-```sh
-paseo plugin add itsjustanks/paseo-mcp
-```
-
-Looking for the Canvas tab — the one that renders and shares what your agents build? It grew into its own plugin: [**paseo-canvas**](https://github.com/itsjustanks/paseo-canvas). Install either, or both; they are independent.
-
-### Don't want the CLI?
-
-You do not need it for account visibility, usage, provider checks, memory protection, or recovery.
-
-The one exception is **routing**, because a Paseo provider runs a *command*, and that command is a small launcher script the CLI writes. So the Agent Link tab offers to install the CLI for you: one press downloads a single file to `~/.local/bin`, writes the launchers, and routing becomes available — and the exact `curl` command is shown next to the button for anyone who would rather run it themselves.
-
-### Installing the plugin
-
-**From the CLI** — one command. Paseo 0.7+ installs it from Git and owns safe updates; older versions fall back to the local-directory installer:
+Add the Paseo plugin:
 
 ```sh
 agent-link app install paseo
 ```
 
-**Directly with Paseo 0.7+**:
+Or let Paseo manage it directly from Git:
 
 ```sh
-paseo plugin add itsjustanks/paseo-agent-link --path apps/paseo
-paseo plugin update agent-link
+paseo plugin add itsjustanks/paseo-agent-link --path apps/paseo --id agent-link
 ```
 
-The default branch tracks updates. A tag or commit passed with `--ref` stays pinned. Paseo validates a candidate before activation and keeps the running version if startup fails.
+## What it does
 
-**Local development** — clone this repo, then:
+| Need | Agent Link behaviour |
+| --- | --- |
+| Use several accounts | Each login gets its own native config directory; no token copying or credential swapping |
+| Avoid exhausted accounts | New agents use a healthy account by priority and least-recent use |
+| Preserve running work | A live process keeps the account it started with |
+| Recover a limited chat | The account is parked and the transcript resumes on an eligible account |
+| See real capacity | Usage, reset times, holds, attempts, and account identity appear together |
+| Protect the host | Heavy Paseo type-checks pause under memory pressure and continue after recovery |
 
-1. **Settings → Plugins**
-2. Turn on **Enable plugins**
-3. Paste `<clone>/apps/paseo` into **Plugin directory**
-4. Leave **Plugin installation ID** blank (the manifest supplies `agent-link`)
-5. Press **Install directory**
+Routing happens **when an agent starts**. Agent Link never changes credentials underneath a running process.
 
-No `npm install` is needed — the plugin imports only modules Paseo already provides. Requires Paseo ≥ 0.5 (tested on 0.5.0-beta.5).
+## In Paseo
 
----
+### Route work across providers
 
-## The three ways to use it
+![AgentRouter setup in Paseo with request-reader and ordered provider routes](docs/screenshots/agent-router.png)
 
-| You want | Use | Behaviour |
-| --- | --- | --- |
-| Spread work across all accounts | `agent-link claude` · or point a provider at `~/.agent-link/bin/claude-auto` | Health gate, then priority group, then least-recently-used account |
-| One specific account | `agent-link run claude you@work.com claude` · or the `claude-1`, `claude-2` shims | Always that account |
-| Change what plain `claude` uses | `agent-link use claude you@work.com` | A pointer file; affects new processes only |
+AgentRouter reads the request, then delegates to ordered provider, model, and account routes. It coordinates the work; a concrete Paseo child agent produces each answer.
 
-`CODEX_HOME` / `codex` work identically to `CLAUDE_CONFIG_DIR` / `claude` throughout.
+### See capacity by account
 
-## Automatic routing
+![Claude accounts in Agent Link with availability, usage evidence, and recovery controls](docs/screenshots/accounts.png)
+
+Accounts combine login state, usage evidence, model access, last use, priority, and recovery controls. **Limit recovery** records refusals and holds only the affected account or model. **Memory protection** pauses heavy compiler jobs when the Mac is under pressure.
+
+### Change model or account from a chat
+
+![Model and account composer modal with live usage and linked continuation controls](docs/screenshots/model-and-account.png)
+
+Every routed Claude or Codex chat gets a **model and account** composer pill. It shows the active provider, model, account, limits, and recovery state. A stopped chat can continue on another eligible account; changing provider creates a linked continuation so the original remains intact.
+
+### AgentRouter or a normal Paseo agent?
+
+Use a normal Paseo agent when you already know the provider and model. Use AgentRouter when the request should choose among several ordered routes or survive provider-wide exhaustion. Every delegated answer still runs as a concrete Paseo child agent, so its provider, model, account, and agent ID remain visible.
+
+## When a limit is hit
+
+1. The failed account or account/model pair is held out of new work.
+2. New agents route to another healthy account.
+3. Resuming a stopped routed chat moves its transcript to an eligible account.
+4. If the whole provider family is unavailable, an optional cross-provider route creates one linked Paseo continuation.
+
+Useful checks:
 
 ```sh
-agent-link auto        # write the launchers
-agent-link status      # who is in rotation, and why anyone is not
+agent-link whoami                         # account used by this process
+agent-link next claude                    # next account, without consuming rotation
+agent-link usage                          # usage windows and resets
+agent-link probe claude <model> --park    # test accounts and hold refusals
+agent-link rescue --go                    # recover recently limited chats
+agent-link fix                            # probe, recover, and resync
 ```
 
-Rotation includes your **primary** login as well as every added account, so you never duplicate an account you already use. An account is skipped when it is **parked** (`agent-link cooldown claude you@work.com 180`, `… clear` to unpark) or **not signed in**.
+A rate limit belongs to the signed-in account, not the local slot. Duplicate slots using the same login share one quota pool.
 
-### Not every account can serve every model
+## Memory protection
 
-An account can be signed in and healthy yet still refuse a specific model — a spend limit applies per account, and premium models are the first thing to go. The CLI's own config flags do **not** predict this reliably (an account marked "out of credits" may serve fine while another that looks healthy refuses), so measure it:
+Paseo type-check and compiler processes are treated as job trees rather than unrelated child processes.
+
+- One heavy job runs at a time by default.
+- At 15% available memory or less on macOS or Linux, a job using at least 512 MB is paused with `SIGSTOP`.
+- At 25% available memory, it continues with `SIGCONT`.
+- On a multi-daemon Linux host, PSI or cgroup pressure from `/run/paseo-fleet-watchdog/status.json` can trigger the same cooldown earlier.
+- Provider sessions and account ownership are not killed or changed.
+- Processes started outside Paseo are not managed.
+
+Overrides:
 
 ```sh
-agent-link probe claude claude-fable-5 --park
-#   you@work.com     ok
-#   you@side.com     CANNOT SERVE claude-fable-5
-#       HELD for claude-fable-5 — other Claude models remain routable
+AGENT_LINK_TYPECHECK_CONCURRENCY=1
+AGENT_LINK_MEMORY_PAUSE_PERCENT=15
+AGENT_LINK_MEMORY_RESUME_PERCENT=25
+AGENT_LINK_RESOURCE_POLL_SECONDS=5
+AGENT_LINK_FLEET_STATUS_PATH=/run/paseo-fleet-watchdog/status.json
+AGENT_LINK_FLEET_STATUS_MAX_AGE_SECONDS=30
 ```
 
-Each account answers one token on that model; `--park` holds model refusals and revoked logins out of rotation. A transport or process error is reported but never treated as quota evidence. Re-run after a reset or sign-in; only a passing call releases the hold.
+## Account ownership and resumes
 
-Two guarantees that make this safe:
+A Claude conversation lives inside its creator's `CLAUDE_CONFIG_DIR`; a Codex thread lives inside its creator's `CODEX_HOME`. Resuming it under the wrong account causes errors such as *“No conversation found with session ID”* or *“no rollout found.”*
 
-- **A running process is never re-routed.** Routing happens at launch; nothing switches under a live session.
-- **Resumes follow their conversation.** A conversation only exists inside the account that created it, so `--resume <id>` runs on whichever account holds that session — including your **primary**, which owns every conversation started before you added accounts. (Without this you get *"No conversation found with session ID"*.) And when that account is parked or just got refused for a limit, the launcher **moves the conversation to a healthy account first** and resumes there.
-
-Paseo's Codex provider runs `codex app-server`, so the thread ID arrives over RPC after process launch instead of appearing in command-line arguments. The generated `codex-auto` launcher resolves `PASEO_AGENT_ID` back to Paseo's persisted agent record before choosing an account; old chats therefore follow their rollout even when the owning account is parked.
-
-### When an account hits its limit mid-conversation
-
-Be clear about what is and is not possible:
-
-- **New agents** are unaffected — the next launch goes to a healthy account automatically.
-- **A running agent cannot be switched.** Its account is fixed when the process starts, and the conversation lives inside that account's store. Anything claiming to hot-swap an account mid-turn is either restarting the process or lying.
-- **Recovery is a move, not a switch** — and through the auto launcher it is automatic: resume the chat (`claude --resume <id>`, or restart the agent in your editor) and the launcher parks the refused account, copies the conversation to the healthiest other one, and continues there. `agent-link resume-target claude <session-id>` shows where a resume would land without moving anything; `--go` (what the launchers pass) performs the move.
-- **Paseo recovery does not need repeated “continue” messages.** The refusal hook records the exact account/model and queues one continuation for the host watchdog. The watchdog also scans recent stopped agents from every provider once a minute, so Codex and providers without hooks are still visible. It retires only the provider process pinned to a proven AgentLink route, then Paseo relaunches that transcript through the next eligible account. If the whole provider family is unavailable, a configured cross-provider fallback starts one linked Paseo continuation in the same workspace, reads the source history, and records both agent IDs. This is deliberately a new agent—not a fake native-session resume. Duplicate failures reuse the existing continuation. `agent-link recover --scan` runs the same pass manually.
-
-### Before the wall: let Claude Code itself report its quota
+The generated `claude-auto` and `codex-auto` launchers resolve the owner before a resume. If that owner is held by a verified limit, Agent Link copies the transcript to a healthy account and records the move. Long conversations should be compacted before a manual handoff because the new account pays for the resumed context.
 
 ```sh
-agent-link hooks install             # account slots
-agent-link hooks install --primary   # include your primary login too (opt-in)
-```
-
-This wires the two signals Claude Code actually emits, per account:
-
-- **The statusline JSON** (Pro/Max) carries live 5-hour and weekly `used_percentage` plus the reset time. A tiny wrapper tees it on every render: at **85%** the account is flagged *nearing* — new launches drain to other accounts while anything already running (and resumes of its own conversations) rides on; at **99%** it is parked until Claude's own reported reset. Your existing statusline keeps rendering unchanged (and if you had none, you get one showing the percentages).
-- **A `StopFailure` hook** on `rate_limit`/`billing_error` parks the account the instant a turn actually dies on a limit — no waiting for the next launch to notice.
-
-Claude exposes those quota fields only to an **interactive** statusline after its first response. Paseo runs Claude non-interactively, so Agent Link also reads Claude's token-free cached `/usage` result from `.claude.json` when available. If a routed Claude account still says “no report,” run `agent-link run claude <email> claude`, send one message, and refresh. Codex does not need this step because every rollout persists its quota windows.
-
-So the full lifecycle is hands-off: drain at 85% → park at 99% or on the refusal → dead chats continue on the next `--resume` → a *window* park expires at the provider's exact reset. A refusal with no verified reset becomes a **HOLD**, not a guessed timer; a small hourly recheck or an explicit `agent-link probe` releases it only after it serves. `agent-link cooldown <prov> <email> clear` remains the manual override.
-
-`agent-link usage` is `/usage` across every account: live 5-hour/weekly percentages with reset times, captured from each account's own sessions, plus park/hold state — the same meters render per account in the Paseo panel. And `agent-link prefer <prov> <email> first|last` biases routing toward or away from an account (health still wins: a preferred account that is parked or nearing loses to a healthy ordinary one). `agent-link pools` shows the *nearing limit* tier; `agent-link hooks remove` undoes everything.
-
-**Codex gets the same lifecycle with no hooks at all**: every Codex turn writes `used_percent`, the reset time, and a limit-reached flag into its own rollout file, and the router reads the newest one at routing time — 85% flags nearing, 99% or the flag parks until Codex's own reset. `codex resume <id>` and `codex resume --last` route through the same owner-or-healthiest logic as Claude resumes, and `claude -c` / `--continue` finds the newest chat for the current project across every account. Moved transcripts are offset-marked so a dead account's telemetry can never park the healthy account it was moved to.
-
-**Running routed agents in [Paseo](https://paseo.dev) recover themselves.** Same-family recovery preserves the native session and transcript. Whole-family exhaustion follows `~/.paseo/orchestration-preferences.json` and creates one linked continuation on the first healthy Claude/Codex fallback; the source agent remains intact as history. Direct and single-account providers are surfaced for an explicit retry or AgentRouter handoff. The panel's *limit sentry* is a second path while open. A model-only Claude refusal excludes only that account/model pair. And when [Paseo's built-in MCP tools](https://paseo.sh/docs/mcp) are injected into agents (`daemon.mcp.injectIntoAgents`), the synced output style teaches orchestrator agents to revive their own dead subagents with `send_agent_prompt`.
-
-**Heavy type-checks cool down instead of taking the host with them.** The Paseo panel's memory guard treats each shell/package-runner/compiler chain as one job and permits one job at a time across Paseo agents. If macOS or Linux reports 15% memory available or less, a job already using at least 512 MB has its real compiler temporarily suspended with `SIGSTOP`; it continues with `SIGCONT` at 25%. On a multi-daemon Linux host, Agent Link also consumes `/run/paseo-fleet-watchdog/status.json`, so PSI or cgroup pressure triggers the same cooldown even before free memory crosses the local threshold. Nothing is killed, provider sessions keep their account, and type-checks started outside Paseo are out of scope. The Agent Link tab shows local and fleet state and has an off switch. Thresholds can be overridden with `AGENT_LINK_TYPECHECK_CONCURRENCY`, `AGENT_LINK_MEMORY_PAUSE_PERCENT`, `AGENT_LINK_MEMORY_RESUME_PERCENT`, `AGENT_LINK_RESOURCE_POLL_SECONDS`, `AGENT_LINK_FLEET_STATUS_PATH`, and `AGENT_LINK_FLEET_STATUS_MAX_AGE_SECONDS`.
-
-To sweep up in bulk, or move a chat somewhere specific by hand:
-
-```sh
-agent-link rescue              # which conversations died on a limit, and where
-agent-link rescue 6 --go       # park those accounts and move the chats to a healthy one
-agent-link handoff claude <session-id> you@other.com   # "primary" works too
+agent-link resume-target claude <session-id>
+agent-link handoff claude <session-id> you@other.com
 agent-link run claude you@other.com claude --resume <session-id>
 ```
 
-Resuming re-sends the conversation, so the new account pays for that context. On a long session, `/compact` before handing it over keeps the bill down.
+## Provider usage data
 
-### Where is the work actually going?
+- **Claude Code** — interactive statusline data and refusal hooks provide session and weekly windows when Claude exposes them.
+- **Codex** — rollout files provide usage percentages, reset times, and limit flags.
+- **Other Paseo providers** — AgentRouter can use them, but quota detail remains unknown unless their CLI or provider exposes reliable telemetry.
 
-```sh
-agent-link insights            # last 7 days, per account
-```
+Unknown data stays **unknown**. Agent Link does not infer capacity from a successful login or invent a reset time.
 
-```
-  you@work.com      primary  █▄▄▄▅▁▁  187 sessions · 47.2M out · 96% cached · 99% of work
-                             37 launches · fable-5, opus-5 · mostly my-main-repo
-                             ⚠ 112 limit refusals · probe this account before relying on it
-  you@home.com      account  ·····▇█   10 sessions ·  692k out · 97% cached ·  1% of work
-```
-
-Read from your own transcripts, so it costs nothing: daily activity, sessions, output tokens, how much input came from cache, which models each account ran, its busiest project, and how often it was refused for a limit. A lopsided share means rotation is not reaching your other accounts — usually because they are parked, signed out, or were added recently.
-
-### Which account am I on right now?
-
-Run this inside any agent or shell — one line, nothing else:
+## Keep provider CLIs current
 
 ```sh
-agent-link whoami
-# claude: you@home.com (account, 12 launches) · next: you@work.com
+agent-link toolchain enable
+agent-link toolchain status
+agent-link toolchain update
 ```
 
-It reads the config dir the current process was launched with, so an agent asking mid-conversation gets its *own* account, not the default. `agent-link next claude` prints just the account rotation would choose next, and neither command disturbs the rotation order.
+The daily updater supports Claude Code, Codex, Kimi Code, and Grok. It skips a provider when Paseo or the process table shows it is active or when runtime state cannot be read. It never kills an agent or changes credentials.
 
-## Use with an editor or orchestrator
+Update Agent Link itself with:
 
-Anything that lets you set **a command** or **environment variables** can use agent-link:
+```sh
+agent-link update
+```
 
-| Your tool lets you set | Point it at |
+Releases, the CLI, and the Paseo plugin use the same version.
+
+## Common commands
+
+| Command | Purpose |
 | --- | --- |
-| a command | `~/.agent-link/bin/claude-auto` (rotates) or `claude-1`, `claude-2` (pinned) |
-| env vars | `CLAUDE_CONFIG_DIR=~/.agent-link/accounts/claude/<email>` |
-| neither | wrap the call: `agent-link claude …` |
+| `agent-link status` | Show every account and routing state |
+| `agent-link add <provider> <email>` | Add and sign in an account |
+| `agent-link auto` | Write dynamic Claude and Codex launchers |
+| `agent-link usage` | Show usage windows and resets |
+| `agent-link insights [days]` | Show sessions, tokens, models, projects, and refusals by account |
+| `agent-link prefer <provider> <email> first\|last\|clear` | Adjust account priority without bypassing health |
+| `agent-link cooldown <provider> <email> hold\|clear` | Hold or release an account |
+| `agent-link sync` | Copy MCP definitions, trust, and preferences into account slots |
+| `agent-link hooks install` | Enable Claude limit telemetry for managed accounts |
+| `agent-link style install` | Apply the concise response contract across managed accounts |
+| `agent-link app install paseo` | Install or update the Paseo plugin |
+| `agent-link doctor` | Check the local setup |
 
-### Paseo, by hand
+Run `agent-link --help` for the complete command list.
 
-The plugin does this for you, but if you would rather wire it yourself:
+## Other tools and editors
 
-```jsonc
-// ~/.paseo/config.json → agents.providers
-"claude-auto": {
-  "extends": "claude",
-  "label": "Claude (Dynamic Agent Link)",
-  "command": ["/home/you/.agent-link/bin/claude-auto"]
-}
+Anything that accepts a command can use a dynamic launcher:
+
+```text
+~/.agent-link/bin/claude-auto
+~/.agent-link/bin/codex-auto
 ```
 
-`agent-link auto` prints this snippet filled in for your machine. Provider changes apply with `paseo plugin reload agent-link` — no daemon restart, so nothing mid-task is disturbed.
+Anything that accepts environment variables can pin an account with `CLAUDE_CONFIG_DIR` or `CODEX_HOME`. Numbered shims such as `claude-1` and `codex-2` are also available.
 
-## Integrations
-
-Optional add-ons live in [`apps/`](apps), one folder per tool. They are never required — the CLI works alone — and each only shows as installable when that tool is actually on your machine.
+Independent Paseo companions:
 
 ```sh
-agent-link app list
-#  ● paseo      Account routing, limits, recovery, and memory protection in Paseo  installed
-#  ○ vscode     Rotating accounts in VS Code or Cursor         available
-
-agent-link app install paseo            # install (re-run to upgrade)
-agent-link app install paseo --link     # register a checkout in place, for development
-agent-link app remove paseo             # uninstall; the source is left alone
+paseo plugin add itsjustanks/paseo-mcp
+paseo plugin add itsjustanks/paseo-canvas
 ```
 
-| App | What it gives you |
-| --- | --- |
-| [`paseo`](apps/paseo) | The Agent Link tab described [above](#in-paseo) — full detail in [`apps/paseo/README.md`](apps/paseo/README.md) |
-| [`vscode`](apps/vscode) | How to point VS Code or Cursor at a rotating or pinned account |
+- [Paseo MCP](https://github.com/itsjustanks/paseo-mcp) manages project and user MCP servers, including per-account OAuth.
+- [Paseo Canvas](https://github.com/itsjustanks/paseo-canvas) renders and shares agent artifacts.
 
-Anything missing — Paseo itself, Node, the plugins switch in Settings — is named rather than guessed at. Adding another editor or tool means dropping a folder in `apps/` with an `app.json`.
+Both work without Agent Link. When installed together, they can discover its account directories.
 
-## Commands
+## Safety boundaries
 
-```
-agent-link                       interactive dashboard
-agent-link status                every account and its state
-agent-link whoami [prov]         one line: the account this process is using, and what is next
-agent-link next [prov]           just the account rotation would pick next
-agent-link add <prov> <email>    create an account and sign in
-agent-link login [prov] [email|all]      sign in primary/slots that need it
-agent-link claude|codex [args]   run that CLI on the next account in rotation
-agent-link auto                  write the auto-routing launchers
-agent-link cooldown <prov> <email> [min|clear]   park / unpark an account
-agent-link handoff <prov> <session-id> <email>   move a chat to another account
-agent-link run <prov> <email> [cmd...]   run anything under one account
-agent-link use <prov> <email|N|primary>  point plain claude/codex at an account
-agent-link route enable|disable|status   manage the plain-command shims
-agent-link shims                 numbered per-account shims (claude-1, …)
-agent-link env <prov> <email>    eval-able export for one account
-agent-link sync                  copy MCP servers + project trust into accounts
-agent-link style install         apply the concise response contract to primary + managed accounts
-agent-link remove <prov> <email> archive an account slot outside routing
-agent-link app [list|install|remove] [id] [--link]   optional integrations under apps/
-agent-link update                update the CLI, then reinstall the apps you have installed
-agent-link fix [model]           test accounts, rescue stuck chats, resync — one-shot cleanup
-agent-link insights [days]       where work went: sessions, tokens, cache rate, models, refusals
-agent-link probe [prov] [model] [--park]   ask each account to answer on a model
-agent-link rescue [hours] [--go] conversations that hit a limit; --go moves them
-agent-link whoami / next         which account this process uses / what is next
-agent-link doctor                sanity checks
-```
-
-## Things worth knowing
-
-- **Adding an account can sign another one out.** Claude keeps every config-dir login in one shared keychain item, and a new login can evict an existing entry. Run `agent-link status` after adding an account and re-login anything that dropped. Keeping your primary in rotation (instead of duplicating it as an account slot) means one fewer entry to hold.
-- **Never move or rename the accounts directory.** Claude binds each login to the literal config-dir path, so moving it silently signs out every Claude account. (Codex survives — its credentials are files inside the folder.) This is also why routing uses a launcher and not a symlink.
-- **Sign-in needs a terminal.** Both CLIs finish by asking you to paste a code back, so the browser step cannot be automated from a background process.
-- **Rate limits belong to accounts.** Two entries signed into the same account are one pool, not two.
-
-## How it works
-
-An account is just the CLI's own config directory, relocated: Claude Code reads `CLAUDE_CONFIG_DIR`, Codex reads `CODEX_HOME`. The CLIs manage their own credentials inside it — **agent-link never reads, writes, copies or backs up a token**. Your original `~/.claude` and `~/.codex` remain the "primary"; only the explicit `agent-link style install` command changes their response-style files, with recoverable backups.
-
-Routing is a small launcher script that picks an account and `exec`s the real CLI, so the child process is the genuine article with nothing wrapped around it. Selection state (last used, launch count, cooldowns) lives in `~/.agent-link/state`.
-
-`agent-link sync` copies MCP server definitions, project-trust flags, `settings.json` preferences (output style, permissions, env) and any custom output styles from your primary into each account — preferences and definitions only, never credentials. Run it after changing a setting you want everywhere, and after adding an account. OAuth-based MCP servers authorize once per account, since those grants belong to the account.
-
-`agent-link style install` applies one compact response contract to Claude output styles and Codex `AGENTS.md` across the primary and managed accounts. Task updates use only the relevant **Asked / Working on / Decision / Outcome / Goal / Next** bullets; **Next** appears only when there is a useful immediate action. Simple answers stay one short paragraph. Paseo's daemon system prompt covers other providers launched through Paseo.
+- Agent Link never reads, copies, backs up, or restores OAuth tokens.
+- Never move `~/.agent-link`; Claude logins are bound to the literal config path.
+- Adding a Claude account can evict another login from the shared macOS Keychain item; run `agent-link status` afterward.
+- MCP definitions can sync, but OAuth grants remain per account.
+- Sign-in still needs an interactive terminal to complete provider verification.
 
 ## Troubleshooting
 
-| Symptom | Cause |
+| Symptom | Fix |
 | --- | --- |
-| An account shows "not logged in" but you signed in | A later login evicted it — sign in again (see above) |
-| *"No conversation found with session ID"* | A resume reached the wrong account; update agent-link, which pins resumes |
-| Rotation always picks the same account | The others are parked, out of credit, or signed out — `agent-link status` says which |
-| `claude` not found by a shim | Alias-only install; run `claude install` to get a real binary on PATH |
+| Account shows signed out after adding another | Run `agent-link login` for the affected slot |
+| Resume cannot find a conversation or rollout | Update Agent Link, then resume through the dynamic launcher |
+| Rotation keeps choosing one account | `agent-link status` shows whether others are held, signed out, or unavailable |
+| Provider says “no quota telemetry” | Open one interactive session if required; otherwise the provider does not expose reliable data |
+| Plugin update is available | `paseo plugin update agent-link` |
+| Setup still looks wrong | `agent-link fix`, then `agent-link doctor` |
+
+## Development
+
+```sh
+git clone https://github.com/itsjustanks/paseo-agent-link
+cd paseo-agent-link
+npm --prefix apps/paseo run typecheck
+```
+
+The plugin manifest ID remains `agent-link`. Local development can register the checkout with `agent-link app install paseo --link`.
 
 ## License
 
