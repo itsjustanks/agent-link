@@ -1105,7 +1105,7 @@ async function listedAgentById(agentId: string, paseo: PluginHandlerContext["pas
     const page = await paseo.agents.list({
       filter: { includeArchived: true },
       sort: [{ key: "updated_at", direction: "desc" }],
-      page: { limit: 500, ...(cursor ? { cursor } : {}) },
+      page: { limit: 200, ...(cursor ? { cursor } : {}) },
     });
     for (const entry of page.entries as unknown[]) {
       const raw = entry as Record<string, unknown>;
