@@ -255,6 +255,10 @@ try {
     "Codex automatic review and explicit sandbox flags are mutually exclusive",
   );
   assert.deepEqual(invocations[0].args.slice(invocations[0].args.indexOf("--permission-mode"), invocations[0].args.indexOf("--permission-mode") + 2), ["--permission-mode", "auto"]);
+  assert.ok(invocations[0].input.includes("read ~/.agents/skills/paseo/SKILL.md completely"));
+  assert.ok(invocations[0].input.includes("use Paseo create_agent"));
+  assert.ok(invocations[0].input.includes("Omit workspaceId so the child stays attached to this parent in the current workspace"));
+  assert.ok(invocations[0].input.includes("Never create a workspace merely to delegate, retry, continue, investigate, or switch model/provider/account"));
   assert.ok(invocations[1].args.includes("--approve-for-me"));
   assert.ok(invocations[2].args.includes("--resume"), "switching model on one account should resume its native session");
   assert.ok(invocations[2].input.includes("KIMI(kimi-k3) BRIDGED"), "missed connected-provider turns should be bridged back");

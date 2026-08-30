@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.7.0"
+VERSION="0.8.0"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -1297,6 +1297,20 @@ primary_claude_login() {
   clear_auth_hold claude primary
 }
 
+primary_codex_login() {
+  local real
+  real="$(prov_real_binary codex 2>/dev/null || true)"
+  [ -n "$real" ] || { prov_binary_check codex; return 127; }
+  echo
+  echo "==> codex login for: primary"
+  ( unset CODEX_HOME; "$real" login )
+  if ! prov_logged_in codex "$HOME/.codex"; then
+    echo "primary Codex sign-in did not complete" >&2
+    return 1
+  fi
+  clear_auth_hold codex primary
+}
+
 # ---------------------------------------------------------------- commands
 
 # ---------------------------------------------------------------- presentation
@@ -1411,6 +1425,8 @@ cmd_login() { # [provider] [email|all]
       for p in $PROVIDERS; do
         if [ "$p" = claude ] && ! claude_auth_live primary; then
           primary_claude_login || true
+        elif [ "$p" = codex ] && ! prov_logged_in codex "$HOME/.codex"; then
+          primary_codex_login || true
         fi
         i=0
         for e in $(slot_list "$p"); do
@@ -1423,12 +1439,16 @@ cmd_login() { # [provider] [email|all]
       p="$1"
       if [ "$p" = claude ] && [ "${2:-}" = primary ]; then
         primary_claude_login
+      elif [ "$p" = codex ] && [ "${2:-}" = primary ]; then
+        primary_codex_login
       elif [ -n "${2:-}" ] && [ "${2:-}" != all ]; then
         [ -d "$(slot_dir "$p" "$2")" ] || { echo "no $p slot for '$2' — use: agent-link add $p $2" >&2; return 1; }
         slot_login "$p" "$2"
       else
         if [ "$p" = claude ] && ! claude_auth_live primary; then
           primary_claude_login || true
+        elif [ "$p" = codex ] && ! prov_logged_in codex "$HOME/.codex"; then
+          primary_codex_login || true
         fi
         i=0
         for e in $(slot_list "$p"); do
@@ -1909,6 +1929,7 @@ cmd_auto() { # install the one-chat ACP provider and retain launchers for old se
   install_acp_runtime || return 1
   for p in $PROVIDERS; do write_auto_launcher "$p"; done
   configure_paseo_agentlink || return 1
+  cmd_style install || return 1
   refresh_paseo_provider_catalog || true
   if command -v paseo >/dev/null 2>&1; then
     paseo reload >/dev/null 2>&1 || echo "Paseo config was saved; reload it from Paseo if AgentLink does not appear yet." >&2
@@ -2108,9 +2129,9 @@ cmd_probe() { # $1 provider (default claude), $2 model, [--park]
         echo "      released — it just served, so its park is over"
       fi
     elif [ -n "$park" ] && [ -n "$auth_failed" ]; then
-      hold_set "$p" "$e" "authentication failed — run: agent-link login all"
+      hold_set "$p" "$e" "authentication failed — run: agent-link login $p $e"
       echo "auto: authentication failed — login required" > "$(pools_dir)/reason-$p-$e"
-      echo "      HELD (authentication) — run: agent-link login all"
+      echo "      HELD (authentication) — run: agent-link login $p $e"
     elif [ -n "$park" ] && [ -n "$limit_failed" ]; then
       case "$p:$out" in
         codex:*)
@@ -3202,7 +3223,7 @@ cmd_remove() { # provider email — archive a slot outside rotation
   echo "archived for recovery at $archive"
 }
 
-cmd_style() { # install|status — one concise response contract across every managed account
+cmd_style() { # install|status — response + Paseo orchestration contract for every provider
   local action="${1:-status}"
   case "$action" in
     install)
@@ -3211,77 +3232,54 @@ import glob, json, os, shutil, sys, tempfile
 
 accounts = sys.argv[1]
 home = os.path.expanduser("~")
+response_contract = '''## Response contract
+
+Answer in as few words as the question honestly allows.
+
+For a substantial task update or completed task, use only the useful lines below:
+- Asked: the original request.
+- Working on: the current action.
+- Decision: the important choice and reason.
+- Outcome: what changed or will change.
+- Goal: the intended end state.
+- Next: the most useful immediate action, only when relevant.
+
+Use at most six bullets and one short sentence per bullet. Omit redundant or irrelevant lines. For a simple question, answer in one short paragraph instead.
+
+- Lead with the result. No preamble, restatement, routine tool narration, apology, or closing filler.
+- Prefer plain English. Keep exact model names, commands, paths, errors, and unresolved caveats precise.
+- State failures or uncertainty once, plainly. Separate evidence, inference, and untested work; never turn a guess into a finding.
+- Runtime model identity comes from AgentLink's Paseo UI; never guess or self-report it in prose.
+- Never call Paseo `create_terminal` for ordinary shell commands, tests, git work, or agent coordination. Use the normal shell tool; create a visible terminal only when the user explicitly asks for one or an interactive process requires it, then close it when finished.
+- When finishing work, name the verification result in one short line.
+
+Completeness still wins over brevity: never drop a caveat, a failure, or a needed instruction just to be short.'''
+
+orchestration_contract = '''## Paseo orchestration
+
+When running inside Paseo, use Paseo's own orchestration lifecycle. Do not invent chat-continuity, recovery, terminal, workspace, or provider-switching machinery.
+
+- Before delegating, read `~/.agents/skills/paseo/SKILL.md` completely and follow its current tool semantics. Use `paseo-handoff`, `paseo-advisor`, or `paseo-committee` only when the user's intent matches that installed skill, and read the selected SKILL.md completely first.
+- Use Paseo `create_agent` (or the agent-scoped `paseo run` CLI when tools are unavailable) for delegated work. Do not use a provider-native subagent system as the default inside Paseo.
+- Call `list_profiles` and read profile notes before choosing a delegated model. If no profile fits, use Paseo provider discovery rather than guessing provider, model, mode, or account.
+- Omit `workspaceId` for ordinary delegation so the child remains attached to this parent and uses the current workspace. Create a workspace or worktree only when the user explicitly requests isolation or divergent repository state genuinely requires it.
+- Never create a workspace merely to delegate, retry, continue, investigate, or switch model/provider/account. Never detach, archive, reparent, replace, or move a running child automatically.
+- Leave completion notifications enabled and continue useful work; do not poll a running subagent. Keep small or tightly coupled work in the current agent instead of delegating it, and use at most three concurrent subagents unless the user asks for more.
+- Keep finished child history attached unless the user explicitly asks for cleanup. Use Paseo workspace scripts for dev servers and never start a duplicate server or visible terminal just to verify work.
+- AgentLink's picker changes only the owner of the next turn in the same chat. If an account is unavailable, fail in place and let the user choose another account-suffixed model; never open a terminal or replacement chat.'''
+
 claude_style = '''---
 name: Concise
-description: Short, structured answers with no preamble or filler
+description: Short answers plus Paseo-native orchestration
 ---
 
-Answer in as few words as the question honestly allows.
+''' + response_contract + "\n\n" + orchestration_contract + "\n"
+codex_agents = '''# AgentLink instructions
 
-For a substantial task update or completed task, use only the useful lines below:
-
-- Asked: the original request.
-- Working on: the current action.
-- Decision: the important choice and reason.
-- Outcome: what changed or will change.
-- Goal: the intended end state.
-- Next: the most useful immediate action, only when relevant.
-
-Use at most six bullets and one short sentence per bullet. Omit redundant or irrelevant lines. For a simple question, answer in one short paragraph instead.
-
-- Lead with the result. No preamble, restatement, routine tool narration, apology, or closing filler.
-- Prefer plain English. Keep exact model names, commands, paths, errors, and unresolved caveats precise.
-- State failures or uncertainty once, plainly. Never turn an inference into a finding.
-- Runtime model identity comes from AgentLink's Paseo UI; never guess or self-report it in prose.
-- Never call Paseo `create_terminal` for ordinary shell commands, tests, git work, or agent coordination. Use the normal shell tool; create a visible terminal only when the user explicitly asks for one or an interactive process requires it, then close it when finished.
-- When finishing work, name the verification result in one short line.
-
-Completeness still wins over brevity: never drop a caveat, a failure, or a needed instruction just to be short.
-'''
-codex_agents = '''# Response style
-
-Answer in as few words as the question honestly allows.
-
-For a substantial task update or completed task, use only the useful lines below:
-
-- Asked: the original request.
-- Working on: the current action.
-- Decision: the important choice and reason.
-- Outcome: what changed or will change.
-- Goal: the intended end state.
-- Next: the most useful immediate action, only when relevant.
-
-Use at most six bullets and one short sentence per bullet. Omit redundant or irrelevant lines. For a simple question, answer in one short paragraph instead.
-
-- Lead with the result. No preamble, restatement, routine tool narration, apology, or closing filler.
-- Prefer plain English. Keep exact model names, commands, paths, errors, and unresolved caveats precise.
-- State failures or uncertainty once, plainly. Never turn an inference into a finding.
-- Runtime model identity comes from AgentLink's Paseo UI; never guess or self-report it in prose.
-- Never call Paseo `create_terminal` for ordinary shell commands, tests, git work, or agent coordination. Use the normal shell tool; create a visible terminal only when the user explicitly asks for one or an interactive process requires it, then close it when finished.
-- When finishing work, name the verification result in one short line.
-
-Completeness still wins over brevity: never drop a caveat, a failure, or a needed instruction just to be short.
-'''
-paseo_contract = '''## Response contract
-
-Answer in as few words as the question honestly allows.
-
-For a substantial task update or completed task, use only the useful lines below:
-- Asked: the original request.
-- Working on: the current action.
-- Decision: the important choice and reason.
-- Outcome: what changed or will change.
-- Goal: the intended end state.
-- Next: the most useful immediate action, only when relevant.
-
-Use at most six bullets and one short sentence per bullet. Omit redundant or irrelevant lines. For a simple question, answer in one short paragraph instead.
-
-- Lead with the result. No preamble, restatement, routine tool narration, apology, or closing filler.
-- Prefer plain English. Keep exact model names, commands, paths, errors, and unresolved caveats precise.
-- State failures or uncertainty once, plainly. Never turn an inference into a finding.
-- Do not print a Session prefix or guess the active runtime model; AgentLink renders server-derived model identity in Paseo.
-- Never call Paseo `create_terminal` for ordinary shell commands, tests, git work, or agent coordination. Use the normal shell tool; create a visible terminal only when the user explicitly asks for one or an interactive process requires it, then close it when finished.
-- When finishing work, name the verification result in one short line.'''
+''' + response_contract + "\n\n" + orchestration_contract + "\n"
+managed_start = "<!-- agent-link:paseo-contract:start -->"
+managed_end = "<!-- agent-link:paseo-contract:end -->"
+paseo_contract = managed_start + "\n" + response_contract + "\n\n" + orchestration_contract + "\n" + managed_end
 
 def write_atomic(path, text):
     temp = None
@@ -3327,24 +3325,53 @@ if os.path.exists(paseo_config_path):
         paseo_config = json.load(open(paseo_config_path, encoding="utf-8"))
         daemon = paseo_config.setdefault("daemon", {})
         current_prompt = daemon.get("appendSystemPrompt") or ""
-        role_marker = "\n\n## Your role\n"
-        if role_marker in current_prompt:
-            remainder = role_marker.lstrip("\n") + current_prompt.split(role_marker, 1)[1]
-        elif current_prompt.startswith(paseo_contract):
-            remainder = current_prompt[len(paseo_contract):].lstrip()
+        current_prompt = current_prompt.strip()
+        if managed_start in current_prompt and managed_end in current_prompt:
+            before, tail = current_prompt.split(managed_start, 1)
+            _, after = tail.split(managed_end, 1)
+            parts = [before.strip(), paseo_contract, after.strip()]
+            merged_prompt = "\n\n".join(part for part in parts if part)
         else:
-            remainder = current_prompt
-        daemon["appendSystemPrompt"] = paseo_contract + ("\n\n" + remainder if remainder else "")
+            role_marker = "\n\n## Your role\n"
+            known_legacy = all(marker in current_prompt for marker in (
+                "## Accounts and limits",
+                "## Paseo MCP approval",
+                "## Agent hygiene (daemon stability)",
+            ))
+            if known_legacy:
+                safe_marker = "## Dev servers — the biggest cost on this machine"
+                finish_marker = "\n\n## Finishing\n"
+                remainder = current_prompt.split(safe_marker, 1)[1] if safe_marker in current_prompt else ""
+                remainder = (safe_marker + remainder).split(finish_marker, 1)[0].strip() if remainder else ""
+            elif role_marker in current_prompt:
+                remainder = role_marker.lstrip("\n") + current_prompt.split(role_marker, 1)[1]
+            elif current_prompt.startswith("## Response contract"):
+                remainder = ""
+            else:
+                remainder = current_prompt
+            merged_prompt = paseo_contract + ("\n\n" + remainder if remainder else "")
+        daemon["appendSystemPrompt"] = merged_prompt
         changed += write_atomic(paseo_config_path, json.dumps(paseo_config, indent=2) + "\n")
     except Exception as error:
         print(f"SKIPPED {paseo_config_path}: invalid config ({error})")
-print(f"concise response contract installed across {len(claude_dirs)} Claude and {len(codex_dirs)} Codex config directories ({changed} file updates)")
-print("Paseo appendSystemPrompt updated for Kimi, Grok and other providers; run `paseo reload` to apply it.")
+skills = ["paseo", "paseo-handoff", "paseo-advisor", "paseo-committee"]
+missing = [name for name in skills if not os.path.isfile(os.path.join(home, ".agents", "skills", name, "SKILL.md"))]
+print(f"response and Paseo orchestration contracts installed across {len(claude_dirs)} Claude and {len(codex_dirs)} Codex config directories ({changed} file updates)")
+print("Paseo appendSystemPrompt updated for every provider; run `paseo reload` to apply it.")
+if missing:
+    print("WARNING: missing Paseo orchestration skills: " + ", ".join(missing))
+    print("Install them from Paseo Settings -> Host -> Agents -> Orchestration skills.")
 PY
       ;;
     status)
       printf 'Claude style: %s\n' "$(jq -r '.outputStyle // "unset"' "$HOME/.claude/settings.json" 2>/dev/null || echo unreadable)"
       [ -f "$HOME/.codex/AGENTS.md" ] && echo "Codex instructions: installed" || echo "Codex instructions: missing"
+      jq -e '.daemon.appendSystemPrompt | contains("<!-- agent-link:paseo-contract:start -->")' "$HOME/.paseo/config.json" >/dev/null 2>&1 \
+        && echo "Paseo provider contract: installed" || echo "Paseo provider contract: missing"
+      local skill
+      for skill in paseo paseo-handoff paseo-advisor paseo-committee; do
+        [ -f "$HOME/.agents/skills/$skill/SKILL.md" ] && echo "$skill skill: installed" || echo "$skill skill: missing"
+      done
       ;;
     *) echo "usage: agent-link style [install|status]" >&2; return 1 ;;
   esac
@@ -3595,14 +3622,14 @@ usage:
   agent-link codex  [args...]      same for Codex
   agent-link remove <prov> <email> archive a slot outside routing
   agent-link sync                  copy MCP servers + project trust from primaries into slots
-  agent-link style [install|status] install/check the concise contract across Claude/Codex accounts
+  agent-link style [install|status] install/check response + Paseo orchestration contracts
   agent-link app [list|install|remove] [id] [--link]  optional integrations (Paseo panel, editors)
   agent-link update                update the CLI and reinstall the apps you have
   agent-link toolchain [status|update|enable|disable]  safely keep provider CLIs current
   agent-link doctor                sanity checks
 
 slots live in \$AGENT_AUTH_HOME (default ~/.agent-link), one folder per account email.
-Primary ~/.claude and ~/.codex stay untouched except for an explicit \`style install\`.
+Primary credentials stay untouched. \`agent-link auto\` installs only instruction files and Paseo provider config.
 EOF
 }
 

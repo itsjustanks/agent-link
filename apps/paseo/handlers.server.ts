@@ -33,6 +33,7 @@ const AGENT_LINK_HOME_DIR = (() => {
 })();
 
 const AGENT_LINK_ROOT = join(AGENT_LINK_HOME_DIR, "accounts");
+const PASEO_CONFIG_PATH = join(HOME, ".paseo", "config.json");
 // Hand-rolled slot layouts some setups use outside agent-link (read-only here).
 const EXTERNAL_ROOTS: Array<{ provider: "claude" | "codex"; root: string }> = [
   { provider: "claude", root: join(HOME, ".claude-accounts") },
@@ -304,6 +305,27 @@ function activelyParked(provider: string, key: string): boolean {
   return heldReason(provider, key) !== "" || cooldownUntil(provider, key) > 0;
 }
 
+// Authentication can be repaired outside AgentLink. Re-check only accounts
+// carrying an authentication hold; a successful local CLI status is enough to
+// release that stale hold without spending a model request.
+function releaseRecoveredClaudeAuth(key: string, configDir: string | null): void {
+  if (!/authenticat|not logged|login required|unauthori[sz]ed|revoked|expired token/i.test(heldReason("claude", key))) return;
+  const binary = searchPath().map((directory) => join(directory, "claude")).find(existsSync);
+  if (!binary) return;
+  const env = { ...process.env };
+  if (configDir) env.CLAUDE_CONFIG_DIR = configDir;
+  else delete env.CLAUDE_CONFIG_DIR;
+  try {
+    const output = execFileSync(binary, ["auth", "status", "--json"], { encoding: "utf8", timeout: 5000, env });
+    const status = JSON.parse(output) as { loggedIn?: boolean };
+    if (status.loggedIn !== true) return;
+    rmSync(join(poolsDir(), `hold-claude-${key}`), { force: true });
+    rmSync(join(poolsDir(), `reason-claude-${key}`), { force: true });
+  } catch {
+    // Keep the account held when status is unavailable or malformed.
+  }
+}
+
 function recentRouteEvents(): RouteEvent[] {
   try {
     return readFileSync(join(poolsDir(), "routes.log"), "utf8")
@@ -450,14 +472,19 @@ export async function handleScan(_input: Record<string, never>, { paseo }: Plugi
   // Everything the sections below share is read once here, not once per section.
   const baseSettings = readJson(join(HOME, ".claude", "settings.json")) ?? {};
   const primaryEmails = { claude: claudeAccountEmail(HOME), codex: codexAccountEmail(join(HOME, ".codex")) };
+  const collectedSlots = collectSlots();
+  releaseRecoveredClaudeAuth("primary", null);
+  for (const slot of collectedSlots) {
+    if (slot.provider === "claude") releaseRecoveredClaudeAuth(slot.email, slot.dir);
+  }
   const primaryCooldowns = { claude: cooldownUntil("claude", "primary"), codex: cooldownUntil("codex", "primary") };
   // "Out of credits" is not reliable — a flagged account can still serve some
   // models — so parking (set by `agent-link probe --park`, or by hand) is what
   // actually blocks routing.
   const primaryParked = { claude: activelyParked("claude", "primary"), codex: activelyParked("codex", "primary") };
-  const slots = collectSlots().map((slot) => {
+  const slots = collectedSlots.map((slot) => {
     const drift = settingsDrift(slot.provider, slot.dir, baseSettings);
-    const parked = parkReason(slot.provider, slot.email);
+    const parked = parkReason(slot.provider, slot.email) || heldReason(slot.provider, slot.email);
     const until = cooldownUntil(slot.provider, slot.email);
     return {
       ...slot,
@@ -494,7 +521,7 @@ export async function handleScan(_input: Record<string, never>, { paseo }: Plugi
         launches: poolNumber("count", provider, "primary"),
         cooldownUntil: primaryCooldowns[provider],
         blocked: primaryParked[provider],
-        parkReason: parkReason(provider, "primary"),
+        parkReason: parkReason(provider, "primary") || heldReason(provider, "primary"),
         preference: routePreference(provider, "primary"),
         nearing: nearingLimit(provider, "primary"),
         modelHolds: modelHolds(provider, "primary"),
@@ -795,7 +822,7 @@ function routerAccountOptions(overrides: ProviderOverrides, availability: Map<st
             ? "Sign-in needed"
             : available
               ? "Available now · fixed to this account"
-              : parkReason(provider, slot.email) || "Cooling down or blocked",
+              : parkReason(provider, slot.email) || heldReason(provider, slot.email) || "Cooling down or blocked",
         available,
         resolvedProvider: providerIdForDir(overrides, provider, slot.dir) ?? slugForEmail(provider, slot.email),
       });
@@ -856,6 +883,12 @@ async function routerProviderStatus(paseo: PluginHandlerContext["paseo"], messag
   const accountOptions = routerAccountOptions(overrides, availability);
   const installed = existsSync(launcherPath);
   const configured = Boolean(overrides["agent-link"]);
+  const paseoConfig = readJson(PASEO_CONFIG_PATH);
+  const daemon = paseoConfig?.daemon as { appendSystemPrompt?: string } | undefined;
+  const orchestrationSkills = ["paseo", "paseo-handoff", "paseo-advisor", "paseo-committee"].map((id) => ({
+    id,
+    installed: existsSync(join(HOME, ".agents", "skills", id, "SKILL.md")),
+  }));
   return {
     installed,
     configured,
@@ -879,6 +912,10 @@ async function routerProviderStatus(paseo: PluginHandlerContext["paseo"], messag
       })),
     })),
     userRules: currentRouterRules(),
+    orchestration: {
+      systemPromptInstalled: (daemon?.appendSystemPrompt ?? "").includes("<!-- agent-link:paseo-contract:start -->"),
+      skills: orchestrationSkills,
+    },
     message:
       message ||
       (loaded
@@ -984,9 +1021,8 @@ export async function handleRouterModels({ provider }: { provider: string }, { p
   }
 }
 
-// Create the slot and kick off that CLI's own browser login. The flow opens a
-// browser and completes there, so it can be started detached — the panel then
-// shows the account as logged in once its config records the identity.
+// Create only the isolated slot. Interactive authentication belongs in the
+// user's normal terminal, where the provider can receive the pasted code.
 export async function handleAddAccount({ provider, email }: { provider: "claude" | "codex"; email: string }) {
   if (!/^[^\s/\\]+@[^\s/\\]+$/.test(email)) {
     return { ok: false, started: false, message: "that does not look like an account email" };
@@ -1778,6 +1814,12 @@ function providerLabel(id: string, overrides: ProviderOverrides): string {
     .join(" ");
 }
 
+function providerAuthCommand(id: string): string {
+  if (id === "kimi") return "kimi login";
+  if (id === "grok") return "grok login";
+  return "";
+}
+
 export async function handleProviderHeartbeat(_input: Record<string, never>, { paseo }: PluginHandlerContext) {
   // listAvailable is a registry lookup, not a diagnostic. That distinction is
   // why this can poll without opening ACP sessions or consuming model quota.
@@ -1817,6 +1859,7 @@ export async function handleProviderHeartbeat(_input: Record<string, never>, { p
       quotaTelemetry: pooled,
       autoProviderId,
       aliases,
+      authCommand: providerAuthCommand(id),
       summary: !familyAvailable
         ? "Paseo cannot find this provider. Check its command location, then reload Paseo"
         : pooled

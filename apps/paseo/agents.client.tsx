@@ -73,6 +73,13 @@ type PanelTab = "accounts" | "memory" | "router";
 type RouterDraftMode = "inherit" | "plan" | "auto" | "full-access";
 type RouterDraftTarget = { provider: string; model: string; account: string; mode: RouterDraftMode; resolvedProvider?: string };
 type RouterDraftGroup = { name: string; purpose: string; skillsText: string; instructions: string; targets: RouterDraftTarget[] };
+type AuthenticationNeed = {
+  key: string;
+  provider: ProviderId;
+  target: string;
+  command: string;
+  reason: string;
+};
 const ROUTER_MODE_OPTIONS: Array<{ value: RouterDraftMode; label: string; description: string }> = [
   { value: "inherit", label: "Use chat mode", description: "Follow the mode selected in this AgentLink chat" },
   { value: "plan", label: "Plan", description: "Read and plan without changes" },
@@ -996,12 +1003,55 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
     </View>
   );
 
+  const primaryLoginCommand = (provider: ProviderId, email: string): string => {
+    if (scanQuery.data?.agentAuthInstalled) return `agent-link login ${provider} primary`;
+    if (provider === "claude") return email ? `claude auth login --email ${email}` : "claude auth login";
+    return "codex login";
+  };
+
   const loginCommand = (slot: Slot): string => {
-    if (scanQuery.data?.agentAuthInstalled) return `agent-link login ${slot.provider} ${slot.email}`;
+    if (slot.source === "agent-link" && scanQuery.data?.agentAuthInstalled) {
+      return `agent-link login ${slot.provider} ${slot.email}`;
+    }
     return slot.provider === "claude"
       ? `CLAUDE_CONFIG_DIR="${slot.dir}" claude auth login --email ${slot.email}`
       : `CODEX_HOME="${slot.dir}" codex login`;
   };
+
+  const isAuthenticationFailure = (reason: string) =>
+    /authenticat|not logged|login required|unauthori[sz]ed|revoked|expired token/i.test(reason);
+
+  const authenticationNeeds: AuthenticationNeed[] = [];
+  for (const provider of ["claude", "codex"] as const) {
+    const account = primaryEmail(provider);
+    const info = primaryInfo(provider);
+    if (!account || isAuthenticationFailure(info?.parkReason ?? "")) {
+      authenticationNeeds.push({
+        key: `primary-${provider}`,
+        provider,
+        target: account || `your primary ${SHORT[provider]} account`,
+        command: primaryLoginCommand(provider, account),
+        reason: account
+          ? `The provider rejected the saved credentials for the primary ${SHORT[provider]} sign-in.`
+          : `The default ${SHORT[provider]} sign-in has not been authenticated.`,
+      });
+    }
+  }
+  for (const slot of slots) {
+    const authFailure = isAuthenticationFailure(slot.parkReason);
+    if (slot.loggedIn && !slot.wrongAccount && !authFailure) continue;
+    authenticationNeeds.push({
+      key: slot.dir,
+      provider: slot.provider,
+      target: slot.email,
+      command: loginCommand(slot),
+      reason: slot.wrongAccount
+        ? `This sign-in must use ${slot.email}; it is currently authenticated as ${slot.actualEmail}.`
+        : authFailure
+          ? `The provider rejected the saved credentials for ${slot.email}.`
+          : `The saved sign-in for ${slot.email} has not been completed.`,
+    });
+  }
 
   const parkButton = (provider: ProviderId, email: string, parked: boolean, held = false) =>
     held && provider === "claude" ? (
@@ -1047,12 +1097,15 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
     const capacity = capacityFor(slot.provider, slot.email, slot.actualEmail || slot.email);
     const pinning = pinMutation.variables?.dir === slot.dir;
     const lastRoute = lastRouteForAccount(slot.provider, slot.actualEmail || slot.email);
+    const authenticationRequired = !slot.loggedIn || slot.wrongAccount || isAuthenticationFailure(slot.parkReason);
     return (
       <View style={{ gap: t.space.sm }}>
-        {!slot.loggedIn || slot.wrongAccount ? (
+        {authenticationRequired ? (
           <View style={{ gap: t.space.xs }}>
             <Text style={t.text.caption}>
-              {slot.wrongAccount ? "Sign this folder back into its own account:" : "Finish the sign-in in a terminal:"}
+              {slot.wrongAccount
+                ? `Authenticate this saved sign-in as exactly ${slot.email}:`
+                : `Authenticate this saved sign-in as ${slot.email} in a terminal:`}
             </Text>
             <CodeBlock tone="attention">{loginCommand(slot)}</CodeBlock>
             <Text style={t.text.caption}>
@@ -1129,9 +1182,10 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
     const usage = usageFor(slot.provider, slot.actualEmail || slot.email);
     const capacity = capacityFor(slot.provider, slot.email, slot.actualEmail || slot.email);
     const lastRoute = lastRouteForAccount(slot.provider, slot.actualEmail || slot.email);
+    const authenticationRequired = !slot.loggedIn || slot.wrongAccount || isAuthenticationFailure(slot.parkReason);
     const status: Status = !slot.loggedIn
       ? "attention"
-      : slot.wrongAccount || slot.blocked
+      : authenticationRequired || slot.blocked
         ? "error"
         : parked
           ? "neutral"
@@ -1142,6 +1196,8 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
       ? "sign-in needed"
       : slot.wrongAccount
         ? "wrong account"
+        : authenticationRequired
+          ? "authentication required"
         : slot.blocked
           ? "blocked until test passes"
           : parked
@@ -1185,7 +1241,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
         }
         trailing={
           <>
-            {slot.loggedIn ? parkButton(slot.provider, slot.email, parked, slot.blocked) : null}
+            {slot.loggedIn && !authenticationRequired ? parkButton(slot.provider, slot.email, parked, slot.blocked) : null}
             <Button label={open ? "Hide" : "Details"} variant="ghost" onPress={() => toggleRow(slot.dir)} />
           </>
         }
@@ -1204,9 +1260,10 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
     const usage = account ? usageFor(provider, account) : null;
     const capacity = account ? capacityFor(provider, "primary", account) : null;
     const lastRoute = lastRouteForAccount(provider, account);
-    const status: Status = !account ? "attention" : parked ? "neutral" : credit || info?.duplicated ? "attention" : "ok";
-    const label = !account
-      ? "sign-in needed"
+    const authenticationRequired = !account || isAuthenticationFailure(info?.parkReason ?? "");
+    const status: Status = authenticationRequired ? "error" : parked ? "neutral" : credit || info?.duplicated ? "attention" : "ok";
+    const label = authenticationRequired
+      ? "authentication required"
       : info?.blocked
         ? "blocked until test passes"
         : parked
@@ -1248,17 +1305,17 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
         }
         trailing={
           <>
-            {account ? parkButton(provider, "primary", parked, Boolean(info?.blocked)) : null}
+            {account && !authenticationRequired ? parkButton(provider, "primary", parked, Boolean(info?.blocked)) : null}
             <Button label={open ? "Hide" : "Details"} variant="ghost" onPress={() => toggleRow(key)} />
           </>
         }
         expanded={
           open ? (
             <View style={{ gap: t.space.sm }}>
-              {account ? null : (
+              {!authenticationRequired ? null : (
                 <View style={{ gap: t.space.xs }}>
-                  <Text style={t.text.caption}>Sign in to the default account in a terminal:</Text>
-                  <CodeBlock tone="attention">{provider === "claude" ? "claude auth login" : "codex login"}</CodeBlock>
+                  <Text style={t.text.caption}>{`Authenticate the primary ${SHORT[provider]} account in a terminal:`}</Text>
+                  <CodeBlock tone="attention">{primaryLoginCommand(provider, account)}</CodeBlock>
                 </View>
               )}
               <Facts items={[{ value: "This is the provider's default sign-in." }]} />
@@ -1306,7 +1363,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
               />
               <View style={{ flexDirection: "row", gap: t.space.sm }}>
                 <Button
-                  label="Create & sign in"
+                  label="Create sign-in slot"
                   variant="primary"
                   loading={addMutation.isPending}
                   disabled={newEmail.trim() === ""}
@@ -1444,6 +1501,13 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                 { value: entry.quotaTelemetry ? "usage limits available" : "provider does not share usage limits", tone: "attention" },
               ]}
             />
+            {entry.authCommand ? (
+              <View style={{ gap: t.space.xs }}>
+                <Text style={t.text.bodyStrong}>{`Authenticate the ${entry.label} account`}</Text>
+                <Text style={t.text.caption}>Run this in a normal terminal only if Check setup reports that the provider login is missing or expired.</Text>
+                <CodeBlock tone={entry.available ? undefined : "attention"}>{entry.authCommand}</CodeBlock>
+              </View>
+            ) : null}
             {entry.aliases.length > 0 ? <Text style={t.text.caption}>{`Loaded aliases: ${entry.aliases.join(", ")}`}</Text> : null}
             {diagnosis[entry.id] ? <CodeBlock>{diagnosis[entry.id]}</CodeBlock> : null}
           </View>
@@ -1464,6 +1528,13 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
     : selectedHeartbeat
       ? singleProviderCard(selectedHeartbeat)
       : null;
+  const orchestrationStatus = routerProviderQuery.data?.orchestration;
+  const installedOrchestrationSkills = orchestrationStatus?.skills.filter((skill) => skill.installed).length ?? 0;
+  const orchestrationReady = Boolean(
+    orchestrationStatus?.systemPromptInstalled &&
+    orchestrationStatus.skills.length > 0 &&
+    installedOrchestrationSkills === orchestrationStatus.skills.length,
+  );
 
   const providersSection = (
     <View style={{ gap: t.space.md }}>
@@ -1506,6 +1577,31 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
       </View>
     </Card>
   );
+  const authenticationCard = authenticationNeeds.length > 0 ? (
+    <Card padded={false} tone="attention">
+      <View style={{ padding: pad, gap: t.space.sm }}>
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: t.space.sm }}>
+          <Text style={t.text.heading}>Authentication required</Text>
+          <StatusPill status="attention" label={plural(authenticationNeeds.length, "sign-in", "sign-ins")} />
+        </View>
+        <Text style={t.text.body}>
+          Run each command below in a normal terminal, then choose exactly the named account in the provider's browser flow. AgentLink never opens a terminal or handles your password.
+        </Text>
+        <Text style={t.text.caption}>Each command authenticates only its named local sign-in. For code-based flows, use the fresh link and complete code from that same run.</Text>
+      </View>
+      {authenticationNeeds.map((need, index) => (
+        <Row
+          key={need.key}
+          first={index === 0}
+          tone="attention"
+          title={`Authenticate ${SHORT[need.provider]} as ${need.target}`}
+          subtitle={need.reason}
+          meta={<CodeBlock tone="attention">{need.command}</CodeBlock>}
+          trailing={<StatusPill status="attention" label="run in terminal" />}
+        />
+      ))}
+    </Card>
+  ) : null;
 
   return (
     <Screen t={t}>
@@ -1527,6 +1623,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
       {panelTab === "accounts" && scanQuery.data ? (
         <>
           {updateCard}
+          {authenticationCard}
           {agentLinkGuide}
           {providersSection}
           <Disclosure title="Updates and command-line tools" open={Boolean(cli.data && !cli.data.installed)}>
@@ -1675,6 +1772,23 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                 { value: "same Paseo agent ID", tone: "ok" },
               ]}
             />
+            <View style={{ padding: t.space.md, borderRadius: t.radius.sm, backgroundColor: t.color.surface2, gap: t.space.sm }}>
+              <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: t.space.sm }}>
+                <Text style={t.text.bodyStrong}>Paseo-native subagents</Text>
+                <StatusPill status={orchestrationReady ? "ok" : "attention"} label={orchestrationReady ? "installed" : "setup needed"} />
+              </View>
+              <Text style={t.text.caption}>AgentLink tells every provider to use Paseo profiles and subagents, stay in this workspace by default, and create a worktree only for explicit isolation.</Text>
+              <Facts
+                items={[
+                  { value: orchestrationStatus?.systemPromptInstalled ? "system prompt installed" : "system prompt missing", tone: orchestrationStatus?.systemPromptInstalled ? "ok" : "attention" },
+                  { value: `${installedOrchestrationSkills}/${orchestrationStatus?.skills.length ?? 0} orchestration skills installed`, tone: orchestrationReady ? "ok" : "attention" },
+                  { value: "no random terminal or workspace", tone: "ok" },
+                ]}
+              />
+              {orchestrationStatus?.skills.some((skill) => !skill.installed) ? (
+                <Notice tone="attention">{`Missing: ${orchestrationStatus.skills.filter((skill) => !skill.installed).map((skill) => skill.id).join(", ")}. Install these in Paseo Settings → Host → Agents → Orchestration skills.`}</Notice>
+              ) : null}
+            </View>
           </View>
           {routerGroups.map((group, index) => {
             const groupKey = `router-group-${index}`;

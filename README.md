@@ -59,6 +59,8 @@ An unavailable account stays visible with its health state. Selecting it fails c
 
 **AgentRouter** is the default model inside AgentLink. It classifies the request locally, chooses the matching work type, and tries its configured model/account choices in order. Each target can inherit the chat mode or pin Plan, Auto, or Full access. Each work type can also require installed skills and add its own instructions. Configure it in **AgentLink → Orchestration**.
 
+`agent-link auto` also installs one Paseo orchestration contract for every provider. Delegated work uses Paseo profiles and `create_agent`, remains a child in the current workspace by default, and creates a workspace/worktree only when isolation is explicit or genuinely required. The Orchestration tab shows whether the shared system prompt and the `paseo`, `paseo-handoff`, `paseo-advisor`, and `paseo-committee` skills are installed.
+
 AgentLink exposes three consistent chat modes:
 
 - **Plan** maps to the provider's read-only/planning mode.
@@ -87,6 +89,8 @@ The Paseo plugin shows:
 - AgentRouter work types and ordered model/account choices
 - memory protection for Paseo-owned compiler jobs
 
+When Claude/Codex authentication is missing, expired, or attached to the wrong account, a top-level **Authentication required** card names exactly which account to select and gives one copyable command per affected sign-in. Kimi and Grok cards keep their exact `kimi login` and `grok login` commands visible beside Check setup. AgentLink never opens a terminal automatically.
+
 A usage limit belongs to the signed-in account, not its local slot. Duplicate slots signed into the same account share one quota pool. Unknown capacity stays **unknown**.
 
 Useful commands:
@@ -108,6 +112,7 @@ Each login gets its own native configuration directory; credentials are not copi
 ```sh
 agent-link add <claude|codex> <email>
 agent-link login <claude|codex> <email>
+agent-link login <claude|codex> primary
 agent-link remove <claude|codex> <email>
 agent-link sync
 ```

@@ -128,6 +128,10 @@ export const RouterProviderStatusSchema = z.object({
   accountOptions: z.array(RouterAccountOptionSchema),
   targetGroups: z.array(RouterTargetGroupSchema),
   userRules: z.string(),
+  orchestration: z.object({
+    systemPromptInstalled: z.boolean(),
+    skills: z.array(z.object({ id: z.string(), installed: z.boolean() })),
+  }),
   message: z.string(),
 });
 export type RouterProviderStatus = z.infer<typeof RouterProviderStatusSchema>;
@@ -318,6 +322,8 @@ export const ProviderHeartbeatSchema = z.object({
   quotaTelemetry: z.boolean(),
   autoProviderId: z.string().nullable(),
   aliases: z.array(z.string()),
+  /** Exact interactive login command when AgentLink knows this CLI. */
+  authCommand: z.string(),
   summary: z.string(),
 });
 export type ProviderHeartbeat = z.infer<typeof ProviderHeartbeatSchema>;

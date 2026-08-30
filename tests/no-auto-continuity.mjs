@@ -29,8 +29,13 @@ assert.doesNotMatch(source.slice(source.lastIndexOf("main()")), /\b(recover|resc
 assert.doesNotMatch(source, /\n(?:write_recovery_helper|cmd_recover|cmd_rescue|cmd_handoff|cmd_evict|cmd_switch|cmd_fix)\(\)/);
 assert.doesNotMatch(plugin, /limitsStatus|limitsResume|agentContinue|contributeModelPills|AgentRoutingPanel/);
 assert.doesNotMatch(client, /New-chat account selection|callWireAuto|routerPending/);
+assert.match(client, /Authentication required/);
+assert.match(client, /agent-link login \$\{provider\} primary/);
+assert.match(client, /AgentLink never opens a terminal or handles your password/);
+assert.match(client, /Paseo-native subagents/);
 assert.doesNotMatch(handlers, /ensureLimitSentry/);
 assert.doesNotMatch(handlers, /agent-link-continuation|agents\.create\(|\.archive\(\)|paseo\.parent-agent-id/);
+assert.match(handlers, /Deliberately do NOT spawn the login here/);
 assert.doesNotMatch(watchdog, /process_agent_recovery|agent-link[^\n]*recover/);
 assert.doesNotMatch(runtime, /paseo\s+(run|send|archive|delete)|PASEO_AGENT_ID/);
 for (const retired of ["limits.server.ts", "limits.shared.ts", "model-pill.client.tsx"]) {

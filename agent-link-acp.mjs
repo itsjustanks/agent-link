@@ -17,7 +17,7 @@ import { homedir } from "node:os";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 
-const VERSION = "0.7.0";
+const VERSION = "0.8.0";
 if (["--version", "-v", "version"].includes(process.argv[2])) {
   process.stdout.write(`${VERSION}\n`);
   process.exit(0);
@@ -696,7 +696,9 @@ function bridgePrompt(session, backend, currentText) {
   return [
     "[AgentLink runtime contract]",
     "This is one logical Paseo chat. The composer model picker changes only the model/account/provider that owns the next turn; it never creates a replacement chat, continuation tab, archive, or terminal window.",
-    "Preserve completed work, decisions, and live child-agent ownership. If you orchestrate Paseo subagents, create them through the AgentLink provider with an available account-suffixed model and keep them attached to this parent workspace. Provider or account exhaustion must fail in this chat and wait for another picker choice; never rotate or reparent a running child behind the user's back.",
+    "When delegation is useful, read ~/.agents/skills/paseo/SKILL.md completely, call Paseo list_profiles, then use Paseo create_agent (or its agent-scoped CLI equivalent if tools are unavailable). Omit workspaceId so the child stays attached to this parent in the current workspace. Never use provider-native subagents as the default inside Paseo.",
+    "Use the installed paseo-handoff, paseo-advisor, or paseo-committee skill only when the user's intent matches it. Never create a workspace merely to delegate, retry, continue, investigate, or switch model/provider/account; create an isolated workspace only when explicitly requested or divergent repository state genuinely requires it. Keep small work here and use at most three concurrent subagents unless the user asks for more.",
+    "Preserve completed work, decisions, child history, and live child-agent ownership. Provider or account exhaustion must fail in this chat and wait for another picker choice; never detach, archive, replace, rotate, move, or reparent a child behind the user's back.",
     "Treat the context below as prior conversation and answer only the current request.",
     context,
     "[Current user request]",
