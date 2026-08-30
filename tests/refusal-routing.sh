@@ -127,6 +127,35 @@ grep -q "CHECK FAILED" <<<"$probe_output"
 test -f "$fixture_root/state/pools/hold-claude-primary"
 test ! -f "$fixture_root/state/pools/holdmodel-claude-primary-fable-5"
 
+# Codex holds are re-proved too. A failed CLI call preserves the hold; a real
+# successful `codex exec` releases it without waiting for a manual clear.
+mkdir -p "$fixture_root/.codex"
+python3 - "$fixture_root/.codex/auth.json" <<'PY'
+import base64, json, sys
+payload = base64.urlsafe_b64encode(json.dumps({"email": "codex-primary@example.com"}).encode()).decode().rstrip("=")
+json.dump({"tokens": {"id_token": f"x.{payload}.x"}}, open(sys.argv[1], "w"))
+PY
+codex_fail="$fixture_root/codex-probe-fail"
+codex_log="$fixture_root/codex-probe.log"
+touch "$codex_fail"
+printf '%s\n' '#!/usr/bin/env bash' \
+  'printf '\''%s\n'\'' "$*" >> "$AGENT_LINK_TEST_CODEX_LOG"' \
+  'if [ -f "$AGENT_LINK_TEST_CODEX_FAIL" ]; then echo "temporary probe failure" >&2; exit 42; fi' \
+  'echo ok' > "$provider_bin/codex"
+chmod +x "$provider_bin/codex"
+printf '%s\n' 'prior limit refusal' > "$fixture_root/state/pools/hold-codex-primary"
+probe_output="$(HOME="$fixture_root" PATH="$provider_bin:$PATH" AGENT_LINK_HOME="$fixture_root" \
+  AGENT_LINK_TEST_CODEX_FAIL="$codex_fail" AGENT_LINK_TEST_CODEX_LOG="$codex_log" \
+  "$repo_root/agent-link" probe codex gpt-5.6-sol --park)"
+grep -q "CHECK FAILED" <<<"$probe_output"
+test -f "$fixture_root/state/pools/hold-codex-primary"
+rm "$codex_fail"
+HOME="$fixture_root" PATH="$provider_bin:$PATH" AGENT_LINK_HOME="$fixture_root" \
+  AGENT_LINK_TEST_CODEX_FAIL="$codex_fail" AGENT_LINK_TEST_CODEX_LOG="$codex_log" \
+  "$repo_root/agent-link" revalidate codex >/dev/null
+test ! -f "$fixture_root/state/pools/hold-codex-primary"
+grep -q 'exec --skip-git-repo-check --ephemeral --color never' "$codex_log"
+
 # A proven revoked login is account-wide, not model-specific. Fail closed so
 # every Claude model skips that config directory until interactive sign-in.
 printf '%s\n' '#!/usr/bin/env bash' \

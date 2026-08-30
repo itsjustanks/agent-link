@@ -1128,12 +1128,14 @@ async function adoptContinuationTree({
   targetId,
   rootId,
   children,
+  openTabLabels,
   paseo,
 }: {
   sourceId: string;
   targetId: string;
   rootId: string;
   children: ListedAgentRecord[];
+  openTabLabels: string[];
   paseo: PluginHandlerContext["paseo"];
 }): Promise<{ carried: string[]; detached: string[]; warnings: string[] }> {
   const carried: string[] = [];
@@ -1163,6 +1165,7 @@ async function adoptContinuationTree({
       "agent-link-superseded-by": targetId,
       "agent-link-history-segment": "true",
       "agent-link-continuation-current": "false",
+      ...Object.fromEntries(openTabLabels.map((key) => [key, "false"])),
     });
   } catch (error) {
     warnings.push(`source ${sourceId}: ${error instanceof Error ? error.message : String(error)}`);
@@ -1274,6 +1277,9 @@ export async function handleAgentContinue(
     }
     const rootId = source.labels["agent-link-continuation-root"] ?? source.labels["agent-link-continuation-of"] ?? source.id;
     const sourceParentId = source.labels["paseo.parent-agent-id"] ?? "";
+    const openTabLabels = Object.entries(source.labels).flatMap(([key, value]) =>
+      key.startsWith("paseo.open-agent-tab.") && value === "true" ? [key] : []
+    );
     const children = await listedAgentChildren(source.id, paseo);
     const activeChildIds = children.flatMap((child) => child.id && !child.archivedAt ? [child.id] : []);
     let resolvedProvider = provider;
@@ -1320,6 +1326,7 @@ export async function handleAgentContinue(
         "agent-link-continuation-root": rootId,
         "agent-link-continuation-current": "true",
         "agent-link-manual-provider-switch": "true",
+        ...Object.fromEntries(openTabLabels.map((key) => [key, "true"])),
         ...(sourceParentId ? { "paseo.parent-agent-id": sourceParentId } : {}),
       },
     };
@@ -1331,6 +1338,7 @@ export async function handleAgentContinue(
       targetId: created.id,
       rootId,
       children,
+      openTabLabels,
       paseo,
     });
     const carried = adoption.carried.length > 0 ? ` · carried ${adoption.carried.length} subagent${adoption.carried.length === 1 ? "" : "s"}` : "";

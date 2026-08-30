@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.5.50"
+VERSION="0.5.51"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -620,7 +620,7 @@ def cross_provider_target(request):
         }
     return None
 
-def prior_cross_provider(agent_id):
+def recorded_cross_provider(agent_id):
     for prior_path in sorted(glob.glob(os.path.join(done, f"{agent_id}-*.json")), key=os.path.getmtime, reverse=True):
         try:
             prior = json.load(open(prior_path))
@@ -628,6 +628,33 @@ def prior_cross_provider(agent_id):
                 return prior
         except Exception:
             pass
+    return None
+
+def agent_is_archived(agent_id):
+    record = agent_record(agent_id)
+    if record:
+        return bool(record.get("archivedAt"))
+    rc, output, _ = run([paseo, "agent", "inspect", agent_id, "--json"], 15)
+    detail = load_json(output) if rc == 0 else None
+    if not isinstance(detail, dict): return None
+    archived = detail.get("Archived")
+    if archived is None: archived = detail.get("archived")
+    return bool(archived)
+
+def prior_cross_provider(agent_id):
+    prior = recorded_cross_provider(agent_id)
+    if not prior: return None
+    target_id = str(prior.get("targetAgentId") or "")
+    archived = agent_is_archived(target_id)
+    if archived is not True: return prior
+    # A continuation is one logical task. If its current segment alone was
+    # archived while the history/source remains visible, restore the current
+    # segment instead of spawning yet another tab. If the whole chain was
+    # archived, leave it archived and merely dedupe the stale recovery event.
+    if agent_is_archived(agent_id) is True: return prior
+    rc, _, _ = run([paseo, "agent", "reload", target_id, "--json"], 30)
+    if rc == 0 and agent_is_archived(target_id) is not True:
+        return prior
     return None
 
 def extract_agent_id(payload):
@@ -687,7 +714,7 @@ def update_agent_labels(agent_id, labels):
     rc, output, error = run(args, 20)
     return rc == 0, (error or output)[-1000:]
 
-def adopt_continuation(source_id, target_id, root_id, children):
+def adopt_continuation(source_id, target_id, root_id, children, open_tab_labels):
     carried = []
     detached = []
     warnings = []
@@ -706,13 +733,15 @@ def adopt_continuation(source_id, target_id, root_id, children):
             detached.append(child_id)
         else:
             warnings.append(f"child {child_id}: {detach_error or error}")
-    ok, error = update_agent_labels(source_id, {
+    source_updates = {
         "paseo.parent-agent-id": target_id,
         "agent-link-continuation-root": root_id,
         "agent-link-superseded-by": target_id,
         "agent-link-history-segment": "true",
         "agent-link-continuation-current": "false",
-    })
+    }
+    source_updates.update({key: "false" for key in open_tab_labels})
+    ok, error = update_agent_labels(source_id, source_updates)
     if not ok: warnings.append(f"source {source_id}: {error}")
     return carried, detached, warnings
 
@@ -722,6 +751,13 @@ def start_cross_provider(request, detail, target):
     if prior:
         request.update({key: prior.get(key) for key in ("workspaceId", "title", "targetAgentId", "targetProvider", "targetModel", "detail") if prior.get(key)})
         return "already-cross-provider", ""
+    stale = recorded_cross_provider(source_id)
+    stale_target_id = str((stale or {}).get("targetAgentId") or "")
+    if stale_target_id:
+        update_agent_labels(stale_target_id, {
+            "agent-link-continuation-current": "false",
+            "agent-link-history-segment": "true",
+        })
     stored = agent_record(source_id)
     workspace_id = request.get("workspaceId") or detail.get("WorkspaceId") or detail.get("workspaceId") or stored.get("workspaceId")
     title = str(request.get("title") or detail.get("Name") or detail.get("name") or stored.get("title") or "Agent continuation")
@@ -731,6 +767,10 @@ def start_cross_provider(request, detail, target):
     source_model = str(request.get("model") or "unknown model")
     root_id = continuation_root(source_id, stored)
     source_labels = record_labels(stored)
+    open_tab_labels = [
+        key for key, value in source_labels.items()
+        if key.startswith("paseo.open-agent-tab.") and str(value).lower() == "true"
+    ]
     source_parent = str(source_labels.get("paseo.parent-agent-id") or detail.get("ParentAgentId") or "")
     children = listed_agent_children(source_id)
     child_ids = [str(child.get("id")) for child in children if child.get("id") and not child.get("archivedAt")]
@@ -754,6 +794,7 @@ def start_cross_provider(request, detail, target):
         "--label", "agent-link-fallback-depth=1",
     ]
     if source_parent: args.extend(["--label", f"paseo.parent-agent-id={source_parent}"])
+    for key in open_tab_labels: args.extend(["--label", f"{key}=true"])
     if workspace_id: args.extend(["--workspace", str(workspace_id)])
     elif cwd: args.extend(["--cwd", cwd])
     args.append(prompt)
@@ -762,7 +803,7 @@ def start_cross_provider(request, detail, target):
     target_id = extract_agent_id(payload)
     if rc != 0 or not target_id:
         return None, (error or output or "Paseo did not return the continuation agent id")[-1500:]
-    carried, detached, warnings = adopt_continuation(source_id, target_id, root_id, children)
+    carried, detached, warnings = adopt_continuation(source_id, target_id, root_id, children, open_tab_labels)
     request.update({
         "targetAgentId": target_id,
         "targetProvider": target["provider"],
@@ -778,6 +819,42 @@ def start_cross_provider(request, detail, target):
     if warnings:
         request["detail"] += f" — continuity warnings: {'; '.join(warnings)}"
     return "cross-provider-continuation", ""
+
+def reconcile_continuation_archives():
+    """Restore a current segment archived while its logical history is still visible."""
+    rc, output, _ = run([paseo, "agent", "ls", "--global", "--all", "--json"], 20)
+    listing = load_json(output) if rc == 0 else None
+    if isinstance(listing, dict): listing = listing.get("entries")
+    if not isinstance(listing, list): return 0
+    records = {}
+    for raw in listing:
+        if not isinstance(raw, dict): continue
+        agent = raw.get("agent") if isinstance(raw.get("agent"), dict) else raw
+        agent_id = str(agent.get("id") or "")
+        if agent_id: records[agent_id] = agent_record(agent_id) or agent
+    restored = 0
+    for agent_id, record in records.items():
+        labels = record_labels(record)
+        root_id = str(labels.get("agent-link-continuation-root") or "")
+        if (
+            not record.get("archivedAt") or
+            not root_id or
+            labels.get("agent-link-continuation-current") != "true"
+        ): continue
+        visible_history = any(
+            other_id != agent_id and
+            not other.get("archivedAt") and
+            (
+                other_id == root_id or
+                record_labels(other).get("agent-link-continuation-root") == root_id or
+                record_labels(other).get("agent-link-superseded-by") == agent_id
+            )
+            for other_id, other in records.items()
+        )
+        if not visible_history: continue
+        reload_rc, _, _ = run([paseo, "agent", "reload", agent_id, "--json"], 30)
+        if reload_rc == 0: restored += 1
+    return restored
 
 def limit_phrase(log_text, status):
     assistant = re.compile(
@@ -951,6 +1028,10 @@ def finish(path, request, outcome):
     try: os.remove(path)
     except OSError: pass
     update_sentry_outcome(request, outcome)
+
+restored_continuations = reconcile_continuation_archives()
+if restored_continuations:
+    print(f"Paseo recovery: restored {restored_continuations} orphaned continuation(s)")
 
 if scan_enabled:
     scan_recent_limits()
@@ -1985,22 +2066,37 @@ cmd_switch() { # [provider] [session-id] — default: the newest session in this
 
 HOLD_RECHECK_HOURS=1
 
+probe_account_once() { # $1 provider, $2 config dir (empty = primary), $3 optional model
+  local p="$1" dir="${2:-}" model="${3:-}" args=()
+  if [ "$p" = claude ]; then
+    [ -n "$model" ] && args+=(--model "$model")
+    if [ -n "$dir" ]; then
+      CLAUDE_CONFIG_DIR="$dir" claude -p "Reply with exactly ok." "${args[@]}"
+    else
+      env -u CLAUDE_CONFIG_DIR claude -p "Reply with exactly ok." "${args[@]}"
+    fi
+  else
+    args=(exec --skip-git-repo-check --ephemeral --color never)
+    [ -n "$model" ] && args+=(--model "$model")
+    args+=("Reply with exactly ok.")
+    if [ -n "$dir" ]; then
+      CODEX_HOME="$dir" codex "${args[@]}"
+    else
+      env -u CODEX_HOME codex "${args[@]}"
+    fi
+  fi
+}
+
 cmd_revalidate() { # [provider] — probe only HELD accounts, release those that serve
   local p="${1:-claude}" e dir out rc held=0
-  prov_valid "$p" || { echo "usage: agent-link revalidate [claude]" >&2; return 1; }
-  [ "$p" = claude ] || { echo "revalidate supports claude only" >&2; return 1; }
+  prov_valid "$p" || { echo "usage: agent-link revalidate [claude|codex]" >&2; return 1; }
   for e in primary $(slot_list "$p"); do
     [ -f "$(pools_dir)/hold-$p-$e" ] || continue
     held=$((held+1))
     if [ "$e" = primary ]; then dir=""; else dir="$(slot_dir "$p" "$e")"; fi
     printf '  %-28s ' "$e"
-    if [ -n "$dir" ]; then
-      out="$(CLAUDE_CONFIG_DIR="$dir" claude -p "ok" 2>&1)"
-      rc=$?
-    else
-      out="$(claude -p "ok" 2>&1)"
-      rc=$?
-    fi
+    out="$(probe_account_once "$p" "$dir" "" 2>&1)"
+    rc=$?
     out="$(printf '%s' "$out" | tr '\n' ' ')"
     if [ "$rc" -ne 0 ]; then
       printf 'probe failed — hold stands\n'
@@ -2020,7 +2116,7 @@ cmd_revalidate() { # [provider] — probe only HELD accounts, release those that
 # without anyone remembering to run anything.
 maybe_revalidate() { # $1 provider
   local e f age now self
-  [ "$1" = claude ] || return 0
+  prov_valid "$1" || return 0
   now="$(date +%s)"
   for f in "$(pools_dir)"/hold-$1-*; do
     [ -f "$f" ] || continue
@@ -3028,7 +3124,6 @@ cmd_probe() { # $1 provider (default claude), $2 model, [--park]
   local p="${1:-claude}" model="${2:-}" park="" e dir out rc ok auth_failed limit_failed model_slug
   case "${3:-}" in --park) park=1 ;; esac
   prov_valid "$p" || { echo "usage: agent-link probe <claude|codex> [model] [--park]" >&2; return 1; }
-  [ "$p" = claude ] || { echo "probe currently supports claude only" >&2; return 1; }
   for e in primary $(slot_list "$p"); do
     if [ "$e" = primary ]; then
       [ -n "$(primary_email "$p")" ] || continue
@@ -3038,13 +3133,8 @@ cmd_probe() { # $1 provider (default claude), $2 model, [--park]
       dir="$(slot_dir "$p" "$e")"
     fi
     printf '  %-28s ' "$e"
-    if [ -n "$dir" ]; then
-      out="$(CLAUDE_CONFIG_DIR="$dir" claude -p "ok" ${model:+--model "$model"} 2>&1)"
-      rc=$?
-    else
-      out="$(claude -p "ok" ${model:+--model "$model"} 2>&1)"
-      rc=$?
-    fi
+    out="$(probe_account_once "$p" "$dir" "$model" 2>&1)"
+    rc=$?
     out="$(printf '%s' "$out" | tr '\n' ' ')"
     auth_failed=""; limit_failed=""
     if is_auth_failure_text "$out"; then
@@ -3078,7 +3168,11 @@ cmd_probe() { # $1 provider (default claude), $2 model, [--park]
       echo "auto: authentication failed — login required" > "$(pools_dir)/reason-$p-$e"
       echo "      HELD (authentication) — run: agent-link login all"
     elif [ -n "$park" ] && [ -n "$limit_failed" ]; then
-      case "$out" in
+      case "$p:$out" in
+        codex:*)
+          autopark "$p" "$e" hold:unknown
+          echo "      HELD — Codex limits are account-wide; probe again after the cap resets"
+          ;;
         *"spend limit"*)
           hold_set "$p" "$e" "monthly spend limit — raise it at claude.ai/settings/usage, then: agent-link probe $p"
           echo "auto: monthly spend limit" > "$(pools_dir)/reason-$p-$e"

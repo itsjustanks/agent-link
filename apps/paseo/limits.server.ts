@@ -67,11 +67,23 @@ type PaseoLike = {
 
 type Persisted = { auto: boolean; events: LimitEvent[] };
 type AgentRoute = { provider: "claude" | "codex"; account: string; model: string; at: number };
+type AgentSnapshot = {
+  id?: string;
+  status?: string;
+  attentionReason?: string | null;
+  provider?: string;
+  model?: string;
+  workspaceId?: string | null;
+  title?: string | null;
+  archivedAt?: string | null;
+  labels: Record<string, string>;
+};
 
 let armed = false;
 let unsubscribe: (() => void) | null = null;
 let lastPaseo: PaseoLike | null = null;
 const lastSeen = new Map<string, number>();
+const continuationRestorations = new Map<string, number>();
 
 function routeForAgent(agentId: string): AgentRoute | null {
   try {
@@ -176,18 +188,75 @@ function record(event: LimitEvent): void {
   saveState(state);
 }
 
-function snapshotOf(update: unknown): { id?: string; status?: string; attentionReason?: string | null; provider?: string; model?: string; workspaceId?: string | null; title?: string | null } {
+function snapshotOf(update: unknown): AgentSnapshot {
   const u = update as Record<string, unknown>;
   const snap = (u?.agent ?? u) as Record<string, unknown>;
+  const labels = snap?.labels;
+  const rawId = typeof snap?.id === "string" ? snap.id : typeof snap?.agentId === "string" ? snap.agentId : undefined;
   return {
-    id: typeof snap?.id === "string" ? snap.id : undefined,
+    id: rawId,
     status: typeof snap?.status === "string" ? snap.status : undefined,
     attentionReason: typeof snap?.attentionReason === "string" ? snap.attentionReason : null,
     provider: typeof snap?.provider === "string" ? snap.provider : "",
     model: typeof snap?.model === "string" ? snap.model : "",
     workspaceId: typeof snap?.workspaceId === "string" ? snap.workspaceId : null,
     title: typeof snap?.title === "string" ? snap.title : null,
+    archivedAt: typeof snap?.archivedAt === "string" ? snap.archivedAt : null,
+    labels: labels && typeof labels === "object" ? labels as Record<string, string> : {},
   };
+}
+
+function paseoBinary(): string | null {
+  const candidates = [
+    process.env.PASEO_CLI,
+    join(HOME, ".local", "bin", "paseo"),
+    "/Applications/Paseo.app/Contents/Resources/bin/paseo",
+  ];
+  return candidates.find((candidate): candidate is string => typeof candidate === "string" && existsSync(candidate)) ?? null;
+}
+
+function isVisibleHistoryForRoot(snapshot: AgentSnapshot, rootId: string, currentId: string): boolean {
+  if (!snapshot.id || snapshot.id === currentId || snapshot.archivedAt) return false;
+  const labels = snapshot.labels;
+  return (
+    snapshot.id === rootId ||
+    labels["agent-link-continuation-root"] === rootId ||
+    labels["agent-link-superseded-by"] === currentId
+  );
+}
+
+async function restoreOrphanedContinuation(paseo: PaseoLike, candidate: AgentSnapshot): Promise<void> {
+  const currentId = candidate.id;
+  const rootId = candidate.labels["agent-link-continuation-root"];
+  if (
+    !currentId ||
+    !candidate.archivedAt ||
+    !rootId ||
+    candidate.labels["agent-link-continuation-current"] !== "true"
+  ) return;
+  const last = continuationRestorations.get(currentId) ?? 0;
+  if (Date.now() - last < 30_000) return;
+  continuationRestorations.set(currentId, Date.now());
+  try {
+    const page = (await paseo.agents.list({ filter: { includeArchived: false } })) as { entries?: unknown[] };
+    const hasVisibleHistory = (page.entries ?? []).some((raw) => isVisibleHistoryForRoot(snapshotOf(raw), rootId, currentId));
+    if (!hasVisibleHistory) return;
+    const binary = paseoBinary();
+    if (!binary) throw new Error("Paseo CLI not found");
+    execFileSync(binary, ["agent", "reload", currentId, "--json"], { encoding: "utf8", timeout: 30_000 });
+    console.log(`[agent-link] restored orphaned current continuation ${currentId} for logical task ${rootId}`);
+  } catch (error) {
+    console.error(`[agent-link] could not restore orphaned continuation ${currentId}: ${String(error)}`);
+  }
+}
+
+async function reconcileContinuations(paseo: PaseoLike): Promise<void> {
+  try {
+    const page = (await paseo.agents.list({ filter: { includeArchived: true } })) as { entries?: unknown[] };
+    for (const raw of page.entries ?? []) await restoreOrphanedContinuation(paseo, snapshotOf(raw));
+  } catch {
+    // The archive guard remains active on streamed updates.
+  }
 }
 
 async function diedOnLimit(paseo: PaseoLike, agentId: string): Promise<string | null> {
@@ -404,6 +473,12 @@ async function janitorSweep(paseo: PaseoLike): Promise<void> {
     const page = (await paseo.agents.list({})) as { entries?: unknown[] };
     const now = Date.now();
     let archived = 0;
+    const liveParentIds = new Set(
+      (page.entries ?? []).flatMap((raw) => {
+        const parentId = snapshotOf(raw).labels["paseo.parent-agent-id"];
+        return parentId ? [parentId] : [];
+      }),
+    );
     for (const raw of page.entries ?? []) {
       if (archived >= JANITOR_BATCH) break;
       const snap = ((raw as Record<string, unknown>).agent ?? raw) as Record<string, unknown>;
@@ -411,6 +486,12 @@ async function janitorSweep(paseo: PaseoLike): Promise<void> {
       const status = typeof snap.status === "string" ? snap.status : "";
       const last = typeof snap.lastActivityAt === "string" ? Date.parse(snap.lastActivityAt) : NaN;
       if (!id || (status !== "idle" && status !== "closed")) continue;
+      const labels = snapshotOf(raw).labels;
+      if (
+        liveParentIds.has(id) ||
+        labels["agent-link-continuation-current"] === "true" ||
+        labels["agent-link-history-segment"] === "true"
+      ) continue;
       if (!Number.isFinite(last) || now - last < JANITOR_IDLE_MS) continue;
       try {
         await paseo.agents.ref(id).archive();
@@ -432,6 +513,9 @@ export function ensureLimitSentry(paseo: unknown): void {
   if (typeof p?.agents?.subscribe !== "function") return;
   unsubscribe = p.agents.subscribe((update) => {
     void handleErroredAgent(p, update).catch(() => {});
+    const snap = snapshotOf(update);
+    if (snap.archivedAt && Object.keys(snap.labels).length === 0) void reconcileContinuations(p);
+    else void restoreOrphanedContinuation(p, snap).catch(() => {});
   });
   // subscribe() is only a local listener; the daemon streams agent updates
   // once a directory subscription exists. Without this, the sentry hears
@@ -441,6 +525,7 @@ export function ensureLimitSentry(paseo: unknown): void {
   } catch {
     // An older daemon without subscription support still works panel-side.
   }
+  void reconcileContinuations(p);
   if (!janitorTimer) {
     janitorTimer = setInterval(() => void janitorSweep(p), JANITOR_INTERVAL_MS);
     void janitorSweep(p);
