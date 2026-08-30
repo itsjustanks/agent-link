@@ -177,6 +177,8 @@ try {
   const created = await rpc.request("session/new", { cwd: workspace, mcpServers: [] });
   const sessionId = created.sessionId;
   assert.match(sessionId, /^[0-9a-f-]{36}$/);
+  const beforeFirstTurn = await rpc.request("session/list", { cwd: workspace });
+  assert.equal(beforeFirstTurn.sessions.length, 0, "zero-turn diagnostic sessions must not appear in history");
   const byName = new Map(created.models.availableModels.map((model) => [model.name, model.modelId]));
   const fable = byName.get("Claude Fable 5 · claude@example.com");
   const opus = byName.get("Claude Opus 5 · claude@example.com");
@@ -197,6 +199,8 @@ try {
   });
   assert.equal(first.stopReason, "end_turn");
   assert.ok(rpc.updatesSince(notificationStart).some((entry) => entry.params.update.content?.text === "CLAUDE(claude-fable-5) DIRECT"));
+  const afterFirstTurn = await rpc.request("session/list", { cwd: workspace });
+  assert.deepEqual(afterFirstTurn.sessions.map((entry) => entry.sessionId), [sessionId]);
 
   await rpc.request("session/set_model", { sessionId, modelId: sol });
   notificationStart = rpc.notifications.length;

@@ -16,7 +16,7 @@ import { homedir } from "node:os";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 
-const VERSION = "0.6.0";
+const VERSION = "0.6.1";
 if (["--version", "-v", "version"].includes(process.argv[2])) {
   process.stdout.write(`${VERSION}\n`);
   process.exit(0);
@@ -1410,7 +1410,10 @@ function listSessions(params) {
   const rows = [];
   for (const name of readdirSync(SESSION_ROOT).filter((entry) => entry.endsWith(".json"))) {
     const session = readJson(join(SESSION_ROOT, name));
-    if (!session?.id || (params.cwd && resolve(params.cwd) !== session.cwd)) continue;
+    // Paseo diagnostics create and close a zero-turn session while probing an
+    // ACP. Keep its state loadable by ID, but never advertise it as history.
+    if (!session?.id || !Array.isArray(session.transcript) || session.transcript.length === 0) continue;
+    if (params.cwd && resolve(params.cwd) !== session.cwd) continue;
     rows.push({ sessionId: session.id, cwd: session.cwd, title: session.title || "AgentLink chat", updatedAt: session.updatedAt });
   }
   rows.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
