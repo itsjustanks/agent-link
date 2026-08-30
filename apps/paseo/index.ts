@@ -50,7 +50,7 @@ import {
   handleToolchainStatus,
 } from "./toolchain.server";
 
-// Register only contracts reachable from the current Agents surface.
+// Register only contracts reachable from the current AgentLink surface.
 // Retired routing and continuation contracts are intentionally not active.
 export default function contribute(plugin: PluginContext) {
   plugin.handle(scan, handleScan);
@@ -82,10 +82,10 @@ export default function contribute(plugin: PluginContext) {
   plugin.handle(toolchainSetEnabled, handleToolchainSetEnabled);
 
   plugin.addSurface("agent-sync", AgentSyncSurface);
-  plugin.addSidebarItem({ id: "agent-sync", title: "Agents", icon: "Users", surface: "agent-sync" });
+  plugin.addSidebarItem({ id: "agent-sync", title: "AgentLink", icon: "Users", surface: "agent-sync" });
   plugin.addCommandCenterItem({
     id: "open-agent-sync",
-    title: "Open Agents (accounts, orchestration & provider health)",
+    title: "Open AgentLink (accounts, orchestration & provider health)",
     icon: "Users",
     keywords: ["accounts", "providers", "auth", "health", "agent-link"],
     context: "global",

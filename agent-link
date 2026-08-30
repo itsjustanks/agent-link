@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.6.1"
+VERSION="0.7.0"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -2964,7 +2964,7 @@ print(next((row.get("path") or "" for row in rows if isinstance(row, dict) and r
   paseo plugin install "$dest" --id "$pid" >/dev/null || return 1
   status="$(paseo plugin ls 2>/dev/null | awk -v id="$pid" '$1 == id { print $2 }')"
   case "$status" in
-    running) echo "installed and running. Open Paseo → Agent Link or MCP." ;;
+    running) echo "installed and running. Open Paseo → AgentLink or MCP." ;;
     "")      echo "installed, but Paseo does not list it yet — check: paseo plugin ls" >&2 ;;
     *)       echo "installed but $status — check: paseo plugin logs $pid" >&2; return 1 ;;
   esac

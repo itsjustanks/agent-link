@@ -72,6 +72,8 @@ export const scan = defineRpc({
   }),
 });
 
+export const RouterTargetModeSchema = z.enum(["inherit", "plan", "auto", "full-access"]);
+
 export const RouterTargetSchema = z.object({
   /** Logical Paseo provider. Claude/Codex account choice is kept separate. */
   provider: z.string().regex(/^[a-z][a-z0-9-]*$/),
@@ -80,6 +82,8 @@ export const RouterTargetSchema = z.object({
   account: z.string().min(1).max(320).default("provider"),
   /** Concrete provider ID AgentRouter passes to Paseo after account resolution. */
   resolvedProvider: z.string().regex(/^[a-z][a-z0-9-]*$/).optional(),
+  /** Inherit the chat mode or use this target's explicit normalized mode. */
+  mode: RouterTargetModeSchema.default("inherit"),
   available: z.boolean().nullable().optional(),
 });
 
@@ -95,6 +99,8 @@ export const RouterAccountOptionSchema = z.object({
 export const RouterTargetGroupSchema = z.object({
   name: z.string().min(1).max(40).regex(/^[a-z][a-z0-9-]*$/),
   purpose: z.string().min(1).max(200),
+  skills: z.array(z.string().trim().min(1).max(320)).max(24).default([]),
+  instructions: z.string().max(6_000).default(""),
   selector: z.literal("in_order").default("in_order"),
   targets: z.array(RouterTargetSchema).min(1).max(12),
 });

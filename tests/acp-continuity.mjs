@@ -16,7 +16,9 @@ const bin = join(root, "bin");
 const workspace = join(root, "workspace");
 const invocationLog = join(root, "invocations.jsonl");
 const acpInvocationLog = join(root, "acp-invocations.jsonl");
-for (const path of [home, agentLinkHome, bin, workspace, join(home, ".codex"), join(home, ".paseo"), join(agentLinkHome, "router")]) mkdirSync(path, { recursive: true });
+for (const path of [home, agentLinkHome, bin, workspace, join(home, ".codex"), join(home, ".paseo"), join(home, ".agents", "skills", "test-skill"), join(agentLinkHome, "router")]) mkdirSync(path, { recursive: true });
+
+writeFileSync(join(home, ".agents", "skills", "test-skill", "SKILL.md"), "---\nname: test-skill\n---\n\nFollow the test skill.\n");
 
 writeFileSync(join(home, ".claude.json"), JSON.stringify({
   oauthAccount: { emailAddress: "claude@example.com" },
@@ -49,7 +51,8 @@ if (provider === "claude") {
   process.stdout.write(JSON.stringify({ type: "assistant", session_id: sessionId, message: { content: [{ type: "text", text }] } }) + "\\n");
   process.stdout.write(JSON.stringify({ type: "result", session_id: sessionId, is_error: false, result: text }) + "\\n");
 } else {
-  const resumed = args[1] === "resume" ? args[2] : "";
+  const resumeIndex = args.indexOf("resume");
+  const resumed = resumeIndex >= 0 ? args[resumeIndex + 1] : "";
   const sessionId = resumed || "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
   process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: sessionId }) + "\\n");
   const bridged = input.includes("CLAUDE(") ? "BRIDGED" : "DIRECT";
@@ -70,13 +73,14 @@ import { appendFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 let model = "kimi-default";
 let mode = "auto";
+const limitedModes = process.argv.includes("--limited-modes");
 const sessionId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const models = () => ({ currentModelId: model, availableModels: [{ modelId: "kimi-k3", name: "Kimi K3", description: "fake connected ACP" }] });
 const configOptions = () => [{ id: "model", category: "model", type: "select", currentValue: model, options: [
   { value: "kimi-default", name: "Kimi Default" },
   { value: "kimi-k3", name: "Kimi K3" },
 ] }];
-const modes = () => ({ currentModeId: mode, availableModes: [{ id: "auto", name: "Auto" }, { id: "plan", name: "Plan" }] });
+const modes = () => ({ currentModeId: mode, availableModes: [{ id: "auto", name: "Auto" }, { id: "plan", name: "Plan" }, ...(limitedModes ? [] : [{ id: "yolo", name: "YOLO" }])] });
 const send = (message) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...message }) + "\\n");
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
 lines.on("line", (line) => {
@@ -101,6 +105,7 @@ writeFileSync(join(home, ".paseo", "config.json"), JSON.stringify({
   agents: {
     providers: {
       kimi: { extends: "acp", label: "Kimi", command: [fakeAcpPath] },
+      grok: { extends: "acp", label: "Grok", command: [fakeAcpPath, "--limited-modes"] },
       "agent-link": { extends: "acp", label: "AgentLink", command: [join(repo, "agent-link-acp.mjs")] },
     },
   },
@@ -110,7 +115,12 @@ writeFileSync(join(agentLinkHome, "router", "config.json"), JSON.stringify({
   targetGroups: [{
     name: "fast",
     purpose: "Explanations and summaries",
-    targets: [{ provider: "codex", account: "auto", model: "gpt-5.6-sol" }],
+    skills: ["test-skill"],
+    instructions: "WORK_TYPE_MAGIC",
+    targets: [
+      { provider: "grok", account: "provider", model: "kimi-k3", mode: "full-access" },
+      { provider: "codex", account: "auto", model: "gpt-5.6-sol", mode: "full-access" },
+    ],
   }],
 }));
 
@@ -177,6 +187,7 @@ try {
   const created = await rpc.request("session/new", { cwd: workspace, mcpServers: [] });
   const sessionId = created.sessionId;
   assert.match(sessionId, /^[0-9a-f-]{36}$/);
+  assert.deepEqual(created.modes.availableModes.map((mode) => mode.id), ["plan", "auto", "full-access"]);
   const beforeFirstTurn = await rpc.request("session/list", { cwd: workspace });
   assert.equal(beforeFirstTurn.sessions.length, 0, "zero-turn diagnostic sessions must not appear in history");
   const byName = new Map(created.models.availableModels.map((model) => [model.name, model.modelId]));
@@ -184,9 +195,10 @@ try {
   const opus = byName.get("Claude Opus 5 · claude@example.com");
   const sol = byName.get("GPT-5.6 Sol · codex@example.com");
   const kimi = byName.get("Kimi K3 · Kimi");
+  const limited = byName.get("Kimi K3 · Grok");
   const router = byName.get("AgentRouter · Automatic route");
   assert.ok(
-    fable && opus && sol && kimi && router,
+    fable && opus && sol && kimi && limited && router,
     `automatic, account-suffixed and connected ACP model profiles should be advertised: ${JSON.stringify([...byName.keys()])}`,
   );
 
@@ -242,6 +254,8 @@ try {
     ),
     "Codex automatic review and explicit sandbox flags are mutually exclusive",
   );
+  assert.deepEqual(invocations[0].args.slice(invocations[0].args.indexOf("--permission-mode"), invocations[0].args.indexOf("--permission-mode") + 2), ["--permission-mode", "auto"]);
+  assert.ok(invocations[1].args.includes("--approve-for-me"));
   assert.ok(invocations[2].args.includes("--resume"), "switching model on one account should resume its native session");
   assert.ok(invocations[2].input.includes("KIMI(kimi-k3) BRIDGED"), "missed connected-provider turns should be bridged back");
 
@@ -254,6 +268,42 @@ try {
   const loaded = await rpc.request("session/load", { sessionId, cwd: workspace, mcpServers: [] });
   assert.equal(loaded.models.currentModelId, opus);
   assert.equal(rpc.updatesSince(notificationStart).length, 8, "loading should replay one logical transcript");
+
+  await rpc.request("session/set_mode", { sessionId, modeId: "full-access" });
+  await rpc.request("session/set_model", { sessionId, modelId: fable });
+  await rpc.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "Claude full access" }] });
+  let modeInvocation = readFileSync(invocationLog, "utf8").trim().split("\n").map((line) => JSON.parse(line)).at(-1);
+  assert.deepEqual(modeInvocation.args.slice(modeInvocation.args.indexOf("--permission-mode"), modeInvocation.args.indexOf("--permission-mode") + 2), ["--permission-mode", "bypassPermissions"]);
+  assert.ok(modeInvocation.args.includes("--resume"), "changing mode should retain the Claude backend session");
+
+  await rpc.request("session/set_model", { sessionId, modelId: sol });
+  await rpc.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "Codex full access" }] });
+  modeInvocation = readFileSync(invocationLog, "utf8").trim().split("\n").map((line) => JSON.parse(line)).at(-1);
+  assert.ok(modeInvocation.args.includes("--dangerously-bypass-approvals-and-sandbox"));
+  assert.ok(modeInvocation.args.includes("resume"), "changing mode should retain the Codex backend session");
+
+  await rpc.request("session/set_model", { sessionId, modelId: kimi });
+  await rpc.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "Kimi full access" }] });
+  assert.ok(readFileSync(acpInvocationLog, "utf8").split("\n").some((line) => line.includes('"method":"session/set_mode"') && line.includes('"modeId":"yolo"')));
+  await rpc.request("session/set_model", { sessionId, modelId: limited });
+  notificationStart = rpc.notifications.length;
+  const unsupportedFullAccess = await rpc.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "Unsupported full access" }] });
+  assert.equal(unsupportedFullAccess.stopReason, "refusal");
+  assert.ok(rpc.updatesSince(notificationStart).some((entry) => entry.params.update.content?.text?.includes("does not expose a compatible Full access mode")));
+  await rpc.request("session/set_mode", { sessionId, modeId: "plan" });
+  await rpc.request("session/set_model", { sessionId, modelId: fable });
+  await rpc.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "Claude plan" }] });
+  modeInvocation = readFileSync(invocationLog, "utf8").trim().split("\n").map((line) => JSON.parse(line)).at(-1);
+  assert.deepEqual(modeInvocation.args.slice(modeInvocation.args.indexOf("--permission-mode"), modeInvocation.args.indexOf("--permission-mode") + 2), ["--permission-mode", "plan"]);
+  await rpc.request("session/set_model", { sessionId, modelId: sol });
+  await rpc.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "Codex plan" }] });
+  modeInvocation = readFileSync(invocationLog, "utf8").trim().split("\n").map((line) => JSON.parse(line)).at(-1);
+  assert.ok(modeInvocation.args.includes("-s") && modeInvocation.args.includes("read-only"));
+  assert.ok(!modeInvocation.args.includes("--approve-for-me"));
+  await rpc.request("session/set_model", { sessionId, modelId: kimi });
+  await rpc.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "Kimi plan" }] });
+  assert.ok(readFileSync(acpInvocationLog, "utf8").split("\n").some((line) => line.includes('"method":"session/set_mode"') && line.includes('"modeId":"plan"')));
+  await rpc.request("session/set_mode", { sessionId, modeId: "auto" });
 
   const pools = join(agentLinkHome, "state", "pools");
   mkdirSync(pools, { recursive: true });
@@ -281,6 +331,10 @@ try {
   });
   assert.equal(routed.stopReason, "end_turn");
   assert.ok(rpc.updatesSince(notificationStart).some((entry) => entry.params.update.content?.text?.includes("CODEX(gpt-5.6-sol)")));
+  const routedInvocation = readFileSync(invocationLog, "utf8").trim().split("\n").map((line) => JSON.parse(line)).at(-1);
+  assert.ok(routedInvocation.args.includes("--dangerously-bypass-approvals-and-sandbox"), "a route target can override the chat mode");
+  assert.ok(routedInvocation.input.includes("WORK_TYPE_MAGIC"));
+  assert.ok(routedInvocation.input.includes(join(home, ".agents", "skills", "test-skill", "SKILL.md")));
   const routedStored = JSON.parse(readFileSync(join(agentLinkHome, "state", "acp", "sessions", `${sessionId}.json`), "utf8"));
   assert.equal(routedStored.currentModelId, router);
   assert.match(routedStored.transcript.at(-1).profile, /^AgentRouter → GPT-5\.6 Sol/);

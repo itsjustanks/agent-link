@@ -61,7 +61,7 @@ import {
 } from "./ui.client";
 
 /**
- * Agent Link's account surface.
+ * AgentLink's account surface.
  *
  * Operational areas are top-level tabs. Provider tabs exist only inside
  * Accounts, where every sign-in owns its quota, activity, AgentRouter priority,
@@ -70,8 +70,15 @@ import {
 
 type ProviderId = "claude" | "codex";
 type PanelTab = "accounts" | "memory" | "router";
-type RouterDraftTarget = { provider: string; model: string; account: string; resolvedProvider?: string };
-type RouterDraftGroup = { name: string; purpose: string; targets: RouterDraftTarget[] };
+type RouterDraftMode = "inherit" | "plan" | "auto" | "full-access";
+type RouterDraftTarget = { provider: string; model: string; account: string; mode: RouterDraftMode; resolvedProvider?: string };
+type RouterDraftGroup = { name: string; purpose: string; skillsText: string; instructions: string; targets: RouterDraftTarget[] };
+const ROUTER_MODE_OPTIONS: Array<{ value: RouterDraftMode; label: string; description: string }> = [
+  { value: "inherit", label: "Use chat mode", description: "Follow the mode selected in this AgentLink chat" },
+  { value: "plan", label: "Plan", description: "Read and plan without changes" },
+  { value: "auto", label: "Auto", description: "Use provider-native safety checks" },
+  { value: "full-access", label: "Full access", description: "Use the provider's unrestricted mode" },
+];
 
 const CARD_TITLE: Record<ProviderId, string> = { claude: "Claude Code", codex: "Codex" };
 const SHORT: Record<ProviderId, string> = { claude: "Claude", codex: "Codex" };
@@ -397,9 +404,11 @@ function RouterTargetEditor({
             label={`${index + 1}. Provider`}
             value={target.provider}
             onChange={(value) => onChange({
+              ...target,
               provider: value,
               model: value === target.provider ? target.model : "",
               account: value === "claude" || value === "codex" ? "auto" : "provider",
+              resolvedProvider: undefined,
             })}
             options={providerOptions.map((option) => ({
               value: option.id,
@@ -416,7 +425,7 @@ function RouterTargetEditor({
             <ComboBox
               label="Account"
               value={target.account}
-              onChange={(value) => onChange({ provider: target.provider, model: target.model, account: value })}
+              onChange={(value) => onChange({ ...target, account: value, resolvedProvider: undefined })}
               options={providerAccounts.map((option) => ({
                 value: option.id,
                 label: option.label,
@@ -438,6 +447,16 @@ function RouterTargetEditor({
             placeholder={models.isFetching ? "Loading models…" : "Choose a model"}
             hint={models.data?.message ?? "Paseo will load this provider's model catalog."}
             allowCustom={(models.data?.models.length ?? 0) === 0}
+          />
+        </View>
+        <View style={{ flex: 1 }}>
+          <ComboBox
+            label="Mode"
+            value={target.mode}
+            onChange={(value) => onChange({ ...target, mode: value as RouterDraftMode })}
+            options={ROUTER_MODE_OPTIONS}
+            hint="Full access is used only when this provider exposes a real unrestricted equivalent."
+            allowCustom={false}
           />
         </View>
       </View>
@@ -687,10 +706,13 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
       state.targetGroups.map((group) => ({
         name: group.name,
         purpose: group.purpose,
+        skillsText: group.skills.join(", "),
+        instructions: group.instructions,
         targets: group.targets.map((target) => ({
           provider: target.provider,
           model: target.model,
           account: target.account,
+          mode: target.mode,
           resolvedProvider: target.resolvedProvider,
         })),
       })),
@@ -733,13 +755,19 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
         provider: target.provider.trim(),
         model: target.model.trim(),
         account: target.account.trim() || (target.provider === "claude" || target.provider === "codex" ? "auto" : "provider"),
+        mode: target.mode,
         resolvedProvider: target.resolvedProvider,
       }));
       if (!group.purpose.trim() || targets.some((target) => !/^[a-z][a-z0-9-]*$/.test(target.provider) || !target.model) || targets.length === 0) {
         setNotice(`Finish ${name || "the unnamed work type"}: choose a provider and model for every option.`);
         return;
       }
-      targetGroups.push({ name, purpose: group.purpose.trim(), selector: "in_order", targets });
+      const skills = [...new Set(group.skillsText.split(/[\n,]+/).map((value) => value.trim()).filter(Boolean))];
+      if (skills.length > 24) {
+        setNotice(`${name} has more than 24 required skills.`);
+        return;
+      }
+      targetGroups.push({ name, purpose: group.purpose.trim(), skills, instructions: group.instructions.trim(), selector: "in_order", targets });
     }
     if (targetGroups.length === 0) {
       setNotice("Add at least one work type.");
@@ -868,7 +896,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
         <Text style={t.text.heading}>Plugin update ready</Text>
         <Text style={[t.text.body, { color: t.color.muted }]}>
           {update.data.note ||
-            `Agent Link ${update.data.installedVersion ? `v${update.data.installedVersion}` : "older install"} → v${update.data.latestVersion}. Paseo validates the new release and keeps the current plugin if the update cannot start.`}
+            `AgentLink ${update.data.installedVersion ? `v${update.data.installedVersion}` : "older install"} → v${update.data.latestVersion}. Paseo validates the new release and keeps the current plugin if the update cannot start.`}
         </Text>
         <View style={{ flexDirection: "row", gap: t.space.sm, alignItems: "center", flexWrap: "wrap" }}>
           <Button label="Update now" variant="primary" loading={applyUpdate.isPending} onPress={() => applyUpdate.mutate()} />
@@ -1482,7 +1510,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   return (
     <Screen t={t}>
       <Toolbar
-        title="Agents"
+        title="AgentLink"
         subtitle={panelSubtitle[panelTab]}
         actions={
           <Button label="Refresh" variant="ghost" loading={scanQuery.isFetching || heartbeatQuery.isFetching} onPress={refresh} />
@@ -1660,7 +1688,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
               meta={<Facts items={[
                 { value: plural(group.targets.length, "route choice", "route choices") },
                 group.targets[0]
-                  ? { value: `first: ${group.targets[0].provider}/${group.targets[0].model} · ${group.targets[0].account}` }
+                  ? { value: `first: ${group.targets[0].provider}/${group.targets[0].model} · ${group.targets[0].account} · ${ROUTER_MODE_OPTIONS.find((option) => option.value === group.targets[0]!.mode)?.label ?? group.targets[0].mode}` }
                   : null,
               ]} />}
               trailing={
@@ -1688,6 +1716,21 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                       <Field label="Use it for" value={group.purpose} onChangeText={(value) => updateRouterGroup(index, { purpose: value })} placeholder="Product and implementation plans" />
                     </View>
                   </View>
+                  <Field
+                    label="Required skills"
+                    value={group.skillsText}
+                    onChangeText={(value) => updateRouterGroup(index, { skillsText: value })}
+                    placeholder="paseo, agent-link, investorkit-ui"
+                    hint="Comma or line separated. AgentRouter resolves each installed SKILL.md before the provider starts."
+                  />
+                  <Field
+                    label="Work-type instructions"
+                    value={group.instructions}
+                    onChangeText={(value) => updateRouterGroup(index, { instructions: value })}
+                    placeholder="Instructions applied only when this work type is selected"
+                    multiline
+                    minHeight={96}
+                  />
                   <View style={{ gap: t.space.sm }}>
                     {group.targets.map((target, targetIndex) => (
                       <RouterTargetEditor
@@ -1711,7 +1754,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                     <Button
                       label="Add fallback model"
                       variant="secondary"
-                      onPress={() => updateRouterGroup(index, { targets: [...group.targets, { provider: "", model: "", account: "provider" }] })}
+                      onPress={() => updateRouterGroup(index, { targets: [...group.targets, { provider: "", model: "", account: "provider", mode: "inherit" }] })}
                     />
                   </View>
                 </View> : undefined
@@ -1724,12 +1767,12 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
               label="Add work type"
               variant="secondary"
               onPress={() => {
-                setRouterGroups((groups) => [...groups, { name: `work-${groups.length + 1}`, purpose: "Describe when this work type should be used", targets: [{ provider: "", model: "", account: "provider" }] }]);
+                setRouterGroups((groups) => [...groups, { name: `work-${groups.length + 1}`, purpose: "Describe when this work type should be used", skillsText: "", instructions: "", targets: [{ provider: "", model: "", account: "provider", mode: "inherit" }] }]);
                 setRouterDirty(true);
               }}
             />
             <Field
-              label="Extra instructions"
+              label="Global AgentRouter instructions"
               value={routerRules}
               onChangeText={(value) => {
                 setRouterRules(value);

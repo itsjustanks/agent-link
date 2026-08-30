@@ -565,11 +565,13 @@ export async function handleWireAuto({ provider }: { provider: "claude" | "codex
 const ROUTER_PROVIDER_ID = "agent-router";
 const ROUTER_VIRTUAL_MODEL = "agent-router-auto";
 type RouterController = "claude-auto" | "claude";
+type RouterMode = "inherit" | "plan" | "auto" | "full-access";
 type RouterTarget = {
   provider: string;
   model: string;
   account: string;
   resolvedProvider: string;
+  mode: RouterMode;
 };
 type RouterTargetInput = Omit<RouterTarget, "resolvedProvider"> & {
   resolvedProvider?: string;
@@ -578,6 +580,8 @@ type RouterTargetInput = Omit<RouterTarget, "resolvedProvider"> & {
 type RouterTargetGroup = {
   name: string;
   purpose: string;
+  skills: string[];
+  instructions: string;
   selector: "in_order";
   targets: RouterTarget[];
 };
@@ -594,17 +598,21 @@ const autoTarget = (provider: "claude" | "codex", model: string): RouterTarget =
   model,
   account: "auto",
   resolvedProvider: `${provider}-auto`,
+  mode: "inherit",
 });
 const providerTarget = (provider: string, model: string): RouterTarget => ({
   provider,
   model,
   account: "provider",
   resolvedProvider: provider,
+  mode: "inherit",
 });
 const ROUTER_TARGET_GROUPS: RouterTargetGroup[] = [
   {
     name: "fast",
     purpose: "Explanations, summaries, formatting and tiny edits",
+    skills: [],
+    instructions: "",
     selector: "in_order" as const,
     targets: [
       autoTarget("claude", "claude-haiku-4-5"),
@@ -616,6 +624,8 @@ const ROUTER_TARGET_GROUPS: RouterTargetGroup[] = [
   {
     name: "planning",
     purpose: "Product and implementation plans",
+    skills: [],
+    instructions: "",
     selector: "in_order" as const,
     targets: [
       autoTarget("claude", "claude-fable-5"),
@@ -626,6 +636,8 @@ const ROUTER_TARGET_GROUPS: RouterTargetGroup[] = [
   {
     name: "judgment",
     purpose: "Architecture, UI/UX, audit and final review",
+    skills: [],
+    instructions: "",
     selector: "in_order" as const,
     targets: [
       autoTarget("claude", "claude-opus-5"),
@@ -636,6 +648,8 @@ const ROUTER_TARGET_GROUPS: RouterTargetGroup[] = [
   {
     name: "build",
     purpose: "Multi-file implementation, debugging, migrations and refactors",
+    skills: [],
+    instructions: "",
     selector: "in_order" as const,
     targets: [
       autoTarget("codex", "gpt-5.6-sol"),
@@ -646,6 +660,8 @@ const ROUTER_TARGET_GROUPS: RouterTargetGroup[] = [
   {
     name: "browser",
     purpose: "Browser-driving verification",
+    skills: [],
+    instructions: "",
     selector: "in_order" as const,
     targets: [autoTarget("codex", "gpt-5.6-sol")],
   },
@@ -700,9 +716,16 @@ function currentRouterConfig(): RouterConfig {
       const resolvedProvider = typeof target.resolvedProvider === "string" && target.resolvedProvider
         ? target.resolvedProvider
         : legacyProvider;
-      return [{ provider: migratedProvider, model: target.model, account, resolvedProvider }];
+      const mode: RouterMode = ["inherit", "plan", "auto", "full-access"].includes(String(target.mode))
+        ? target.mode as RouterMode
+        : "inherit";
+      return [{ provider: migratedProvider, model: target.model, account, resolvedProvider, mode }];
     });
-    return targets.length > 0 ? [{ name: group.name, purpose: group.purpose, selector: "in_order", targets }] : [];
+    const skills = Array.isArray(group.skills)
+      ? [...new Set(group.skills.filter((entry): entry is string => typeof entry === "string").map((entry) => entry.trim()).filter(Boolean))].slice(0, 24)
+      : [];
+    const instructions = typeof group.instructions === "string" ? group.instructions.slice(0, 6_000) : "";
+    return targets.length > 0 ? [{ name: group.name, purpose: group.purpose, skills, instructions, selector: "in_order", targets }] : [];
   });
   return {
     controllerProvider,

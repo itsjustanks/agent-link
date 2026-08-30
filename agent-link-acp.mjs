@@ -8,6 +8,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   statSync,
   writeFileSync,
@@ -16,7 +17,7 @@ import { homedir } from "node:os";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 
-const VERSION = "0.6.1";
+const VERSION = "0.7.0";
 if (["--version", "-v", "version"].includes(process.argv[2])) {
   process.stdout.write(`${VERSION}\n`);
   process.exit(0);
@@ -126,10 +127,13 @@ const ROUTER_DEFAULT_GROUPS = [
 const MODES = {
   currentModeId: "auto",
   availableModes: [
-    { id: "auto", name: "Auto", description: "Work in the workspace with provider-native safety checks." },
     { id: "plan", name: "Plan", description: "Read and plan without changing files." },
+    { id: "auto", name: "Auto", description: "Work in the workspace with provider-native safety checks." },
+    { id: "full-access", name: "Full access", description: "Use the selected provider's unrestricted mode. This can edit files, run commands and access the network without approval." },
   ],
 };
+const MODE_IDS = new Set(MODES.availableModes.map((mode) => mode.id));
+const ROUTER_MODE_IDS = new Set(["inherit", ...MODE_IDS]);
 
 function readJson(path) {
   try {
@@ -158,7 +162,7 @@ function loadStoredSession(sessionId) {
     throw new Error(`AgentLink session ${sessionId} was not found`);
   }
   session.backends ||= {};
-  session.currentModeId ||= "auto";
+  if (!MODE_IDS.has(session.currentModeId)) session.currentModeId = "auto";
   return session;
 }
 
@@ -419,7 +423,13 @@ function normalizedRouterTarget(value) {
   }
   if (!provider) return null;
   if ((provider === "claude" || provider === "codex") && account === "provider") account = "auto";
-  return { provider, account, model: value.model };
+  const mode = typeof value.mode === "string" && ROUTER_MODE_IDS.has(value.mode) ? value.mode : "inherit";
+  return { provider, account, model: value.model, mode };
+}
+
+function normalizedRouterSkills(value) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter((entry) => typeof entry === "string").map((entry) => entry.trim()).filter(Boolean))].slice(0, 24);
 }
 
 function routerConfig() {
@@ -431,6 +441,8 @@ function routerConfig() {
     return [{
       name: value.name.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-|-$/g, "") || "work",
       purpose: typeof value.purpose === "string" ? value.purpose : "Configured work",
+      skills: normalizedRouterSkills(value.skills),
+      instructions: typeof value.instructions === "string" ? value.instructions.slice(0, 6_000) : "",
       targets,
     }];
   });
@@ -531,7 +543,7 @@ function explicitRouteProfile(text) {
 function automaticRoute(text) {
   const config = routerConfig();
   const explicit = explicitRouteProfile(text);
-  if (explicit) return { group: "explicit", candidates: [explicit], rules: config.rules };
+  if (explicit) return { group: "explicit", candidates: [{ profile: explicit, mode: "inherit" }], skills: [], instructions: "", rules: config.rules };
   const group = routerGroup(text, config);
   const candidates = [];
   const seen = new Set();
@@ -539,10 +551,94 @@ function automaticRoute(text) {
     for (const profile of routeProfilesForTarget(target)) {
       if (seen.has(profile.id) || heldReason(profile.provider, profile.accountKey, profile.model)) continue;
       seen.add(profile.id);
-      candidates.push(profile);
+      candidates.push({ profile, mode: target.mode });
     }
   }
-  return { group: group.name, candidates, rules: config.rules };
+  return { group: group.name, candidates, skills: group.skills, instructions: group.instructions, rules: config.rules };
+}
+
+function routeMode(sessionMode, targetMode) {
+  return targetMode === "inherit" || !ROUTER_MODE_IDS.has(targetMode) ? sessionMode : targetMode;
+}
+
+function modeLabel(modeId) {
+  return MODES.availableModes.find((mode) => mode.id === modeId)?.name ?? modeId;
+}
+
+let skillCatalog = null;
+
+function installedSkills(refresh = false) {
+  if (skillCatalog && !refresh) return skillCatalog;
+  const catalog = new Map();
+  const visited = new Set();
+  let scanned = 0;
+  const visit = (directory, depth) => {
+    if (depth > 6 || scanned >= 2_000) return;
+    let real;
+    try {
+      real = realpathSync(directory);
+      if (visited.has(real) || !statSync(real).isDirectory()) return;
+      visited.add(real);
+    } catch {
+      return;
+    }
+    let entries;
+    try {
+      entries = readdirSync(real, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (scanned++ >= 2_000) break;
+      if ([".git", "node_modules"].includes(entry.name)) continue;
+      const path = join(real, entry.name);
+      if (entry.name === "SKILL.md") {
+        let name = basename(dirname(path));
+        try {
+          const header = readFileSync(path, "utf8").slice(0, 2_000);
+          name = header.match(/^name:\s*["']?([^\n"']+)/m)?.[1]?.trim() || name;
+        } catch {
+          // The selected provider will report an unreadable skill if configured.
+        }
+        for (const key of [name, basename(dirname(path))]) if (!catalog.has(key.toLowerCase())) catalog.set(key.toLowerCase(), path);
+        continue;
+      }
+      try {
+        if (entry.isDirectory() || statSync(path).isDirectory()) visit(path, depth + 1);
+      } catch {
+        // Ignore broken skill links.
+      }
+    }
+  };
+  for (const root of [join(HOME, ".agents", "skills"), join(HOME, ".codex", "skills"), join(HOME, ".claude", "skills")]) visit(root, 0);
+  skillCatalog = catalog;
+  return catalog;
+}
+
+function resolveRouteSkills(configured) {
+  const paths = [];
+  const missing = [];
+  const catalog = installedSkills();
+  for (const requested of configured ?? []) {
+    let path = "";
+    if (requested.includes("/")) {
+      const candidate = resolve(requested.startsWith("/") ? requested : join(HOME, requested));
+      const skillFile = basename(candidate) === "SKILL.md" ? candidate : join(candidate, "SKILL.md");
+      try {
+        const real = realpathSync(skillFile);
+        if ((real === HOME || real.startsWith(`${HOME}/`)) && statSync(real).isFile()) path = real;
+      } catch {
+        // Report the configured value below.
+      }
+    } else {
+      path = catalog.get(requested.toLowerCase()) ?? "";
+      if (!path) path = installedSkills(true).get(requested.toLowerCase()) ?? "";
+    }
+    if (path) paths.push({ name: requested, path });
+    else missing.push(requested);
+  }
+  if (missing.length > 0) throw new Error(`Required AgentRouter skill${missing.length === 1 ? "" : "s"} not installed: ${missing.join(", ")}`);
+  return paths;
 }
 
 function titleFrom(text) {
@@ -896,7 +992,24 @@ function genericTurnUpdate(state, payload) {
   turnUpdate(state, payload);
 }
 
-async function ensureGenericBackend(session, profile, backend, state) {
+function genericModeId(modes, currentModeId, requestedMode, profile) {
+  const normalized = modes.map((mode) => ({
+    ...mode,
+    search: `${mode.id ?? ""} ${mode.name ?? ""}`.toLowerCase(),
+  }));
+  const matcher = requestedMode === "plan"
+    ? /(^|\W)(plan|read[ -]?only)(\W|$)/
+    : requestedMode === "full-access"
+      ? /(^|\W)(full[ -]?access|allow[ -]?all|bypass|yolo|unrestricted|danger)(\W|$)/
+      : /(^|\W)(auto|default|agent|build)(\W|$)/;
+  const exact = normalized.find((mode) => mode.id === requestedMode || (requestedMode === "full-access" && mode.id === "full"));
+  const matched = exact ?? normalized.find((mode) => matcher.test(mode.search));
+  if (matched?.id) return matched.id;
+  if (requestedMode === "auto") return currentModeId ?? null;
+  throw new Error(`${profile.email} does not expose a compatible ${modeLabel(requestedMode)} mode`);
+}
+
+async function ensureGenericBackend(session, profile, backend, state, requestedMode) {
   const key = genericConnectionKey(session.id, profile.providerId);
   let connection = genericConnections.get(key);
   if (connection?.closed) {
@@ -954,13 +1067,7 @@ async function ensureGenericBackend(session, profile, backend, state) {
   }
   const modes = Array.isArray(response?.modes?.availableModes) ? response.modes.availableModes : [];
   const currentModeId = connection.currentModeId ?? response?.modes?.currentModeId;
-  let desiredModeId = currentModeId;
-  if (session.currentModeId === "plan") {
-    desiredModeId = modes.find((mode) => mode.id === "plan" || /plan/i.test(mode.name ?? ""))?.id;
-    if (!desiredModeId) throw new Error(`${profile.email} does not expose a Plan mode`);
-  } else {
-    desiredModeId = modes.find((mode) => mode.id === "auto")?.id ?? currentModeId;
-  }
+  const desiredModeId = genericModeId(modes, currentModeId, requestedMode, profile);
   if (desiredModeId && desiredModeId !== currentModeId) {
     await connection.request("session/set_mode", { sessionId: connection.childSessionId, modeId: desiredModeId });
   }
@@ -1024,6 +1131,7 @@ function spawnTurn(binary, args, options, input, onLine) {
 }
 
 function claudeArgs(profile, backend, mode) {
+  const permissionMode = mode === "plan" ? "plan" : mode === "full-access" ? "bypassPermissions" : "auto";
   const args = [
     "-p",
     "--input-format", "text",
@@ -1031,7 +1139,7 @@ function claudeArgs(profile, backend, mode) {
     "--verbose",
     "--forward-subagent-text",
     "--model", profile.model,
-    "--permission-mode", mode === "plan" ? "plan" : "auto",
+    "--permission-mode", permissionMode,
   ];
   if (backend.sessionId) args.push("--resume", backend.sessionId);
   else {
@@ -1041,21 +1149,23 @@ function claudeArgs(profile, backend, mode) {
   return args;
 }
 
-function codexArgs(profile, backend, session, images) {
+function codexModeArgs(mode) {
+  if (mode === "plan") return ["-s", "read-only"];
+  if (mode === "full-access") return ["--dangerously-bypass-approvals-and-sandbox"];
+  return ["--approve-for-me"];
+}
+
+function codexArgs(profile, backend, session, images, mode) {
+  const modeArgs = codexModeArgs(mode);
   if (backend.sessionId) {
-    const args = ["exec", "resume", backend.sessionId, "--json", "--skip-git-repo-check", "-m", profile.model];
+    const args = ["exec", ...modeArgs, "resume", backend.sessionId, "--json", "--skip-git-repo-check", "-m", profile.model];
     for (const image of images) args.push("-i", image);
     args.push("-");
     return args;
   }
   const args = [
-    "exec", "--json", "--skip-git-repo-check", "-C", session.cwd, "-m", profile.model,
+    "exec", ...modeArgs, "--json", "--skip-git-repo-check", "-C", session.cwd, "-m", profile.model,
   ];
-  // Current Codex makes --approve-for-me and --sandbox mutually exclusive:
-  // automatic review already implies workspace-write. Plan mode remains an
-  // explicit read-only sandbox and never asks for automatic approvals.
-  if (session.currentModeId === "plan") args.push("-s", "read-only");
-  else args.push("--approve-for-me");
   for (const image of images) args.push("-i", image);
   args.push("-");
   return args;
@@ -1188,7 +1298,7 @@ function conciseProviderError(profile, result, state) {
   return `${profile.modelLabel} · ${profile.email} could not serve this turn. The AgentLink chat and history are unchanged.\n\n${detail}`;
 }
 
-async function executeProfileTurn(session, request, parsed, selected, currentText, running, buffered) {
+async function executeProfileTurn(session, request, parsed, selected, currentText, running, buffered, requestedMode) {
   const key = backendKey(selected);
   const backend = session.backends[key] ?? { provider: selected.provider, accountKey: selected.accountKey, sessionId: null, syncedThrough: 0 };
   session.backends[key] = backend;
@@ -1208,7 +1318,7 @@ async function executeProfileTurn(session, request, parsed, selected, currentTex
   let result;
   try {
     if (selected.kind === "paseo-acp") {
-      const connection = await ensureGenericBackend(session, selected, backend, state);
+      const connection = await ensureGenericBackend(session, selected, backend, state, requestedMode);
       running.cancel = () => connection.notify("session/cancel", { sessionId: connection.childSessionId });
       const childPrompt = [
         { type: "text", text: input },
@@ -1226,7 +1336,7 @@ async function executeProfileTurn(session, request, parsed, selected, currentTex
       trustClaudeWorkspace(selected, session.cwd);
       result = await spawnTurn(
         findBinary("claude"),
-        claudeArgs(selected, backend, session.currentModeId),
+        claudeArgs(selected, backend, requestedMode),
         { cwd: session.cwd, env: childEnvironment(selected), running },
         input,
         (line) => parseClaudeLine(line, state),
@@ -1234,7 +1344,7 @@ async function executeProfileTurn(session, request, parsed, selected, currentTex
     } else {
       result = await spawnTurn(
         findBinary("codex"),
-        codexArgs(selected, backend, session, parsed.images),
+        codexArgs(selected, backend, session, parsed.images, requestedMode),
         { cwd: session.cwd, env: childEnvironment(selected), running },
         input,
         (line) => parseCodexLine(line, state),
@@ -1291,16 +1401,26 @@ async function runPrompt(session, request) {
     return refuse("The selected AgentLink account/model no longer exists. Choose another entry in the model picker.");
   }
   const route = pickerSelection.kind === "router" ? automaticRoute(parsed.text) : null;
-  const candidates = route ? route.candidates : [pickerSelection];
+  let requiredSkills = [];
+  if (route) {
+    try {
+      requiredSkills = resolveRouteSkills(route.skills);
+    } catch (error) {
+      return refuse(error instanceof Error ? error.message : String(error), "AgentRouter · Automatic route");
+    }
+  }
+  const candidates = route ? route.candidates : [{ profile: pickerSelection, mode: "inherit" }];
   if (candidates.length === 0) {
-    return refuse(`AgentRouter found no available model/account in the '${route?.group ?? "configured"}' route. Update Agents → Orchestration or choose a specific model in this chat.`);
+    return refuse(`AgentRouter found no available model/account in the '${route?.group ?? "configured"}' route. Update AgentLink → Orchestration or choose a specific model in this chat.`);
   }
   const running = { child: null, cancel: null, cancelled: false };
   activeTurns.set(session.id, running);
   const failures = [];
   let completed = null;
   try {
-    for (const selected of candidates) {
+    for (const candidate of candidates) {
+      const selected = candidate.profile;
+      const requestedMode = routeMode(session.currentModeId, candidate.mode);
       const unavailable = heldReason(selected.provider, selected.accountKey, selected.model);
       if (unavailable) {
         failures.push(`${selected.modelLabel} · ${selected.email}: ${unavailable}`);
@@ -1308,17 +1428,21 @@ async function runPrompt(session, request) {
       }
       if (route) {
         stampAutomaticAccount(selected);
-        emitText(session.id, `AgentRouter: ${route.group} → ${selected.modelLabel} · ${selected.email}\n`, true);
+        emitText(session.id, `AgentRouter: ${route.group} → ${selected.modelLabel} · ${selected.email} · ${modeLabel(requestedMode)}\n`, true);
       }
       const routedText = route
         ? [
             `[AgentRouter selected route: ${route.group}]`,
             "You are the selected answer model. Complete the user's request in this same AgentLink chat; do not delegate merely to change provider or account.",
+            requiredSkills.length > 0
+              ? `[Required skills]\nBefore acting, read each SKILL.md completely and follow it. If one cannot be read, stop before changing anything.\n${requiredSkills.map((skill) => `- ${skill.name}: ${skill.path}`).join("\n")}`
+              : "",
+            route.instructions ? `[Work-type instructions]\n${route.instructions}` : "",
             route.rules ? `[User orchestration rules]\n${route.rules}` : "",
             `[Current user request]\n${parsed.text}`,
           ].filter(Boolean).join("\n\n")
         : parsed.text;
-      const attempt = await executeProfileTurn(session, request, parsed, selected, routedText, running, Boolean(route));
+      const attempt = await executeProfileTurn(session, request, parsed, selected, routedText, running, Boolean(route), requestedMode);
       if (running.cancelled) {
         flushTurn(attempt.state);
         saveSession(session);
@@ -1326,7 +1450,7 @@ async function runPrompt(session, request) {
       }
       if (attempt.result.code === 0 && !attempt.state.providerError) {
         flushTurn(attempt.state);
-        completed = { selected, ...attempt };
+        completed = { selected, requestedMode, ...attempt };
         break;
       }
       attempt.backend.sessionId = null;
@@ -1334,7 +1458,7 @@ async function runPrompt(session, request) {
       await dropGenericConnection(session.id, selected);
       if (!route || attempt.state.toolActivity) {
         flushTurn(attempt.state);
-        completed = { selected, ...attempt, failed: true };
+        completed = { selected, requestedMode, ...attempt, failed: true };
         break;
       }
     }
@@ -1350,7 +1474,7 @@ async function runPrompt(session, request) {
       route ? "AgentRouter · Automatic route" : `${pickerSelection.modelLabel} · ${pickerSelection.email}`,
     );
   }
-  const { selected, backend, state } = completed;
+  const { selected, requestedMode, backend, state } = completed;
   if (running.cancelled) {
     saveSession(session);
     return { stopReason: "cancelled", ...(request.messageId ? { userMessageId: request.messageId } : {}) };
@@ -1360,7 +1484,7 @@ async function runPrompt(session, request) {
   session.transcript.push({
     role: "assistant",
     text: answer,
-    profile: route ? `AgentRouter → ${selected.modelLabel} · ${selected.email}` : `${selected.modelLabel} · ${selected.email}`,
+    profile: route ? `AgentRouter → ${selected.modelLabel} · ${selected.email} · ${modeLabel(requestedMode)}` : `${selected.modelLabel} · ${selected.email}`,
     modelId: route ? ROUTER_PROFILE_ID : selected.id,
     at: new Date().toISOString(),
   });
@@ -1420,13 +1544,6 @@ function listSessions(params) {
   const offset = Math.max(0, Number.parseInt(params.cursor ?? "0", 10) || 0);
   const page = rows.slice(offset, offset + 200);
   return { sessions: page, ...(offset + page.length < rows.length ? { nextCursor: String(offset + page.length) } : {}) };
-}
-
-function resetBackendsForMode(session) {
-  for (const backend of Object.values(session.backends)) {
-    backend.sessionId = null;
-    backend.syncedThrough = 0;
-  }
 }
 
 function cancelTurn(sessionId) {
@@ -1514,10 +1631,6 @@ async function handleRequest(message) {
       if (activeTurns.has(params.sessionId)) throw new Error("Wait for the current turn to stop before changing the AgentLink mode");
       const session = loadStoredSession(params.sessionId);
       if (!MODES.availableModes.some((mode) => mode.id === params.modeId)) throw new Error("Unsupported AgentLink mode");
-      if (session.currentModeId !== params.modeId) {
-        resetBackendsForMode(session);
-        await closeGenericConnections(session.id);
-      }
       session.currentModeId = params.modeId;
       saveSession(session);
       respond(id, {});

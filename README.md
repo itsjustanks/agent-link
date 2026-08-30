@@ -11,7 +11,7 @@
 
 </div>
 
-**Agent Link** is Paseo's unified provider when installed. Its model picker behaves like Cursor: choose AgentRouter's automatic route or any model/account from connected Claude Code, Codex, and enabled Paseo ACP providers for the next turn without creating another chat, tab, or Paseo agent.
+**AgentLink** is Paseo's unified provider when installed. Its model picker behaves like Cursor: choose AgentRouter's automatic route or any model/account from connected Claude Code, Codex, and enabled Paseo ACP providers for the next turn without creating another chat, tab, or Paseo agent.
 
 ## Install
 
@@ -53,11 +53,19 @@ Changing the selection affects the next turn while preserving:
 - the canonical AgentLink transcript
 - native backend session ownership for each account
 
-When you return to an account, Agent Link resumes that account's native Claude or Codex session and bridges any turns it missed. It never archives the chat, creates a replacement agent, opens a terminal window, or moves subagents to another parent.
+When you return to an account, AgentLink resumes that account's native Claude or Codex session and bridges any turns it missed. It never archives the chat, creates a replacement agent, opens a terminal window, or moves subagents to another parent.
 
-An unavailable account stays visible with its health state. Selecting it fails clearly in the same chat so you can choose another profile; Agent Link does not silently rotate or kill unrelated sessions.
+An unavailable account stays visible with its health state. Selecting it fails clearly in the same chat so you can choose another profile; AgentLink does not silently rotate or kill unrelated sessions.
 
-**AgentRouter** is the default model inside AgentLink. It classifies the request locally, chooses the matching work type, and tries its configured model/account choices in order. It may skip an unavailable target or retry a clean launch failure before any tool activity; it never creates a control chat or replacement agent. Configure it in **Agents → Orchestration**.
+**AgentRouter** is the default model inside AgentLink. It classifies the request locally, chooses the matching work type, and tries its configured model/account choices in order. Each target can inherit the chat mode or pin Plan, Auto, or Full access. Each work type can also require installed skills and add its own instructions. Configure it in **AgentLink → Orchestration**.
+
+AgentLink exposes three consistent chat modes:
+
+- **Plan** maps to the provider's read-only/planning mode.
+- **Auto** maps to provider-native safety checks.
+- **Full access** maps only to a real unrestricted provider mode, such as Claude Bypass, Codex Full Access, or an ACP mode named Full, Bypass, Allow All, YOLO, Unrestricted, or Dangerous.
+
+If a connected provider cannot support the selected mode, a direct selection fails clearly in the same chat; AgentRouter moves to the next configured target before tool activity. Switching mode does not replace the Paseo chat or discard its private backend sessions.
 
 Paseo owns the new-chat provider preference. Select AgentLink once in the composer and Paseo remembers that choice; the plugin does not overwrite an explicit user preference.
 
@@ -146,7 +154,7 @@ They choose an account when a new native session starts. They do not provide Pas
 
 ## Safety
 
-- Agent Link never reads, copies, backs up, or restores OAuth tokens.
+- AgentLink never reads, copies, backs up, or restores OAuth tokens.
 - Never move `~/.agent-link`; Claude logins are bound to the literal config path.
 - MCP definitions and preferences can sync, but OAuth grants remain per account.
 - Sign-in may require an interactive terminal.
@@ -157,10 +165,10 @@ They choose an account when a new native session starts. They do not provide Pas
 | Symptom | Action |
 | --- | --- |
 | AgentLink is missing from the provider picker | Run `agent-link auto`, then `paseo reload` |
-| A model says its account is unavailable | Open Agents → Accounts and repair or release that sign-in |
-| AgentRouter chooses the wrong work type | Reorder or edit it in Agents → Orchestration |
+| A model says its account is unavailable | Open AgentLink → Accounts and repair or release that sign-in |
+| AgentRouter chooses the wrong work type | Reorder or edit it in AgentLink → Orchestration |
 | An old chat cannot find its thread | Keep its legacy provider and original account; do not convert it |
-| Plugin buttons stop after an update | Reopen the Agents surface to load the new client bundle |
+| Plugin buttons stop after an update | Reopen the AgentLink surface to load the new client bundle |
 
 ## License
 

@@ -1,6 +1,6 @@
 {
   "id": "paseo",
-  "title": "Paseo panel",
+  "title": "AgentLink",
   "summary": "One AgentLink chat for every connected model and account",
   "requires": "paseo",
   "kind": "paseo-plugin",
