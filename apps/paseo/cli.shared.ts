@@ -5,13 +5,12 @@ import { z } from "zod";
  * The CLI, from the panel.
  *
  * Most of this plugin works without the agent-link CLI: it reads account and
- * provider state itself. The one thing it cannot do alone is routing — that needs the little
- * launcher script the CLI writes, because a Paseo provider runs a command, and
- * the command has to exist on disk.
+ * provider state itself. The one thing it cannot do alone is host the
+ * AgentLink ACP provider—the runtime command has to exist on disk.
  *
  * So rather than telling someone to go and find a terminal, the panel offers to
- * install it: one file into ~/.local/bin, then the launchers, then routing is
- * available. The exact command is always shown too, for anyone who would rather
+ * install it: one file into ~/.local/bin, then the ACP runtime. The exact command
+ * is always shown too, for anyone who would rather
  * run it themselves.
  */
 
@@ -24,7 +23,7 @@ export const CliStatusSchema = z.object({
   onPath: z.boolean(),
   /** The curl one-liner, for someone who would rather do it by hand. */
   command: z.string(),
-  /** Launchers exist, so routing can be installed from the panel. */
+  /** The one-chat AgentLink ACP runtime exists. */
   routersReady: z.boolean(),
 });
 export type CliStatus = z.infer<typeof CliStatusSchema>;
@@ -38,7 +37,7 @@ export const cliStatus = defineRpc({
 export const cliInstall = defineRpc({
   name: "agent-link.cli-install",
   input: z.object({
-    /** Also write the routing launchers, which is the point of installing it. */
+    /** Also install the AgentLink ACP runtime. Kept under the old key for RPC compatibility. */
     withRouters: z.boolean(),
   }),
   output: z.object({ ok: z.boolean(), message: z.string(), status: CliStatusSchema }),

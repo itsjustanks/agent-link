@@ -1,10 +1,9 @@
-import type { PluginAgentPanelProps, PluginSurfaceProps } from "@getpaseo/plugin";
+import type { PluginSurfaceProps } from "@getpaseo/plugin";
 import { useRpc } from "@getpaseo/plugin";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import React, { useEffect, useState } from "react";
 import { ScrollView, Text, View } from "react-native";
 import { cliInstall, cliStatus, cliUpdateApply, cliUpdateCheck } from "./cli.shared";
-import { limitsResume, limitsSetAuto, limitsStatus, type LimitEvent } from "./limits.shared";
 import { resourceSetEnabled, resourceStatus } from "./resources.shared";
 import {
   toolchainConfigure,
@@ -25,18 +24,14 @@ import {
   scan,
   setCooldown,
   setPreference,
-  routerInstall,
   routerConfigure,
   routerModels,
   routerStatus,
-  routerTrace,
-  wireAuto,
   wireProvider,
   type AccountUsage,
   type CapacityAccount,
   type ProviderHeartbeat,
   type RouterProviderStatus,
-  type AutoRouter,
   type Slot,
 } from "./contracts.shared";
 import {
@@ -69,12 +64,12 @@ import {
  * Agent Link's account surface.
  *
  * Operational areas are top-level tabs. Provider tabs exist only inside
- * Accounts, where routing is one list row and every account owns its quota,
- * activity, priority, cooldown, and repair actions.
+ * Accounts, where every sign-in owns its quota, activity, AgentRouter priority,
+ * cooldown, and repair actions.
  */
 
 type ProviderId = "claude" | "codex";
-type PanelTab = "accounts" | "limits" | "memory" | "router";
+type PanelTab = "accounts" | "memory" | "router";
 type RouterDraftTarget = { provider: string; model: string; account: string; resolvedProvider?: string };
 type RouterDraftGroup = { name: string; purpose: string; targets: RouterDraftTarget[] };
 
@@ -152,8 +147,8 @@ function capacityTone(entry: CapacityAccount): Status {
 function capacityStateLabel(entry: CapacityAccount): string {
   if (entry.state === "held") return "blocked until tested";
   if (entry.state === "parked") return "cooling down";
-  if (entry.state === "nearing") return "new chats routed elsewhere";
-  if (entry.state === "ready") return "available for new chats";
+  if (entry.state === "nearing") return "automatic turns routed elsewhere";
+  if (entry.state === "ready") return "available in AgentLink";
   return entry.windows.length > 0 ? "usage data is old" : "waiting for usage data";
 }
 
@@ -466,9 +461,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const callWire = useRpc(wireProvider);
   const callDiagnose = useRpc(diagnoseProvider);
   const callHeartbeat = useRpc(providerHeartbeat);
-  const callWireAuto = useRpc(wireAuto);
   const callRouterStatus = useRpc(routerStatus);
-  const callRouterInstall = useRpc(routerInstall);
   const callRouterConfigure = useRpc(routerConfigure);
   const callCooldown = useRpc(setCooldown);
   const callAddAccount = useRpc(addAccount);
@@ -477,9 +470,6 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const callUsage = useRpc(accountUsage);
   const callCapacity = useRpc(accountCapacity);
   const callProbe = useRpc(probeAccounts);
-  const callLimitsStatus = useRpc(limitsStatus);
-  const callLimitsSetAuto = useRpc(limitsSetAuto);
-  const callLimitsResume = useRpc(limitsResume);
   const callResourceStatus = useRpc(resourceStatus);
   const callResourceSetEnabled = useRpc(resourceSetEnabled);
   const callToolchainStatus = useRpc(toolchainStatus);
@@ -494,11 +484,9 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const [notice, setNotice] = useState<string | null>(null);
   const [addingFor, setAddingFor] = useState<ProviderId | null>(null);
   const [newEmail, setNewEmail] = useState("");
-  const [panelTab, setPanelTab] = useState<PanelTab>("router");
+  const [panelTab, setPanelTab] = useState<PanelTab>("accounts");
   const [providerTab, setProviderTab] = useState("claude");
   const [probeLogs, setProbeLogs] = useState<Record<string, string>>({});
-  const [routerControllerAccount, setRouterControllerAccount] = useState("auto");
-  const [routerModel, setRouterModel] = useState("claude-fable-5");
   const [routerGroups, setRouterGroups] = useState<RouterDraftGroup[]>([]);
   const [routerRules, setRouterRules] = useState("");
   const [routerDirty, setRouterDirty] = useState(false);
@@ -534,18 +522,6 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   });
   const refresh = () => void queryClient.invalidateQueries({ queryKey: ["agent-link"] });
 
-  // Cheap (a JSON file read) and it arms the sentry, so it runs on mount and
-  // refreshes on a slow poll — a dead agent shows up without a manual refresh.
-  const limitsQuery = useQuery({
-    queryKey: ["agent-link", "limits"],
-    queryFn: () => callLimitsStatus({}),
-    enabled: panelTab === "limits",
-    refetchInterval: panelTab === "limits" ? 30_000 : false,
-  });
-  const limitsAutoMutation = useMutation({
-    mutationFn: (auto: boolean) => callLimitsSetAuto({ auto }),
-    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["agent-link", "limits"] }),
-  });
   const resourceQuery = useQuery({
     queryKey: ["agent-link", "resources"],
     queryFn: () => callResourceStatus({}),
@@ -567,13 +543,6 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const resourceMutation = useMutation({
     mutationFn: (enabled: boolean) => callResourceSetEnabled({ enabled }),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["agent-link", "resources"] }),
-  });
-  const routerProviderMutation = useMutation({
-    mutationFn: () => callRouterInstall({}),
-    onSuccess: (result) => {
-      setNotice(result.message);
-      void queryClient.invalidateQueries({ queryKey: ["agent-link"] });
-    },
   });
   const routerConfigureMutation = useMutation({
     mutationFn: (input: {
@@ -621,25 +590,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
     },
     onError: (error: Error) => setNotice(error.message),
   });
-  const limitsResumeMutation = useMutation({
-    mutationFn: (agentId: string) => callLimitsResume({ agentId }),
-    onSuccess: (result) => {
-      setNotice(result.ok ? "Continuation requested on an available account." : `Could not continue: ${result.error ?? "reason unknown"}`);
-      void queryClient.invalidateQueries({ queryKey: ["agent-link", "limits"] });
-    },
-  });
 
-  const routerMutation = useMutation({
-    mutationFn: async (providers: ProviderId[]) => {
-      const lines: string[] = [];
-      for (const provider of providers) lines.push((await callWireAuto({ provider })).message);
-      return lines.join("\n");
-    },
-    onSuccess: (message) => {
-      setNotice(message);
-      refresh();
-    },
-  });
   const pinMutation = useMutation({
     mutationFn: (slot: Slot) => callWire({ provider: slot.provider, email: slot.email, dir: slot.dir }),
     onSuccess: (result) => {
@@ -695,7 +646,6 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const slots = scanQuery.data?.slots ?? [];
   const routingSlots = slots.filter((slot) => slot.source === "agent-link");
   const primaryAccounts = scanQuery.data?.primaryAccounts;
-  const routers = scanQuery.data?.autoRouters ?? [];
   const heartbeatProviders = heartbeatQuery.data?.providers ?? [];
   const heartbeatById = new Map(heartbeatProviders.map((provider) => [provider.id, provider]));
   const primaryInfo = (provider: ProviderId) => (scanQuery.data?.primaries ?? []).find((entry) => entry.provider === provider);
@@ -732,8 +682,6 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   useEffect(() => {
     const state = routerProviderQuery.data;
     if (!state || routerDirty) return;
-    setRouterControllerAccount(state.controllerAccount);
-    setRouterModel(state.controllerModel);
     setRouterRules(state.userRules);
     setRouterGroups(
       state.targetGroups.map((group) => ({
@@ -797,23 +745,13 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
       setNotice("Add at least one work type.");
       return;
     }
-    if (!routerModel.trim()) {
-      setNotice("Choose a request-reader model.");
-      return;
-    }
     routerConfigureMutation.mutate({
-      controllerAccount: routerControllerAccount,
-      controllerModel: routerModel,
+      controllerAccount: routerProviderQuery.data?.controllerAccount ?? "auto",
+      controllerModel: routerProviderQuery.data?.controllerModel ?? "claude-fable-5",
       targetGroups,
       userRules: routerRules,
     });
   };
-  const maxLaunches = Math.max(
-    1,
-    ...slots.map((slot) => slot.launches),
-    ...(scanQuery.data?.primaries ?? []).map((entry) => entry.launches),
-  );
-
   // The server already picked who takes the next agent; resolve it to a row so
   // the tag lands on that row and not on a duplicate of the same address.
   const nextUpKey = (provider: ProviderId): string => {
@@ -858,97 +796,6 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
       (entry) => entry.provider === provider && (entry.poolKey === poolKey || (entry.email === email && entry.isPrimary === (poolKey === "primary"))),
     ) ?? null;
 
-  const routerPending = (provider: ProviderId) =>
-    routers.some((entry) => entry.provider === provider && !entry.wiredProviderId && entry.launcherExists);
-
-  const inRotation = (provider: ProviderId) => {
-    const info = primaryInfo(provider);
-    const own = primaryEmail(provider) && info && !info.duplicated && !info.blocked && info.cooldownUntil === 0 ? 1 : 0;
-    return own + routingSlots.filter((slot) => slot.provider === provider && slot.loggedIn && !slot.wrongAccount && !slot.blocked && slot.cooldownUntil === 0).length;
-  };
-
-  const routerRow = (entry: AutoRouter, first = false) => {
-    const key = `router-${entry.provider}`;
-    const open = Boolean(openRows[key]);
-    const next = (scanQuery.data?.nextUp ?? []).find((item) => item.provider === entry.provider)?.email ?? "";
-    const count = inRotation(entry.provider);
-    const routeHistory = (scanQuery.data?.recentRoutes ?? []).filter((route) => route.provider === entry.provider).slice(0, 5);
-    const pending = !entry.wiredProviderId && entry.launcherExists;
-    return (
-      <Row
-        key={key}
-        first={first}
-        tone={entry.wiredProviderId ? "ok" : "attention"}
-        title="New-chat account selection"
-        subtitle={
-          entry.wiredProviderId
-            ? "Chooses an available account by priority, then uses the least recently used."
-            : entry.launcherExists
-              ? "Not installed in Paseo yet; new chats still use one fixed account."
-              : "The routing launcher is missing."
-        }
-        meta={
-          <Facts
-            items={[
-              { value: plural(count, "account available", "accounts available") },
-              next ? { value: `next new chat: ${next}` } : { value: "no account available", tone: "attention" },
-              { value: "applies to new chats only" },
-            ]}
-          />
-        }
-        trailing={
-          <>
-            {pending ? (
-              <Button
-                label="Install routing"
-                variant="primary"
-                loading={routerMutation.isPending}
-                onPress={() => routerMutation.mutate([entry.provider])}
-              />
-            ) : (
-              <StatusPill status={entry.wiredProviderId ? "ok" : "attention"} label={entry.wiredProviderId ? "automatic" : "off"} />
-            )}
-            <Button label={open ? "Hide" : "Details"} variant="ghost" onPress={() => toggleRow(key)} />
-          </>
-        }
-        expanded={
-          open ? (
-            <View style={{ gap: t.space.sm }}>
-              <Text style={t.text.caption}>
-                The next-account preview is not tied to a project. Every new chat checks blocked accounts, cooldowns and known usage limits before choosing. Running chats stay on their current account.
-              </Text>
-              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: t.space.xs }}>
-                <Tag label="usage limits" tone="ok" />
-                <Tag label="account priority" />
-                <Tag label="least recently used" />
-                <Tag label="cooldowns" tone="attention" />
-              </View>
-              {!entry.launcherExists ? (
-                <View style={{ gap: t.space.xs }}>
-                  <Text style={t.text.caption}>Create the launcher in a terminal:</Text>
-                  <CodeBlock tone="attention">agent-link auto</CodeBlock>
-                </View>
-              ) : null}
-              {routeHistory.length > 0 ? (
-                <View style={{ gap: t.space.xs }}>
-                  <Text style={t.text.bodyStrong}>Recent account choices</Text>
-                  {routeHistory.map((route, index) => (
-                    <Text key={`${route.at}-${route.email}-${index}`} style={t.text.caption}>
-                      {`${agoLabel(route.at)} · ${route.email === "primary" ? primaryEmail(entry.provider) : route.email}${route.model ? ` · ${route.model}` : ""} · ${route.agentId ? `Paseo ${route.agentId}` : "started outside Paseo"}${route.cwd ? ` · ${routeLocation(route.cwd)}` : ""}`}
-                    </Text>
-                  ))}
-                </View>
-              ) : (
-                <Text style={t.text.caption}>Recent choices appear after AgentLink routes a new chat.</Text>
-              )}
-              {routerMutation.error ? <ErrorText>{String(routerMutation.error)}</ErrorText> : null}
-            </View>
-          ) : undefined
-        }
-      />
-    );
-  };
-
   // Everything else on this surface works without the CLI, but a Paseo provider
   // runs a command, so routing needs the launcher the CLI writes. Rather than
   // sending someone to a terminal, offer to put it there.
@@ -971,8 +818,8 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
       <Card tone="attention">
         <Text style={t.text.heading}>Install the agent-link CLI</Text>
         <Text style={[t.text.body, { color: t.color.muted }]}>
-          Account visibility and provider checks work without this command-line tool. Automatic account selection needs it. Installing
-          downloads one file to {cli.data.binDir} and creates the launch commands Paseo needs.
+          Account visibility and provider checks work without this command-line tool. The one-chat AgentLink provider needs it. Installing
+          downloads the CLI and creates the ACP runtime Paseo uses.
         </Text>
         <View style={{ flexDirection: "row", gap: t.space.sm, alignItems: "center", flexWrap: "wrap" }}>
           <Button
@@ -991,7 +838,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
           first
           title="AgentLink CLI"
           subtitle={cli.data.path}
-          meta={<Facts items={[{ value: `v${cli.data.version}` }, { value: cli.data.routersReady ? "automatic account selection ready" : "automatic account selection needs setup", tone: cli.data.routersReady ? "ok" : "attention" }]} />}
+          meta={<Facts items={[{ value: `v${cli.data.version}` }, { value: cli.data.routersReady ? "AgentLink runtime ready" : "run agent-link auto to install AgentLink", tone: cli.data.routersReady ? "ok" : "attention" }]} />}
           trailing={<StatusPill status="ok" label="installed" />}
         />
       </Card>
@@ -1115,7 +962,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
               row.limitLast > 0 ? ` · last ${agoLabel(row.limitLast)}` : ""
             } — an account can be healthy and still refuse one model`}
           </ErrorText>
-          <Text style={t.text.caption}>Use Test account limits above. Refusing accounts stay blocked; passing accounts return to new-chat selection.</Text>
+          <Text style={t.text.caption}>Use Test account limits above. Refusing accounts stay blocked; passing accounts return to AgentLink.</Text>
         </View>
       ) : null}
     </View>
@@ -1154,7 +1001,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
     preference: "preferred" | "standard" | "reserve",
   ) => (
     <View style={{ gap: t.space.xs }}>
-      <Text style={t.text.caption}>Priority for new chats</Text>
+      <Text style={t.text.caption}>AgentRouter account priority</Text>
       <Segmented
         value={preference}
         options={[
@@ -1273,7 +1120,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
             ? `cooling down for ${remainingLabel(slot.cooldownUntil)}`
             : slot.creditNote
               ? "credit limited"
-              : "available for new chats";
+              : "available in AgentLink";
     const facts: Array<{ value: string; tone?: Status } | null> = [
       slot.lastUsed > 0 ? { value: `last used ${agoLabel(slot.lastUsed)}` } : null,
       lastRoute?.agentId ? { value: `Paseo ${lastRoute.agentId}` } : null,
@@ -1299,25 +1146,12 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
           <View style={{ gap: t.space.xs }}>
             <View style={{ flexDirection: "row", alignItems: "center", gap: t.space.sm }}>
               <StatusPill status={status} label={label} />
-              {nextUpKeys[slot.provider] === slot.dir ? <Tag label="next new chat" tone="busy" /> : null}
+              {nextUpKeys[slot.provider] === slot.dir ? <Tag label="next automatic account" tone="busy" /> : null}
               {shared ? <Tag label="same usage limit" tone="attention" /> : null}
               {slot.modelHolds.map((model) => <Tag key={model} label={`${model} limited`} tone="attention" />)}
             </View>
             <Facts items={facts.slice(0, 5)} />
             {capacity ? <CapacitySummary entry={capacity} /> : null}
-            {slot.loggedIn ? (
-              <Meter
-                fraction={slot.launches / maxLaunches}
-                tone={parked ? "attention" : "busy"}
-                label={
-                  slot.launches === 0
-                    ? "no new chats yet"
-                    : `${plural(slot.launches, "new chat", "new chats")} · ${
-                        slot.launches === maxLaunches ? "most used" : `highest is ${maxLaunches}`
-                      }`
-                }
-              />
-            ) : null}
             {usage ? usageSummary(usage) : null}
           </View>
         }
@@ -1341,7 +1175,6 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
     const credit = provider === "claude" ? scanQuery.data?.primaryCreditNote ?? "" : "";
     const usage = account ? usageFor(provider, account) : null;
     const capacity = account ? capacityFor(provider, "primary", account) : null;
-    const launches = info?.launches ?? 0;
     const lastRoute = lastRouteForAccount(provider, account);
     const status: Status = !account ? "attention" : parked ? "neutral" : credit || info?.duplicated ? "attention" : "ok";
     const label = !account
@@ -1354,7 +1187,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
           ? "duplicated"
           : credit
             ? "credit limited"
-            : "available for new chats";
+            : "available in AgentLink";
     const open = Boolean(openRows[key]);
     return (
       <Row
@@ -1366,7 +1199,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
           <View style={{ gap: t.space.xs }}>
             <View style={{ flexDirection: "row", alignItems: "center", gap: t.space.sm }}>
               <StatusPill status={status} label={label} />
-              {nextUpKeys[provider] === key ? <Tag label="next new chat" tone="busy" /> : null}
+              {nextUpKeys[provider] === key ? <Tag label="next automatic account" tone="busy" /> : null}
               {shared ? <Tag label="same usage limit" tone="attention" /> : null}
               {info?.modelHolds.map((model) => <Tag key={model} label={`${model} limited`} tone="attention" />)}
             </View>
@@ -1382,19 +1215,6 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
               ]}
             />
             {capacity ? <CapacitySummary entry={capacity} /> : null}
-            {account ? (
-              <Meter
-                fraction={launches / maxLaunches}
-                tone={parked ? "attention" : "busy"}
-                label={
-                  launches === 0
-                    ? "no new chats yet"
-                    : `${plural(launches, "new chat", "new chats")} · ${
-                        launches === maxLaunches ? "most used" : `highest is ${maxLaunches}`
-                      }`
-                }
-              />
-            ) : null}
             {usage ? usageSummary(usage) : null}
           </View>
         }
@@ -1457,11 +1277,9 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                 hint="Creates a separate sign-in and gives you the terminal command needed to finish logging in."
               />
               <View style={{ flexDirection: "row", gap: t.space.sm }}>
-                {/* The provider's router install is the primary action; once it
-                    is wired, finishing this account is what's left. */}
                 <Button
                   label="Create & sign in"
-                  variant={routerPending(provider) ? "secondary" : "primary"}
+                  variant="primary"
                   loading={addMutation.isPending}
                   disabled={newEmail.trim() === ""}
                   onPress={() => addMutation.mutate({ provider, email: newEmail.trim() })}
@@ -1484,7 +1302,6 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
 
   const providerCard = (provider: ProviderId, heartbeat: ProviderHeartbeat | undefined) => {
     const state = heartbeatStatus(heartbeat);
-    const router = routers.find((entry) => entry.provider === provider);
     const providerCapacity = capacityAccounts.filter((entry) => entry.provider === provider);
     const ready = providerCapacity.filter((entry) => entry.state === "ready").length;
     const constrained = providerCapacity.filter(
@@ -1556,17 +1373,14 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
             {diagnosis[provider] ? <CodeBlock>{diagnosis[provider]}</CodeBlock> : null}
             {probeLogs[provider] ? <CodeBlock>{probeLogs[provider]}</CodeBlock> : null}
           </View>
-          {router ? (
-            routerRow(router, true)
-          ) : (
-            <Row
-              first
-              tone="attention"
-              title="New-chat account selection"
-              subtitle="Waiting for routing state."
-              trailing={<StatusPill status="busy" label="loading" />}
-            />
-          )}
+          <Row
+            first
+            tone="ok"
+            title="Available in AgentLink"
+            subtitle="Each connected sign-in is shown as an account-suffixed model in AgentLink's native picker."
+            meta={<Facts items={[{ value: plural(providerPools.length, "account profile", "account profiles") }, { value: "switches the next turn only" }]} />}
+            trailing={<StatusPill status="ok" label="same chat" />}
+          />
           {primaryRow(provider)}
           {slots.filter((slot) => slot.provider === provider).map(slotRow)}
           {addRow(provider)}
@@ -1598,7 +1412,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
             <Facts
               items={[
                 { value: "one provider sign-in" },
-                { value: "AgentLink cannot switch accounts for this provider", tone: "attention" },
+                { value: "all reported models appear in AgentLink's picker", tone: "ok" },
                 { value: entry.quotaTelemetry ? "usage limits available" : "provider does not share usage limits", tone: "attention" },
               ]}
             />
@@ -1640,44 +1454,27 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   );
 
   const panelOptions: Array<{ value: PanelTab; label: string }> = [
-    { value: "router", label: "AgentRouter" },
     { value: "accounts", label: "Accounts" },
-    { value: "limits", label: "Limit recovery" },
+    { value: "router", label: "Orchestration" },
     { value: "memory", label: "Memory protection" },
   ];
 
-  const controllerModels = routerProviderQuery.data?.controllerModels ?? [];
-  const selectedControllerAccount = routerProviderQuery.data?.controllerAccountOptions.find(
-    (option) => option.id === routerControllerAccount,
-  );
   const panelSubtitle: Record<PanelTab, string> = {
-    router: "Choose provider, model and account routes while keeping one control chat.",
-    accounts: "See sign-ins, usage limits, the next account, app locations and updates.",
-    limits: "Continue routed chats safely after an account reaches its limit.",
+    router: "Order the models and accounts used by AgentLink's Automatic model.",
+    accounts: "Connect sign-ins and providers, then use every model from one AgentLink chat.",
     memory: "Pause heavy Paseo type-checks when RAM is low, then continue them automatically.",
   };
-  const routerGuide = (
-    <Card padded={false}>
-      <View style={{ padding: pad, gap: t.space.xs }}>
-        <Text style={t.text.heading}>How to use AgentRouter</Text>
-        <Text style={t.text.caption}>Start with AgentRouter when you want one chat that can change its answering provider between turns.</Text>
-      </View>
-      <Row
-        first
-        title="1. Choose the request reader"
-        subtitle="Automatic account is safest. A named Claude account pins only this lightweight reader."
-      />
-      <Row
-        title="2. Order provider, model and account routes"
-        subtitle="Automatic keeps account failover; a named account stays pinned. A genuine failure moves to the next route."
-      />
-      <Row
-        title="3. Start an AgentRouter chat"
-        subtitle="Choose AgentRouter → Automatic route. Its control tab stays put while concrete Paseo agents do the work."
-      />
-      <View style={{ padding: pad, gap: t.space.sm }}>
-        <Text style={t.text.bodyStrong}>Same-tab rule</Text>
-        <Text style={t.text.body}>AgentRouter can change its answering provider on later turns. A direct Claude or Codex chat can change accounts in place. Cross-provider recovery adopts the task in a replacement session, carries live Paseo subagents forward, and keeps the exhausted session underneath as history.</Text>
+  const agentLinkGuide = (
+    <Card>
+      <View style={{ gap: t.space.sm }}>
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: t.space.sm }}>
+          <Text style={t.text.heading}>One chat, every connected model</Text>
+          <StatusPill status="ok" label="AgentLink" />
+        </View>
+        <Text style={t.text.body}>
+          Use AgentLink for new work. AgentRouter is its Automatic model; every Claude/Codex account and enabled Paseo ACP model is also directly selectable. A change applies to the next turn in this same chat—no replacement agent, archive or terminal tab.
+        </Text>
+        <Text style={t.text.caption}>If an account is unavailable, the chat stays intact and asks you to choose another AgentLink entry.</Text>
       </View>
     </Card>
   );
@@ -1685,7 +1482,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   return (
     <Screen t={t}>
       <Toolbar
-        title="Agent Link"
+        title="Agents"
         subtitle={panelSubtitle[panelTab]}
         actions={
           <Button label="Refresh" variant="ghost" loading={scanQuery.isFetching || heartbeatQuery.isFetching} onPress={refresh} />
@@ -1699,11 +1496,10 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
       {notice ? <Notice onDismiss={() => setNotice(null)}>{notice}</Notice> : null}
       {scanQuery.error ? <ErrorText>{String(scanQuery.error)}</ErrorText> : null}
 
-      {panelTab === "router" ? routerGuide : null}
-
       {panelTab === "accounts" && scanQuery.data ? (
         <>
           {updateCard}
+          {agentLinkGuide}
           {providersSection}
           <Disclosure title="Updates and command-line tools" open={Boolean(cli.data && !cli.data.installed)}>
             <View style={{ gap: t.space.md }}>
@@ -1714,96 +1510,6 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
         </>
       ) : panelTab === "accounts" && scanQuery.isLoading ? (
         <Loading label="Reading accounts…" />
-      ) : null}
-
-      {panelTab === "limits" && limitsQuery.data ? (
-        <Card padded={false}>
-          <View style={{ padding: pad, gap: t.space.xs }}>
-            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: t.space.sm }}>
-              <Text style={t.text.heading}>Limit recovery</Text>
-              <StatusPill
-                status={
-                  limitsQuery.data.scanner.error
-                    ? "attention"
-                    : limitsQuery.data.scanner.active || limitsQuery.data.watching
-                      ? "ok"
-                      : "neutral"
-                }
-                label={
-                  limitsQuery.data.scanner.error
-                    ? "background check failed"
-                    : limitsQuery.data.scanner.active
-                    ? "checking in background"
-                    : limitsQuery.data.watching
-                      ? "checking while open"
-                      : "starting\u2026"
-                }
-              />
-            </View>
-            <Text style={t.text.caption}>
-              {limitsQuery.data.scanner.error
-                ? `Background limit check failed: ${limitsQuery.data.scanner.error}`
-                : limitsQuery.data.scanner.active
-                ? `All providers checked ${agoLabel(Math.floor(new Date(limitsQuery.data.scanner.lastScanAt ?? 0).getTime() / 1000))}`
-                : "Limit failures are checked while this panel is open. Install the background checker for unattended recovery."}
-            </Text>
-          </View>
-            <Row
-              first
-              title="Continue chats without losing their history"
-              subtitle="Routed Claude, Codex and AgentRouter chats retry once through an available account. Providers with only one sign-in wait for you instead of repeating a failed request."
-              trailing={
-                <Segmented
-                  options={[
-                    { value: "on", label: "Automatic" },
-                    { value: "off", label: "Manual" },
-                  ]}
-                  value={limitsQuery.data.auto ? "on" : "off"}
-                  onChange={(value) => limitsAutoMutation.mutate(value === "on")}
-                />
-              }
-            />
-            {limitsQuery.data.events.map((event: LimitEvent) => (
-              <Row
-                key={event.agentId}
-                title={event.title ?? event.agentId}
-                subtitle={event.detail}
-                meta={
-                  <>
-                    <Tag label={event.provider} />
-                    {event.account ? <Tag label={event.account} tone="attention" /> : null}
-                    {event.model ? <Tag label={event.model} /> : null}
-                    {event.targetProvider && event.targetModel ? <Tag label={`continued on ${event.targetProvider} / ${event.targetModel}`} tone="ok" /> : null}
-                    {event.targetAgentId ? <Tag label={`active agent ${event.targetAgentId}`} /> : null}
-                    <Tag label={`${event.attempts ?? 0} recovery attempt${(event.attempts ?? 0) === 1 ? "" : "s"}`} />
-                    <Tag label={agoLabel(Math.floor(new Date(event.at).getTime() / 1000)) } />
-                  </>
-                }
-                trailing={
-                  event.action === "auto-resumed" ? (
-                    <StatusPill status="ok" label="continued" />
-                  ) : event.action === "recovery-queued" ? (
-                    <StatusPill status="busy" label="waiting to continue" />
-                  ) : event.action === "resume-failed" ? (
-                    <StatusPill status="error" label="resume failed" />
-                  ) : (
-                    <Button
-                      label="Retry now"
-                      loading={limitsResumeMutation.isPending}
-                      onPress={() => limitsResumeMutation.mutate(event.agentId)}
-                    />
-                  )
-                }
-              />
-            ))}
-            {limitsQuery.data.events.length === 0 ? (
-              <View style={{ padding: pad }}>
-                <Text style={t.text.caption}>No chat has stopped on a usage limit since Paseo started.</Text>
-              </View>
-            ) : null}
-        </Card>
-      ) : panelTab === "limits" ? (
-        <Loading label="Reading limit recovery…" />
       ) : null}
 
       {panelTab === "memory" && resourceQuery.data ? (
@@ -1906,29 +1612,27 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
             <View style={{ flexDirection: t.compact ? "column" : "row", alignItems: t.compact ? "stretch" : "center", justifyContent: "space-between", gap: t.space.sm }}>
               <View style={{ flex: 1, minWidth: 0, gap: t.space.xs }}>
                 <Text style={t.text.heading}>AgentRouter</Text>
-                <Text style={t.text.caption}>One Paseo option that reads the request, chooses a work type, then starts the provider and model that will do the work.</Text>
+                <Text style={t.text.caption}>The Automatic model inside AgentLink. It classifies locally, then runs the first healthy model/account in the matching work type—inside the same chat.</Text>
               </View>
               <View style={{ flexDirection: "row", alignItems: "center", gap: t.space.sm }}>
                 <StatusPill
                   status={
-                    routerProviderQuery.data.loaded && selectedControllerAccount?.available
+                    routerProviderQuery.data.loaded
                       ? "ok"
                       : routerProviderQuery.data.configured
                         ? "attention"
                         : "neutral"
                   }
                   label={
-                    routerProviderQuery.data.loaded && selectedControllerAccount?.available
-                      ? "ready"
-                      : routerProviderQuery.data.loaded
-                        ? "reader account unavailable"
-                        : routerProviderQuery.data.configured
-                          ? "refresh pending"
-                          : "not installed"
+                    routerProviderQuery.data.loaded
+                      ? "ready in AgentLink"
+                      : routerProviderQuery.data.configured
+                        ? "refresh pending"
+                        : "not installed"
                   }
                 />
                 <Button
-                  label={routerProviderQuery.data.installed ? "Save choices" : "Save & install"}
+                  label="Save choices"
                   variant="primary"
                   loading={routerConfigureMutation.isPending}
                   onPress={saveRouter}
@@ -1937,61 +1641,20 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
             </View>
             <Facts
               items={[
-                { value: "understands the request" },
+                { value: "no extra request-reader model" },
                 { value: "skips unavailable providers" },
                 { value: "tries choices in order" },
-                { value: "shows which model answered", tone: "ok" },
-                selectedControllerAccount && !selectedControllerAccount.available
-                  ? { value: "request reader is unavailable", tone: "attention" }
-                  : null,
+                { value: "same Paseo agent ID", tone: "ok" },
               ]}
             />
           </View>
-          <Row
-            first
-            title="Request reader"
-            subtitle="This model understands the prompt and chooses a work type. It does not perform the requested task. Fable is the default."
-            expanded={
-              <View style={{ gap: t.space.md }}>
-                <ComboBox
-                  label="Request-reader sign-in"
-                  options={routerProviderQuery.data.controllerAccountOptions.map((option) => ({
-                    value: option.id,
-                    label: option.label,
-                    description: option.description,
-                    disabled: !option.available,
-                  }))}
-                  value={routerControllerAccount}
-                  allowCustom={false}
-                  onChange={(value) => {
-                    setRouterControllerAccount(value);
-                    setRouterDirty(true);
-                  }}
-                  hint="Automatic preserves account failover. A named sign-in pins only the lightweight request reader."
-                />
-                <ComboBox
-                  label="Request-reader model"
-                  value={routerModel}
-                  onChange={(value) => {
-                    setRouterModel(value);
-                    setRouterDirty(true);
-                  }}
-                  options={controllerModels.map((model) => ({ value: model.id, label: model.label }))}
-                  hint="This model only chooses the work type. A provider and model below perform the task."
-                  allowCustom={controllerModels.length === 0}
-                />
-                <Notice>
-                  The request reader uses Claude Code because AgentRouter is Claude-compatible. It only classifies the request; answer routes can use any Paseo provider.
-                </Notice>
-              </View>
-            }
-          />
           {routerGroups.map((group, index) => {
             const groupKey = `router-group-${index}`;
             const open = Boolean(openRows[groupKey]);
             return (
               <Row
               key={`${group.name}-${index}`}
+              first={index === 0}
               title={`${index + 1}. ${group.name || "Unnamed work type"}`}
               subtitle="Choices run top to bottom. Unavailable or genuinely failed models move to the next choice."
               meta={<Facts items={[
@@ -2083,77 +1746,13 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                 routerDirty ? { value: "unsaved changes", tone: "attention" } : { value: "saved" },
               ]}
             />
-            <CodeBlock>{`launcher: ${routerProviderQuery.data.launcherPath}\nrules: ${routerProviderQuery.data.rulesPath}`}</CodeBlock>
-            {!routerProviderQuery.data.loaded && routerProviderQuery.data.configured ? (
-              <Button
-                label="Repair provider files"
-                variant="ghost"
-                loading={routerProviderMutation.isPending}
-                onPress={() => routerProviderMutation.mutate()}
-              />
-            ) : null}
+            <CodeBlock>{`runtime: ${routerProviderQuery.data.launcherPath}\nrules: ${routerProviderQuery.data.rulesPath}`}</CodeBlock>
           </View>
         </Card>
       ) : panelTab === "router" ? (
-        <Loading label="Reading AgentRouter provider…" />
+        <Loading label="Reading AgentRouter choices…" />
       ) : null}
 
-    </Screen>
-  );
-}
-
-function routeNodeStatus(status: string): Status {
-  const normalized = status.toLowerCase();
-  if (normalized.includes("error") || normalized.includes("fail")) return "error";
-  if (normalized.includes("run") || normalized.includes("work") || normalized.includes("start")) return "busy";
-  if (normalized.includes("complete") || normalized.includes("finish") || normalized.includes("close")) return "ok";
-  if (normalized.includes("cancel") || normalized.includes("archive")) return "neutral";
-  return "attention";
-}
-
-export function AgentRoutingPanel({ theme, layout, agentId }: PluginAgentPanelProps) {
-  const t = useUi(theme, layout.compact, layout.platform);
-  const callRouterTrace = useRpc(routerTrace);
-  const trace = useQuery({
-    queryKey: ["agent-link", "router-trace", agentId],
-    queryFn: () => callRouterTrace({ agentId }),
-    refetchInterval: 15_000,
-  });
-
-  if (trace.isLoading) return <Screen t={t}><Loading label="Reading model choice…" /></Screen>;
-  if (trace.error) return <Screen t={t}><ErrorText>{trace.error instanceof Error ? trace.error.message : String(trace.error)}</ErrorText></Screen>;
-  if (!trace.data) return null;
-
-  return (
-    <Screen t={t}>
-      <Toolbar
-        title="Model used"
-        subtitle="See the request reader, the model that answered and the account used. Unknown details stay clearly marked."
-      />
-      <Notice tone={trace.data.isAgentRouter && !trace.data.nodes.some((node) => node.source === "paseo") ? "attention" : "neutral"}>
-        {trace.data.summary}
-      </Notice>
-      <Card padded={false}>
-        {trace.data.nodes.map((node, index) => (
-          <Row
-            key={`${node.source}-${node.id}`}
-            first={index === 0}
-            title={node.title}
-            subtitle={node.note}
-            meta={
-              <Facts
-                items={[
-                  { value: node.source === "control" ? "request reader" : node.source === "paseo" ? "answer model" : "model not reported" },
-                  { value: `${node.provider} / ${node.model}` },
-                  { value: `sign-in: ${node.account}` },
-                  { value: `Paseo agent: ${node.id}` },
-                ]}
-              />
-            }
-            trailing={<StatusPill status={routeNodeStatus(node.status)} label={node.status} />}
-          />
-        ))}
-      </Card>
     </Screen>
   );
 }

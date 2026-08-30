@@ -7,13 +7,13 @@ import type { CliStatus } from "./cli.shared";
 const HOME = homedir();
 const SOURCE = "https://raw.githubusercontent.com/itsjustanks/paseo-agent-link/main/agent-link";
 const BIN_DIR = join(HOME, ".local", "bin");
-const INSTALL_COMMAND = `mkdir -p ~/.local/bin && curl -fsSL ${SOURCE} -o ~/.local/bin/agent-link && chmod +x ~/.local/bin/agent-link`;
+const INSTALL_COMMAND = `mkdir -p ~/.local/bin && curl -fsSL ${SOURCE} -o ~/.local/bin/agent-link && chmod +x ~/.local/bin/agent-link && ~/.local/bin/agent-link auto`;
 
-/** Where a launcher lands, mirroring the CLI's own layout. */
-function launcher(provider: "claude" | "codex"): string[] {
+/** Where the one-chat ACP runtime lands, mirroring the CLI's own layout. */
+function agentLinkRuntime(): string[] {
   return [
-    join(HOME, ".agent-link", "bin", `${provider}-auto`),
-    join(HOME, ".agent-auth", "bin", `${provider}-auto`),
+    join(HOME, ".agent-link", "bin", "agent-link-acp"),
+    join(HOME, ".agent-auth", "bin", "agent-link-acp"),
   ];
 }
 
@@ -53,7 +53,7 @@ export function cliState(): CliStatus {
     binDir: BIN_DIR,
     onPath,
     command: INSTALL_COMMAND,
-    routersReady: (["claude", "codex"] as const).some((provider) => launcher(provider).some((file) => existsSync(file))),
+    routersReady: agentLinkRuntime().some((file) => existsSync(file)),
   };
 }
 
@@ -283,9 +283,9 @@ export async function handleCliInstall({ withRouters }: { withRouters: boolean }
     if (withRouters) {
       try {
         execFileSync(target, ["auto"], { encoding: "utf8", timeout: 30_000 });
-        note = " Routing launchers written — install the provider above.";
+        note = " AgentLink's one-chat provider is installed in Paseo.";
       } catch (caught) {
-        note = ` The CLI is in, but writing the launchers failed (${
+        note = ` The CLI is in, but installing the AgentLink runtime failed (${
           caught instanceof Error ? caught.message.split("\n")[0] : String(caught)
         }). Run 'agent-link auto' in a terminal.`;
       }

@@ -1,7 +1,7 @@
 {
   "id": "paseo",
   "title": "Paseo panel",
-  "summary": "Account routing, limits, recovery, and memory protection in Paseo",
+  "summary": "One AgentLink chat for every connected model and account",
   "requires": "paseo",
   "kind": "paseo-plugin",
   "pluginId": "agent-link"

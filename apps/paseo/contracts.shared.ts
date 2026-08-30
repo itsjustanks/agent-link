@@ -132,12 +132,6 @@ export const routerStatus = defineRpc({
   output: RouterProviderStatusSchema,
 });
 
-export const routerInstall = defineRpc({
-  name: "agent-link.router-install",
-  input: z.object({}),
-  output: RouterProviderStatusSchema,
-});
-
 export const routerConfigure = defineRpc({
   name: "agent-link.router-configure",
   input: z.object({
@@ -155,46 +149,6 @@ export const routerModels = defineRpc({
   output: z.object({
     provider: z.string(),
     models: z.array(z.object({ id: z.string(), label: z.string(), description: z.string() })),
-    message: z.string(),
-  }),
-});
-
-export const RouterTraceNodeSchema = z.object({
-  source: z.enum(["control", "paseo", "provider-internal"]),
-  id: z.string(),
-  title: z.string(),
-  provider: z.string(),
-  model: z.string(),
-  status: z.string(),
-  note: z.string(),
-  account: z.string(),
-  routedAt: z.number(),
-});
-export type RouterTraceNode = z.infer<typeof RouterTraceNodeSchema>;
-
-export const routerTrace = defineRpc({
-  name: "agent-link.router-trace",
-  input: z.object({ agentId: z.string().min(1) }),
-  output: z.object({
-    isAgentRouter: z.boolean(),
-    canMoveAccount: z.boolean(),
-    summary: z.string(),
-    nodes: z.array(RouterTraceNodeSchema),
-  }),
-});
-
-export const agentContinue = defineRpc({
-  name: "agent-link.agent-continue",
-  input: z.object({
-    agentId: z.string().min(1),
-    provider: z.string().regex(/^[a-z][a-z0-9-]*$/),
-    model: z.string().min(1).max(160),
-    account: z.string().min(1).max(320).default("provider"),
-    thinking: z.string().min(1).max(40),
-  }),
-  output: z.object({
-    ok: z.boolean(),
-    agentId: z.string().nullable(),
     message: z.string(),
   }),
 });

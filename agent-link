@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.5.54"
+VERSION="0.6.0"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -339,8 +339,8 @@ for line in tail.splitlines():
         until = target
     if until is None:
         # A guessed one-hour timer made a still-refusing account eligible again.
-        # Keep unknown resets out until a real probe serves; maybe_revalidate
-        # performs that proof at most once an hour, never once per launch.
+        # Keep unknown resets out until an explicit probe serves or the user
+        # clears the hold. Account checks never launch in the background.
         # Named model limits are scoped to that model. A Fable refusal must not
         # remove the same account from Sonnet/Opus routing.
         named = re.search(r"(?:hit|reached)\s+(?:your\s+)?([a-z0-9 ._-]{2,50})\s+limit", low)
@@ -382,834 +382,6 @@ slot_nearing() { # $1 provider, $2 key (email or "primary") — 0 if marked and 
 # Claude's parsed reset time when the transcript has one. Without this the park
 # happens lazily at the next pick; with it, even a launch racing the failure
 # avoids the account.
-recovery_queue_dir() { echo "$STATE/paseo-recovery"; }
-
-enqueue_paseo_recovery() { # agent-id provider account model limit
-  [ -n "${1:-}" ] || return 0
-  local queued label uid
-  queued="$(python3 - "$(recovery_queue_dir)" "$1" "$2" "$3" "${4:-}" "${5:-usage limit}" "${PASEO_AGENT_CWD:-$PWD}" <<'PY2' 2>/dev/null
-import glob, json, os, re, sys, time
-root, agent, provider, account, model, limit, cwd = sys.argv[1:8]
-if not re.fullmatch(r"[A-Za-z0-9_-]{8,100}", agent):
-    sys.exit(0)
-pending = os.path.join(root, "pending")
-os.makedirs(pending, exist_ok=True)
-now = time.time()
-for path in glob.glob(os.path.join(pending, f"{agent}-*.json")):
-    try:
-        prior = json.load(open(path))
-        # One unresolved failure needs one recovery owner. The StopFailure hook
-        # and the daemon scanner can observe the same refusal a few seconds
-        # apart; keeping both requests used to produce duplicate continuations.
-        if now - float(prior.get("createdAt", 0)) < 6 * 60 * 60 and prior.get("account") == account and prior.get("model") == model:
-            print(path)
-            sys.exit(0)
-    except Exception:
-        pass
-request_id = f"{agent}-{int(now * 1000)}-{os.getpid()}"
-path = os.path.join(pending, request_id + ".json")
-tmp = path + ".tmp"
-with open(tmp, "w") as f:
-    json.dump({
-        "id": request_id,
-        "agentId": agent,
-        "provider": provider,
-        "account": account,
-        "model": model,
-        "limit": limit,
-        "cwd": cwd,
-        "createdAt": now,
-        "notBefore": now + 2,
-        "attempts": 0,
-    }, f)
-os.replace(tmp, path)
-print(path)
-PY2
-)"
-  [ -n "$queued" ] || return 0
-  # On this Mac the daemon watchdog is a launchd one-shot. Kick it immediately
-  # instead of waiting for its next 60-second health interval. Other installs
-  # still retain the request for `agent-link recover`.
-  if [ "${AGENT_LINK_SKIP_RECOVERY_KICKSTART:-}" != 1 ] && [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-    uid="$(id -u)"
-    for label in com.agent-link.paseo-watchdog com.ankit.paseo-watchdog; do
-      if launchctl print "gui/$uid/$label" >/dev/null 2>&1; then
-        launchctl kickstart "gui/$uid/$label" >/dev/null 2>&1 || true
-        break
-      fi
-    done
-  fi
-}
-
-write_recovery_helper() {
-  mkdir -p "$SHIM_BIN"
-  cat > "$SHIM_BIN/paseo-recover" <<'PY2'
-#!/usr/bin/env python3
-import fcntl, glob, json, os, re, signal, subprocess, sys, time
-from datetime import datetime, timezone
-
-root, routes_path, paseo = sys.argv[1:4]
-self_bin = os.environ.get("AGENT_LINK_SELF", "")
-account_root = os.environ.get("AGENT_LINK_ACCOUNT_ROOT", "")
-scan_enabled = os.environ.get("AGENT_LINK_RECOVERY_SCAN") == "1"
-pending = os.path.join(root, "pending")
-done = os.path.join(root, "done")
-sentry_path = os.path.join(os.path.dirname(root), "paseo-limit-sentry.json")
-scanner_path = os.path.join(root, "scanner.json")
-seen_path = os.path.join(root, "seen.json")
-os.makedirs(pending, exist_ok=True)
-os.makedirs(done, exist_ok=True)
-lock = open(os.path.join(root, ".lock"), "a+")
-try:
-    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-except BlockingIOError:
-    print("Paseo recovery: already running")
-    sys.exit(0)
-
-def run(args, timeout=30, env=None):
-    try:
-        p = subprocess.run(args, capture_output=True, text=True, timeout=timeout, start_new_session=True, env=env)
-        return p.returncode, p.stdout, p.stderr
-    except subprocess.TimeoutExpired:
-        return -1, "", "timed out"
-    except Exception as exc:
-        return -2, "", str(exc)
-
-def load_json(text):
-    try: return json.loads(text)
-    except Exception: return None
-
-def latest_route(agent_id):
-    try: lines = open(routes_path).read().splitlines()
-    except OSError: return None
-    for line in reversed(lines):
-        parts = line.split("\t")
-        if len(parts) < 6 or parts[5] != agent_id or parts[2] in {"", "-"}: continue
-        try: at = float(parts[0])
-        except ValueError: continue
-        return {
-            "at": at,
-            "provider": parts[1],
-            "account": parts[2],
-            "model": parts[7] if len(parts) > 7 else "",
-        }
-    return None
-
-def session_id_for(agent_id):
-    paseo_home = os.environ.get("PASEO_HOME") or os.path.join(os.path.expanduser("~"), ".paseo")
-    for path in glob.glob(os.path.join(paseo_home, "agents", "*", f"{agent_id}.json")):
-        try:
-            stored = json.load(open(path))
-            session_id = (stored.get("persistence") or {}).get("sessionId")
-            if session_id: return str(session_id)
-        except Exception:
-            pass
-    return None
-
-def retire_pinned_process(agent_id):
-    session_id = session_id_for(agent_id)
-    if not session_id: return False
-    rc, output, _ = run(["/bin/ps", "-axo", "pid=,command="], 5)
-    if rc != 0: return False
-    for line in output.splitlines():
-        if session_id not in line: continue
-        match = re.match(r"\s*(\d+)\s+(.*)", line)
-        if not match: continue
-        pid, command = int(match.group(1)), match.group(2)
-        if pid == os.getpid(): continue
-        is_provider = re.search(r"(^|/)(claude|codex)(\s|$)", command)
-        is_resume = re.search(rf"--resume(?:=|\s+){re.escape(session_id)}|resume\s+{re.escape(session_id)}", command)
-        if not is_provider or not is_resume: continue
-        try:
-            os.kill(pid, signal.SIGTERM)
-            return True
-        except OSError:
-            return False
-    return False
-
-def write(path, data):
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f: json.dump(data, f)
-    os.replace(tmp, path)
-
-def iso_now():
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-def parse_iso(value):
-    try: return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
-    except Exception: return 0
-
-def agent_record(agent_id):
-    paseo_home = os.environ.get("PASEO_HOME") or os.path.join(os.path.expanduser("~"), ".paseo")
-    for path in glob.glob(os.path.join(paseo_home, "agents", "*", f"{agent_id}.json")):
-        try: return json.load(open(path))
-        except Exception: pass
-    return {}
-
-def sentry_state():
-    try:
-        state = json.load(open(sentry_path))
-        return {
-            "auto": state.get("auto") is not False,
-            "events": state.get("events") if isinstance(state.get("events"), list) else [],
-        }
-    except Exception:
-        return {"auto": True, "events": []}
-
-def record_sentry(event):
-    state = sentry_state()
-    events = [event] + [item for item in state["events"] if item.get("agentId") != event.get("agentId")]
-    state["events"] = events[:20]
-    os.makedirs(os.path.dirname(sentry_path), exist_ok=True)
-    write(sentry_path, state)
-
-def update_sentry_outcome(request, outcome):
-    if not request.get("agentId"): return
-    state = sentry_state()
-    prior = next((item for item in state["events"] if item.get("agentId") == request["agentId"]), None)
-    if not prior and not request.get("title") and not request.get("workspaceId"): return
-    if outcome == "continuation-accepted" or outcome == "cross-provider-continuation" or outcome.startswith("already-routed") or outcome.startswith("already-cross-provider"):
-        action = "auto-resumed"
-        suffix = "replacement session adopted the task" if "cross-provider" in outcome else "retry accepted by Paseo"
-    elif outcome.endswith("3-times") or outcome in {"expired-or-invalid", "invalid-request"}:
-        action, suffix = "resume-failed", outcome.replace("-", " ")
-    else:
-        action, suffix = "needs-resume", outcome.replace("-", " ")
-    base = prior or {
-        "agentId": request["agentId"],
-        "workspaceId": request.get("workspaceId"),
-        "title": request.get("title"),
-        "provider": request.get("provider") or "unknown",
-        "at": iso_now(),
-        "account": request.get("account"),
-        "model": request.get("model"),
-        "limit": request.get("limit"),
-    }
-    detail = str(request.get("detail") or base.get("detail") or "provider limit")
-    if suffix not in detail: detail += f" — {suffix}"
-    base.update(action=action, detail=detail, attempts=max(0, int(request.get("attempts", 0))))
-    for key in ("workspaceId", "title", "targetAgentId", "targetProvider", "targetModel"):
-        if request.get(key): base[key] = request[key]
-    record_sentry(base)
-
-def paseo_home():
-    return os.environ.get("PASEO_HOME") or os.path.join(os.path.expanduser("~"), ".paseo")
-
-def cross_provider_target(request):
-    """Return the first configured, healthy fallback outside the failed family."""
-    try:
-        preferences = json.load(open(os.path.join(paseo_home(), "orchestration-preferences.json")))
-    except Exception:
-        return None
-    family = str(request.get("provider") or "").removesuffix("-auto")
-    model = str(request.get("model") or "")
-    ladders = preferences.get("fallbacks") if isinstance(preferences, dict) else None
-    candidates = ladders.get(f"{family}/{model}") if isinstance(ladders, dict) else None
-    if not isinstance(candidates, list): return None
-    for raw in candidates:
-        if not isinstance(raw, str) or "/" not in raw: continue
-        provider, target_model = raw.split("/", 1)
-        target_family = provider.removesuffix("-auto")
-        if target_family == family or target_family not in {"claude", "codex"}: continue
-        rc, target_account, _ = run([self_bin, "pick", target_family, "dry", target_model], 30)
-        if rc != 0 or not target_account.strip(): continue
-        thinking = "ultra" if target_family == "codex" and target_model == "gpt-5.6-sol" else "high"
-        return {
-            "provider": f"{target_family}-auto",
-            "family": target_family,
-            "model": target_model,
-            "account": target_account.strip().splitlines()[-1],
-            "thinking": thinking,
-        }
-    return None
-
-def recorded_cross_provider(agent_id):
-    for prior_path in sorted(glob.glob(os.path.join(done, f"{agent_id}-*.json")), key=os.path.getmtime, reverse=True):
-        try:
-            prior = json.load(open(prior_path))
-            if prior.get("targetAgentId") and prior.get("outcome") in {"cross-provider-continuation", "already-cross-provider"}:
-                return prior
-        except Exception:
-            pass
-    return None
-
-def agent_is_archived(agent_id):
-    record = agent_record(agent_id)
-    if record:
-        return bool(record.get("archivedAt"))
-    rc, output, _ = run([paseo, "agent", "inspect", agent_id, "--json"], 15)
-    detail = load_json(output) if rc == 0 else None
-    if not isinstance(detail, dict): return None
-    archived = detail.get("Archived")
-    if archived is None: archived = detail.get("archived")
-    return bool(archived)
-
-def prior_cross_provider(agent_id):
-    prior = recorded_cross_provider(agent_id)
-    if not prior: return None
-    target_id = str(prior.get("targetAgentId") or "")
-    archived = agent_is_archived(target_id)
-    if archived is not True: return prior
-    # A continuation is one logical task. If its current segment alone was
-    # archived while the history/source remains visible, restore the current
-    # segment instead of spawning yet another tab. If the whole chain was
-    # archived, leave it archived and merely dedupe the stale recovery event.
-    if agent_is_archived(agent_id) is True: return prior
-    rc, _, _ = run([paseo, "agent", "reload", target_id, "--json"], 30)
-    if rc == 0 and agent_is_archived(target_id) is not True:
-        return prior
-    return None
-
-def extract_agent_id(payload):
-    if isinstance(payload, dict):
-        for key in ("id", "Id", "agentId", "AgentId"):
-            if isinstance(payload.get(key), str) and payload[key]: return payload[key]
-        for value in payload.values():
-            found = extract_agent_id(value)
-            if found: return found
-    if isinstance(payload, list):
-        for value in payload:
-            found = extract_agent_id(value)
-            if found: return found
-    return None
-
-def record_labels(record):
-    labels = record.get("labels") if isinstance(record, dict) else None
-    return labels if isinstance(labels, dict) else {}
-
-def continuation_root(agent_id, record):
-    labels = record_labels(record)
-    explicit = labels.get("agent-link-continuation-root")
-    if isinstance(explicit, str) and explicit: return explicit
-    current = agent_id
-    current_record = record
-    seen = set()
-    for _ in range(16):
-        if current in seen: break
-        seen.add(current)
-        prior = record_labels(current_record).get("agent-link-continuation-of")
-        if not isinstance(prior, str) or not prior: break
-        current = prior
-        current_record = agent_record(current)
-    return current
-
-def listed_agent_children(parent_id):
-    rc, output, _ = run([
-        paseo, "agent", "ls", "--global", "--all", "--json",
-        "--label", f"paseo.parent-agent-id={parent_id}",
-    ], 20)
-    payload = load_json(output) if rc == 0 else None
-    if isinstance(payload, dict): payload = payload.get("entries")
-    if not isinstance(payload, list): return []
-    children = []
-    for raw in payload:
-        if not isinstance(raw, dict): continue
-        child = raw.get("agent") if isinstance(raw.get("agent"), dict) else raw
-        child_id = child.get("id")
-        if not isinstance(child_id, str) or not child_id: continue
-        children.append(child)
-    return children
-
-def update_agent_labels(agent_id, labels):
-    args = [paseo, "agent", "update", agent_id, "--json"]
-    for key, value in labels.items():
-        if value is not None and str(value): args.extend(["--label", f"{key}={value}"])
-    rc, output, error = run(args, 20)
-    return rc == 0, (error or output)[-1000:]
-
-def adopt_continuation(source_id, target_id, root_id, children, open_tab_labels):
-    carried = []
-    detached = []
-    warnings = []
-    for child in children:
-        child_id = str(child.get("id") or "")
-        if not child_id or child_id in {source_id, target_id} or child.get("archivedAt"): continue
-        ok, error = update_agent_labels(child_id, {
-            "paseo.parent-agent-id": target_id,
-            "agent-link-continuation-root": root_id,
-        })
-        if ok:
-            carried.append(child_id)
-            continue
-        rc, _, detach_error = run([paseo, "agent", "detach", child_id, "--json"], 20)
-        if rc == 0:
-            detached.append(child_id)
-        else:
-            warnings.append(f"child {child_id}: {detach_error or error}")
-    source_updates = {
-        "paseo.parent-agent-id": target_id,
-        "agent-link-continuation-root": root_id,
-        "agent-link-superseded-by": target_id,
-        "agent-link-history-segment": "true",
-        "agent-link-continuation-current": "false",
-    }
-    source_updates.update({key: "false" for key in open_tab_labels})
-    ok, error = update_agent_labels(source_id, source_updates)
-    if not ok: warnings.append(f"source {source_id}: {error}")
-    return carried, detached, warnings
-
-def start_cross_provider(request, detail, target):
-    source_id = str(request.get("agentId") or "")
-    prior = prior_cross_provider(source_id)
-    if prior:
-        request.update({key: prior.get(key) for key in ("workspaceId", "title", "targetAgentId", "targetProvider", "targetModel", "detail") if prior.get(key)})
-        return "already-cross-provider", ""
-    stale = recorded_cross_provider(source_id)
-    stale_target_id = str((stale or {}).get("targetAgentId") or "")
-    if stale_target_id:
-        update_agent_labels(stale_target_id, {
-            "agent-link-continuation-current": "false",
-            "agent-link-history-segment": "true",
-        })
-    stored = agent_record(source_id)
-    workspace_id = request.get("workspaceId") or detail.get("WorkspaceId") or detail.get("workspaceId") or stored.get("workspaceId")
-    title = str(request.get("title") or detail.get("Name") or detail.get("name") or stored.get("title") or "Agent continuation")
-    cwd = str(detail.get("Cwd") or detail.get("cwd") or request.get("cwd") or stored.get("cwd") or "")
-    request.update({"workspaceId": workspace_id, "title": title, "cwd": cwd})
-    source_provider = str(request.get("provider") or "unknown")
-    source_model = str(request.get("model") or "unknown model")
-    root_id = continuation_root(source_id, stored)
-    source_labels = record_labels(stored)
-    open_tab_labels = [
-        key for key, value in source_labels.items()
-        if key.startswith("paseo.open-agent-tab.") and str(value).lower() == "true"
-    ]
-    source_parent = str(source_labels.get("paseo.parent-agent-id") or detail.get("ParentAgentId") or "")
-    children = listed_agent_children(source_id)
-    child_ids = [str(child.get("id")) for child in children if child.get("id") and not child.get("archivedAt")]
-    child_note = f" Existing live Paseo children to preserve: {', '.join(child_ids)}." if child_ids else ""
-    prompt = (
-        f"AgentLink cross-provider continuation for logical task {root_id}, replacing Paseo execution segment {source_id}. "
-        f"The {source_provider}/{source_model} account family is exhausted, so continue this incomplete task using "
-        f"{target['provider']}/{target['model']}. First run `paseo agent logs {source_id}` and inspect the current workspace and git diff. "
-        "Continue from the first incomplete step; do not redo completed work. Preserve every user constraint and existing agent/subagent result."
-        f"{child_note} "
-        f"Begin with one short line: `Continued from {source_id} on {target['provider']}/{target['model']}` and then take the next action."
-    )
-    args = [
-        paseo, "agent", "run", "--background", "--json",
-        "--provider", f"{target['provider']}/{target['model']}",
-        "--thinking", target["thinking"],
-        "--title", title[:120],
-        "--label", f"agent-link-continuation-of={source_id}",
-        "--label", f"agent-link-continuation-root={root_id}",
-        "--label", "agent-link-continuation-current=true",
-        "--label", "agent-link-fallback-depth=1",
-    ]
-    if source_parent: args.extend(["--label", f"paseo.parent-agent-id={source_parent}"])
-    for key in open_tab_labels: args.extend(["--label", f"{key}=true"])
-    if workspace_id: args.extend(["--workspace", str(workspace_id)])
-    elif cwd: args.extend(["--cwd", cwd])
-    args.append(prompt)
-    rc, output, error = run(args, 45)
-    payload = load_json(output) if rc == 0 else None
-    target_id = extract_agent_id(payload)
-    if rc != 0 or not target_id:
-        return None, (error or output or "Paseo did not return the continuation agent id")[-1500:]
-    carried, detached, warnings = adopt_continuation(source_id, target_id, root_id, children, open_tab_labels)
-    request.update({
-        "targetAgentId": target_id,
-        "targetProvider": target["provider"],
-        "targetModel": target["model"],
-        "targetAccount": target["account"],
-        "detail": f"{request.get('detail') or 'provider limit'} — whole {source_provider} family unavailable; continued as {target['provider']}/{target['model']} in agent {target_id}",
-        "acceptedOutput": output[-2000:],
-        "logicalRootAgentId": root_id,
-        "carriedChildAgentIds": carried,
-        "detachedChildAgentIds": detached,
-        "continuityWarnings": warnings,
-    })
-    if warnings:
-        request["detail"] += f" — continuity warnings: {'; '.join(warnings)}"
-    return "cross-provider-continuation", ""
-
-def reconcile_continuation_archives():
-    """Restore current segments and keep client tabs on them, never their history."""
-    rc, output, _ = run([paseo, "agent", "ls", "--global", "--all", "--json"], 20)
-    listing = load_json(output) if rc == 0 else None
-    if isinstance(listing, dict): listing = listing.get("entries")
-    if not isinstance(listing, list): return 0, 0
-    records = {}
-    for raw in listing:
-        if not isinstance(raw, dict): continue
-        agent = raw.get("agent") if isinstance(raw.get("agent"), dict) else raw
-        agent_id = str(agent.get("id") or "")
-        if agent_id: records[agent_id] = agent_record(agent_id) or agent
-    restored = moved_tabs = 0
-    for agent_id, record in records.items():
-        labels = record_labels(record)
-        if labels.get("agent-link-history-segment") == "true":
-            target_id = str(labels.get("agent-link-superseded-by") or "")
-            open_labels = {
-                key: value for key, value in labels.items()
-                if key.startswith("paseo.open-agent-tab.") and str(value).lower() == "true"
-            }
-            if target_id and open_labels:
-                target_ok, _ = update_agent_labels(target_id, {key: "true" for key in open_labels})
-                source_ok, _ = update_agent_labels(agent_id, {key: "false" for key in open_labels})
-                if target_ok and source_ok: moved_tabs += 1
-        root_id = str(labels.get("agent-link-continuation-root") or "")
-        if (
-            not record.get("archivedAt") or
-            not root_id or
-            labels.get("agent-link-continuation-current") != "true"
-        ): continue
-        visible_history = any(
-            other_id != agent_id and
-            not other.get("archivedAt") and
-            (
-                other_id == root_id or
-                record_labels(other).get("agent-link-continuation-root") == root_id or
-                record_labels(other).get("agent-link-superseded-by") == agent_id
-            )
-            for other_id, other in records.items()
-        )
-        if not visible_history: continue
-        reload_rc, _, _ = run([paseo, "agent", "reload", agent_id, "--json"], 30)
-        if reload_rc == 0: restored += 1
-    return restored, moved_tabs
-
-def limit_phrase(log_text, status):
-    assistant = re.compile(
-        r"you(?:'|’)?(?:ve| have)\s+(?:hit|reached)\s+[^.!\n]{0,100}\blimit\b|"
-        r"usage limit reached|monthly spend limit|spend limit reached|rate limit exceeded|"
-        r"quota exceeded|out of credits|insufficient[_ ]quota|credit balance(?: is)? too low",
-        re.I,
-    )
-    errored = re.compile(
-        r"usage limit|rate limit|spend limit|quota exceeded|out of credits|"
-        r"insufficient[_ ]quota|resource exhausted|credit balance|(?:http\s*)?429\b|too many requests",
-        re.I,
-    )
-    for raw in reversed(log_text.splitlines()):
-        line = raw.strip()
-        if not line or re.match(r"^\[(User|Shell|Tool|Task Notification)\]", line, re.I):
-            continue
-        if line.lower().startswith("[assistant]"):
-            match = assistant.search(line)
-        elif status == "error" or re.match(r"^\[(System Error|Error|Provider Error)\]", line, re.I):
-            match = errored.search(line)
-        else:
-            match = None
-        if match:
-            return re.sub(r"\s+", " ", match.group(0)).strip()[:160]
-    return None
-
-def annotate_request(agent_id, metadata):
-    paths = sorted(glob.glob(os.path.join(pending, f"{agent_id}-*.json")), key=os.path.getmtime, reverse=True)
-    if not paths: return None
-    try:
-        request = json.load(open(paths[0]))
-        request.update(metadata)
-        write(paths[0], request)
-        return request
-    except Exception:
-        return None
-
-def park_and_queue(agent, route, phrase, record):
-    family = route.get("provider") or ""
-    if family not in {"claude", "codex"} or not self_bin:
-        return None
-    env = dict(os.environ)
-    env.update({
-        "PASEO_AGENT_ID": agent["id"],
-        "PASEO_AGENT_CWD": str(record.get("cwd") or agent.get("cwd") or ""),
-        "AGENT_LINK_ROUTE_MODEL": route.get("model") or agent.get("model") or "",
-        "AGENT_LINK_REFUSAL_LIMIT": phrase,
-        "AGENT_LINK_SKIP_RECOVERY_KICKSTART": "1",
-    })
-    if family == "codex":
-        # Codex quota windows are account-scoped and the CLI has no StopFailure
-        # hook. Keep the exhausted account out until telemetry/probe proves it.
-        env["AGENT_LINK_REFUSAL_HOLD"] = "hold:unknown"
-    env_var = "CLAUDE_CONFIG_DIR" if family == "claude" else "CODEX_HOME"
-    account = route.get("account") or "primary"
-    if account == "primary": env.pop(env_var, None)
-    elif account_root: env[env_var] = os.path.join(account_root, "accounts", family, account)
-    rc, _, _ = run([self_bin, "refused", family], 20, env=env)
-    if rc != 0: return None
-    return annotate_request(agent["id"], {
-        "title": agent.get("title"),
-        "workspaceId": record.get("workspaceId"),
-        "detail": f"{account} · {route.get('model') or agent.get('model') or 'unknown model'} · {phrase}",
-    })
-
-def park_direct_family(provider, model, phrase):
-    if provider not in {"claude", "codex"} or not self_bin: return
-    env = dict(os.environ)
-    env.update({
-        "AGENT_LINK_ROUTE_MODEL": model or "",
-        "AGENT_LINK_REFUSAL_LIMIT": phrase,
-        "AGENT_LINK_SKIP_RECOVERY_KICKSTART": "1",
-    })
-    if provider == "codex": env["AGENT_LINK_REFUSAL_HOLD"] = "hold:unknown"
-    env.pop("PASEO_AGENT_ID", None)
-    env.pop("CLAUDE_CONFIG_DIR" if provider == "claude" else "CODEX_HOME", None)
-    run([self_bin, "refused", provider], 20, env=env)
-
-def scan_recent_limits():
-    rc, output, _ = run([paseo, "ls", "--global", "--json"], 20)
-    listing = load_json(output) if rc == 0 else None
-    if not isinstance(listing, list):
-        write(scanner_path, {"lastScanAt": iso_now(), "checked": 0, "detected": 0, "providers": [], "error": "agent list unavailable"})
-        return
-    try: seen = json.load(open(seen_path))
-    except Exception: seen = {}
-    if not isinstance(seen, dict): seen = {}
-    now = time.time()
-    checked = detected = 0
-    providers = set()
-    auto = sentry_state()["auto"]
-    priority = {"error": 0, "idle": 1, "closed": 2}
-    ordered = sorted(
-        listing,
-        key=lambda item: priority.get(str(item.get("status") or "").lower(), 9) if isinstance(item, dict) else 9,
-    )
-    for raw in ordered:
-        if not isinstance(raw, dict): continue
-        agent_id = str(raw.get("id") or "")
-        status = str(raw.get("status") or "").lower()
-        if not agent_id or status not in {"error", "idle", "closed"}: continue
-        record = agent_record(agent_id)
-        labels = record_labels(record)
-        # A superseded segment is immutable history. Its old provider refusal
-        # is expected and must never start another continuation.
-        if (
-            labels.get("agent-link-history-segment") == "true" or
-            (labels.get("agent-link-continuation-root") and labels.get("agent-link-continuation-current") == "false")
-        ): continue
-        last_activity = str(record.get("lastActivityAt") or record.get("updatedAt") or "")
-        age = now - parse_iso(last_activity)
-        max_age = 30 * 60 if status == "error" else 5 * 60
-        if age < 0 or age > max_age: continue
-        fingerprint = f"{agent_id}:{last_activity}:{status}"
-        if fingerprint in seen: continue
-        if checked >= 12: break
-        checked += 1
-        rc, logs, _ = run([paseo, "logs", agent_id, "--tail", "16"], 15)
-        phrase = limit_phrase(logs if rc == 0 else "", status)
-        seen[fingerprint] = {"at": now, "limit": phrase or ""}
-        if not phrase: continue
-        detected += 1
-        raw_provider = str(raw.get("provider") or record.get("provider") or "unknown")
-        provider, _, listed_model = raw_provider.partition("/")
-        persistence = record.get("persistence")
-        metadata = persistence.get("metadata") if isinstance(persistence, dict) else {}
-        if not isinstance(metadata, dict): metadata = {}
-        model = str(metadata.get("model") or listed_model or "")
-        route = latest_route(agent_id)
-        account = route.get("account") if route else None
-        route_model = route.get("model") if route else model
-        providers.add(provider)
-        base = {
-            "agentId": agent_id,
-            "workspaceId": record.get("workspaceId"),
-            "title": raw.get("name") or record.get("title"),
-            "provider": provider,
-            "at": iso_now(),
-            "detail": f"{account + ' · ' if account else ''}{route_model or 'unknown model'} · {phrase}",
-            "account": account,
-            "model": route_model or None,
-            "limit": phrase,
-        }
-        if auto and route and route.get("provider") in {"claude", "codex"}:
-            request = park_and_queue({"id": agent_id, "title": base["title"], "cwd": raw.get("cwd"), "model": model}, route, phrase, record)
-            if request:
-                base["action"] = "recovery-queued"
-                base["detail"] += " — watchdog queued one routed retry"
-            else:
-                base["action"] = "resume-failed"
-                base["detail"] += " — could not queue recovery"
-        else:
-            park_direct_family(provider, model, phrase)
-            base["action"] = "needs-resume"
-            if route and not auto:
-                base["detail"] += " — automatic recovery is off"
-            elif provider in {"claude", "codex"}:
-                base["detail"] += " — this agent used the direct provider; use its Dynamic Agent Link provider for automatic account failover"
-            else:
-                base["detail"] += " — no alternate authenticated account route; retry after reset or hand off through AgentRouter"
-        # Zod optional fields cannot receive JSON null from this Python state.
-        base = {key: value for key, value in base.items() if value is not None}
-        record_sentry(base)
-    seen = {key: value for key, value in seen.items() if now - float(value.get("at", 0)) < 24 * 60 * 60}
-    write(seen_path, seen)
-    write(scanner_path, {
-        "lastScanAt": iso_now(),
-        "checked": checked,
-        "detected": detected,
-        "providers": sorted(providers),
-    })
-
-def finish(path, request, outcome):
-    request["completedAt"] = time.time()
-    request["outcome"] = outcome
-    write(os.path.join(done, os.path.basename(path)), request)
-    try: os.remove(path)
-    except OSError: pass
-    update_sentry_outcome(request, outcome)
-
-restored_continuations, moved_tabs = reconcile_continuation_archives()
-if restored_continuations:
-    print(f"Paseo recovery: restored {restored_continuations} orphaned continuation(s)")
-if moved_tabs:
-    print(f"Paseo recovery: moved {moved_tabs} tab(s) from history to current continuation")
-
-if scan_enabled:
-    scan_recent_limits()
-
-accepted = deferred = failed = 0
-for path in sorted(glob.glob(os.path.join(pending, "*.json")))[:8]:
-    try: request = json.load(open(path))
-    except Exception:
-        finish(path, {"id": os.path.basename(path)}, "invalid-request")
-        failed += 1
-        continue
-    agent_id = str(request.get("agentId") or "")
-    created = float(request.get("createdAt", 0))
-    if not agent_id or not created or time.time() - created > 6 * 60 * 60:
-        finish(path, request, "expired-or-invalid")
-        failed += 1
-        continue
-    not_before = float(request.get("notBefore", 0))
-    if not_before > time.time(): time.sleep(min(not_before - time.time(), 4))
-    if float(request.get("notBefore", 0)) > time.time():
-        deferred += 1
-        continue
-    route = latest_route(agent_id)
-    if route and route["at"] > created and route.get("account") != request.get("account"):
-        finish(path, request, f"already-routed-to-{route.get('account')}")
-        accepted += 1
-        continue
-    family = str(request.get("provider") or "")
-    if self_bin and family in {"claude", "codex"}:
-        rc, target, _ = run([self_bin, "pick", family, "dry", str(request.get("model") or "")], 30)
-        target = target.strip().splitlines()[-1] if rc == 0 and target.strip() else ""
-        if not target or target == request.get("account"):
-            prior = prior_cross_provider(agent_id)
-            if prior:
-                request.update({key: prior.get(key) for key in ("workspaceId", "title", "targetAgentId", "targetProvider", "targetModel", "detail") if prior.get(key)})
-                finish(path, request, "already-cross-provider")
-                accepted += 1
-                continue
-            rc, output, inspect_error = run([paseo, "inspect", agent_id, "--json"], 15)
-            source_detail = load_json(output) if rc == 0 else None
-            source_status = str((source_detail or {}).get("Status") or (source_detail or {}).get("status") or "").lower()
-            # Inspect can briefly report `running` after the provider process
-            # has already failed. Retry quickly; a five-minute backoff here is
-            # what made users type Continue several times.
-            if source_status == "running":
-                request["notBefore"] = time.time() + 20
-                write(path, request)
-                deferred += 1
-                continue
-            fallback = cross_provider_target(request)
-            if isinstance(source_detail, dict) and source_status in {"idle", "error", "closed"} and fallback:
-                outcome, fallback_error = start_cross_provider(request, source_detail, fallback)
-                if outcome:
-                    finish(path, request, outcome)
-                    accepted += 1
-                    continue
-                request["lastError"] = fallback_error
-            elif not isinstance(source_detail, dict):
-                request["lastError"] = (inspect_error or "inspect failed before cross-provider fallback")[-1000:]
-            request["notBefore"] = time.time() + 5 * 60
-            waiting = "waiting for a healthy alternate account"
-            if not fallback:
-                waiting += " or configured cross-provider fallback"
-            if waiting not in str(request.get("detail") or ""):
-                request["detail"] = (request.get("detail") or "provider limit") + f" — {waiting}"
-            write(path, request)
-            record_sentry({
-                "agentId": agent_id,
-                "workspaceId": request.get("workspaceId"),
-                "title": request.get("title"),
-                "provider": family,
-                "at": iso_now(),
-                "action": "recovery-queued",
-                "detail": request["detail"],
-                **({"account": request["account"]} if request.get("account") else {}),
-                **({"model": request["model"]} if request.get("model") else {}),
-                **({"limit": request["limit"]} if request.get("limit") else {}),
-                "attempts": max(0, int(request.get("attempts", 0))),
-            })
-            deferred += 1
-            continue
-    rc, output, error = run([paseo, "inspect", agent_id, "--json"], 15)
-    detail = load_json(output) if rc == 0 else None
-    if not isinstance(detail, dict):
-        attempts = int(request.get("attempts", 0)) + 1
-        request.update(attempts=attempts, lastError=(error or "inspect failed")[-1000:])
-        if attempts >= 3:
-            finish(path, request, "inspect-failed-3-times")
-            failed += 1
-        else:
-            request["notBefore"] = time.time() + 30 * attempts
-            write(path, request)
-            deferred += 1
-        continue
-    status = str(detail.get("Status") or detail.get("status") or "").lower()
-    if status == "running":
-        request["notBefore"] = time.time() + 20
-        write(path, request)
-        deferred += 1
-        continue
-    if status not in {"idle", "error", "closed"}:
-        finish(path, request, f"agent-{status or 'unavailable'}")
-        failed += 1
-        continue
-    if retire_pinned_process(agent_id): time.sleep(1.5)
-    account = request.get("account") or "unknown account"
-    model = request.get("model") or "unknown model"
-    limit = request.get("limit") or "usage limit"
-    prompt = (
-        f"AgentLink automatic recovery: account {account} hit {limit} on {model}. "
-        "This same conversation is relaunching through the next eligible account; the user does not need to type continue. "
-        "continue the original task from its first incomplete step, and do not redo completed work. "
-        "Run `agent-link whoami` if available, then begin with one short line naming the actual account/model and next action."
-    )
-    rc, output, error = run([paseo, "send", agent_id, "--no-wait", "--json", "--prompt", prompt])
-    if rc == 0:
-        request["acceptedOutput"] = output[-2000:]
-        finish(path, request, "continuation-accepted")
-        accepted += 1
-    else:
-        attempts = int(request.get("attempts", 0)) + 1
-        request.update(attempts=attempts, lastError=(error or output)[-1000:])
-        if attempts >= 3:
-            finish(path, request, "send-failed-3-times")
-            failed += 1
-        else:
-            request["notBefore"] = time.time() + 30 * attempts
-            write(path, request)
-            deferred += 1
-
-history = sorted(glob.glob(os.path.join(done, "*.json")), key=os.path.getmtime, reverse=True)
-for old in history[100:]:
-    try: os.remove(old)
-    except OSError: pass
-print(f"Paseo recovery: {accepted} accepted, {deferred} pending, {failed} failed")
-sys.exit(1 if failed else 0)
-PY2
-  chmod +x "$SHIM_BIN/paseo-recover"
-}
-
-cmd_recover() {
-  local paseo_bin self_bin scan=0 recover_rc=0
-  [ "${1:-}" = "--scan" ] && scan=1
-  # Always rewrite it: the helper is managed code and must upgrade with the
-  # CLI, even on machines that already generated an older copy.
-  write_recovery_helper
-  paseo_bin="$(command -v paseo 2>/dev/null || true)"
-  [ -n "$paseo_bin" ] || paseo_bin="$HOME/.local/bin/paseo"
-  [ -x "$paseo_bin" ] || { echo "paseo CLI not found — recovery requests remain queued" >&2; return 1; }
-  self_bin="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
-  AGENT_LINK_SELF="$self_bin" AGENT_LINK_ACCOUNT_ROOT="$ROOT" AGENT_LINK_RECOVERY_SCAN="$scan" \
-    "$SHIM_BIN/paseo-recover" "$(recovery_queue_dir)" "$(pools_dir)/routes.log" "$paseo_bin" || recover_rc=$?
-  [ "$scan" -ne 1 ] || toolchain_watchdog_tick
-  return "$recover_rc"
-}
-
 cmd_refused() { # $1 provider
   prov_valid "${1:-}" || { echo "usage: agent-link refused <claude|codex>" >&2; return 1; }
   local p="$1" d key e until model limit
@@ -1234,9 +406,8 @@ cmd_refused() { # $1 provider
       *) limit="usage limit" ;;
     esac
   fi
-  enqueue_paseo_recovery "${PASEO_AGENT_ID:-}" "$p" "$key" "$model" "$limit"
   rm -f "$(pools_dir)/nearing-$p-$key"
-  echo "$p · $key: parked (limit hit)"
+  echo "$p · $key: parked (limit hit; choose another AgentLink model/account for the next turn)"
 }
 
 cmd_nearing() { # $1 provider [$2 email|primary] [clear] — mark from a hook or by hand
@@ -1560,9 +731,8 @@ autopark() { # $1 provider, $2 key (email or "primary"), $3 until-epoch or hold:
     local model_slug="${3#hold:model:}"
     [ -n "$model_slug" ] || return 1
     printf '%s\n' "model limit refusal — probe this model to release" > "$(pools_dir)/holdmodel-$1-$2-$model_slug"
-    # Never terminate every Paseo chat on the same account. Only the agent
-    # whose turn actually refused is eligible for retirement.
-    [ -n "${PASEO_AGENT_ID:-}" ] && ( cmd_evict "$1" "$model_slug" "$PASEO_AGENT_ID" >/dev/null 2>&1 & )
+    # Account health changes affect future turns only. Never terminate a live
+    # provider process or manufacture a replacement Paseo chat.
     echo "$(date '+%Y-%m-%d %H:%M')  HELD $1/$2 for model $model_slug" >> "$STATE/autopark.log"
     return 0
     ;;
@@ -1570,9 +740,8 @@ autopark() { # $1 provider, $2 key (email or "primary"), $3 until-epoch or hold:
     local hold_reason="limit refusal with no verified reset — release only after Probe accounts serves"
     [ "${3:-}" = hold:spend ] && hold_reason="monthly spend limit — raise it at claude.ai/settings/usage, then probe the account"
     hold_set "$1" "$2" "$hold_reason"
-    # Live processes on a just-held account will answer "usage limit" to every
-    # message until they end, so retire them now; the next message re-routes.
-    [ -n "${PASEO_AGENT_ID:-}" ] && ( cmd_evict "$1" "" "$PASEO_AGENT_ID" >/dev/null 2>&1 & )
+    # The active turn owns its own lifecycle. Holding an account only prevents
+    # it from being selected for a later turn.
     echo "$(date '+%Y-%m-%d %H:%M')  HELD $1/$2 (limit refusal — probe must pass before release)" >> "$STATE/autopark.log"
     if [ "${3:-}" = hold:spend ]; then
       echo "auto: monthly spend limit" > "$(pools_dir)/reason-$1-$2"
@@ -1807,296 +976,6 @@ pref_rank() { # $1 provider, $2 key
 # controller interprets every prompt and delegates the answer to a concrete
 # provider/model through Paseo. The default claude-auto controller keeps
 # account health routing intact.
-router_dir() { echo "$ROOT/router"; }
-
-router_write_files() {
-  mkdir -p "$(router_dir)"
-  # Migrate only the old stock rules. A genuinely edited file remains
-  # user-owned and is composed after the managed policy below.
-  if [ ! -f "$(router_dir)/rules.md" ] || {
-    grep -q "Stay on the base (cheap) model" "$(router_dir)/rules.md" 2>/dev/null &&
-    grep -q "long autonomous builds, wide refactors" "$(router_dir)/rules.md" 2>/dev/null
-  }; then
-    cat > "$(router_dir)/rules.md" <<'EOF'
-# AgentRouter rules — edit freely; read at every launch.
-# These refine target choice; they cannot disable route evidence.
-
-## Overrides
-- if the user names a provider, model, or account, use exactly that
-- prefer subscription-backed auto pools before independent backups
-- pair implementation and verification on different provider families
-
-## Never
-- delegate anything the user asked you to keep private
-- run more than 2 concrete targets for one request unless asked
-EOF
-  fi
-  python3 - "$(router_dir)/config.json" "$(router_dir)/policy.md" <<'PY'
-import json, os, sys
-
-config_path, policy_path = sys.argv[1:]
-defaults = {
-    "controllerProvider": "claude-auto",
-    "controllerAccount": "auto",
-    "controllerConfigDir": "",
-    "controllerModel": "claude-fable-5",
-    "targetGroups": [
-        {"name": "fast", "purpose": "Explanations, summaries, formatting and tiny edits", "targets": [
-            {"provider": "claude", "account": "auto", "resolvedProvider": "claude-auto", "model": "claude-haiku-4-5"},
-            {"provider": "codex", "account": "auto", "resolvedProvider": "codex-auto", "model": "gpt-5.6-luna"},
-            {"provider": "kimi", "account": "provider", "resolvedProvider": "kimi", "model": "kimi-code/kimi-for-coding-highspeed"},
-            {"provider": "grok", "account": "provider", "resolvedProvider": "grok", "model": "grok-4.5"}]},
-        {"name": "planning", "purpose": "Product and implementation plans", "targets": [
-            {"provider": "claude", "account": "auto", "resolvedProvider": "claude-auto", "model": "claude-fable-5"},
-            {"provider": "codex", "account": "auto", "resolvedProvider": "codex-auto", "model": "gpt-5.6-terra"},
-            {"provider": "grok", "account": "provider", "resolvedProvider": "grok", "model": "grok-4.6"}]},
-        {"name": "judgment", "purpose": "Architecture, UI/UX, audit and final review", "targets": [
-            {"provider": "claude", "account": "auto", "resolvedProvider": "claude-auto", "model": "claude-opus-5"},
-            {"provider": "grok", "account": "provider", "resolvedProvider": "grok", "model": "grok-4.6"},
-            {"provider": "codex", "account": "auto", "resolvedProvider": "codex-auto", "model": "gpt-5.6-sol"}]},
-        {"name": "build", "purpose": "Multi-file implementation, debugging, migrations and refactors", "targets": [
-            {"provider": "codex", "account": "auto", "resolvedProvider": "codex-auto", "model": "gpt-5.6-sol"},
-            {"provider": "kimi", "account": "provider", "resolvedProvider": "kimi", "model": "kimi-code/k3"},
-            {"provider": "claude", "account": "auto", "resolvedProvider": "claude-auto", "model": "claude-opus-5"}]},
-        {"name": "browser", "purpose": "Browser-driving verification", "targets": [
-            {"provider": "codex", "account": "auto", "resolvedProvider": "codex-auto", "model": "gpt-5.6-sol"}]},
-    ],
-}
-try:
-    loaded = json.load(open(config_path, encoding="utf-8"))
-    config = loaded if isinstance(loaded, dict) else defaults
-except Exception:
-    config = defaults
-    os.makedirs(os.path.dirname(config_path), exist_ok=True)
-    tmp = config_path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as handle:
-        json.dump(config, handle, indent=2)
-        handle.write("\n")
-    os.replace(tmp, config_path)
-
-lines = [
-    "# AgentRouter managed orchestration policy",
-    "",
-    "Every request resolves to one concrete Paseo provider/model/account target. Groups",
-    "are ordered: skip unavailable targets, try the first healthy target, then",
-    "move only after a real launch failure. Automatic account targets use",
-    "AgentLink health routing; fixed targets use the selected account only.",
-    "",
-]
-for group in config.get("targetGroups", []):
-    name = str(group.get("name") or "route")
-    purpose = str(group.get("purpose") or "User-defined work")
-    lines.append(f"## {name} — {purpose}")
-    for index, target in enumerate(group.get("targets", []), 1):
-        provider = target.get("resolvedProvider") or target.get("provider", "")
-        account = target.get("account") or ("auto" if str(provider).endswith("-auto") else "provider")
-        lines.append(f"{index}. {provider}/{target.get('model', '')} · account: {account}")
-    lines.append("")
-lines += [
-    "Model-specific quota may be unknowable until a target answers. A refusal is",
-    "a failed target, never success; record it, let Limit Sentry cool its account,",
-    "and try the next target. If the group is exhausted, fail closed and name",
-    "every target attempted.",
-]
-with open(policy_path, "w", encoding="utf-8") as handle:
-    handle.write("\n".join(lines).rstrip() + "\n")
-PY
-  cat > "$(router_dir)/prompt.md" <<'EOF'
-You are AgentRouter, a prompt interpreter and cross-provider orchestrator. The
-controller process hosting you is NOT the answer model. On EVERY user message
-you must resolve and run one concrete Paseo provider/model/account target.
-
-1. Read the managed target policy and user rules below.
-2. Classify the request into one target group. If the user named a provider,
-   model, or account, that exact compatible target wins.
-3. Use Paseo's provider/profile discovery to skip unavailable targets. Do not
-   claim quota health when the runtime does not expose it.
-4. Before launch, call Paseo `inspect_provider` for the target and select a mode
-   ID it actually reports. Then delegate only with the Paseo MCP `create_agent`
-   tool in THIS workspace. Pass the exact resolved `provider/model` (the
-   provider already encodes automatic, primary, or fixed account choice), compatible mode in
-   `settings`, full task context, and a title beginning
-   `AgentRouter · <exact provider/model> ·`. NEVER
-   use Claude's built-in Agent/Task subagent tool: Paseo cannot expose that
-   subagent's actual model, routing, or account evidence.
-5. Wait for the Paseo child and relay its result. On a real auth/quota/provider
-   failure, record the failed target and try the next healthy target in the
-   same group. Reuse the same Paseo child for follow-ups when it still fits.
-6. Do not inspect repositories, edit files, or answer the task on this control
-   model. If Paseo tools are unavailable or every target fails, fail closed.
-
-Before delegation, say `Routing: <group> -> <provider/model> · account <choice>`.
-End every final response with exactly:
-`Routed: <actual provider/model> · account <actual-or-policy-choice> · Paseo agent <id> — <short reason>`
-If no Paseo child ran, use:
-`Routed: none — routing failed; no answer model ran`
-EOF
-  {
-    cat "$(router_dir)/prompt.md"
-    echo
-    echo "----- MANAGED TARGET POLICY -----"
-    cat "$(router_dir)/policy.md"
-    echo
-    echo "----- ROUTING RULES (user-edited) -----"
-    cat "$(router_dir)/rules.md"
-  } > "$(router_dir)/system.md"
-
-  mkdir -p "$SHIM_BIN"
-  cat > "$SHIM_BIN/agent-router" <<EOF
-#!/usr/bin/env bash
-# AgentRouter provider launcher — managed by \`agent-link router install\`.
-aa_root="\${AGENT_LINK_HOME:-\${AGENT_AUTH_HOME:-$ROOT}}"
-aa_prompt="\$aa_root/router/system.md"
-aa_config="\$aa_root/router/config.json"
-[ -f "\$aa_prompt" ] || { echo "agent-link: AgentRouter prompt is missing; run agent-link router install" >&2; exit 75; }
-aa_controller="\$(python3 - "\$aa_config" <<'PY'
-import json, sys
-try: print(json.load(open(sys.argv[1])).get("controllerProvider") or "claude-auto")
-except Exception: print("claude-auto")
-PY
-)"
-aa_account="\$(python3 - "\$aa_config" <<'PY'
-import json, sys
-try:
-    data = json.load(open(sys.argv[1]))
-    print(data.get("controllerAccount") or ("auto" if data.get("controllerProvider") == "claude-auto" else "primary"))
-except Exception: print("auto")
-PY
-)"
-aa_config_dir="\$(python3 - "\$aa_config" <<'PY'
-import json, sys
-try: print(json.load(open(sys.argv[1])).get("controllerConfigDir") or "")
-except Exception: print("")
-PY
-)"
-aa_model="\$(python3 - "\$aa_config" <<'PY'
-import json, sys
-try: print(json.load(open(sys.argv[1])).get("controllerModel") or "claude-fable-5")
-except Exception: print("claude-fable-5")
-PY
-)"
-case "\$aa_controller" in
-  claude-auto) aa_command="\$aa_root/bin/claude-auto" ;;
-  claude) aa_command="\$(command -v claude 2>/dev/null || true)" ;;
-  *) echo "agent-link: unsupported AgentRouter controller '\$aa_controller'" >&2; exit 75 ;;
-esac
-[ -x "\$aa_command" ] || { echo "agent-link: AgentRouter controller '\$aa_controller' is unavailable" >&2; exit 75; }
-if [ "\$aa_account" != auto ] && [ "\$aa_account" != primary ]; then
-  [ -d "\$aa_config_dir" ] || { echo "agent-link: AgentRouter account '\$aa_account' is unavailable" >&2; exit 75; }
-  export CLAUDE_CONFIG_DIR="\$aa_config_dir"
-fi
-# Paseo diagnostics call these directly. They do not launch an agent and must
-# not acquire a routing lock or fire a recovery probe.
-case "\${1:-}" in
-  --version|-v|version|auth) exec "\$aa_command" "\$@" ;;
-esac
-aa_agents="\$(python3 - "\$aa_prompt" "\$aa_model" <<'PY'
-import json, sys
-prompt = open(sys.argv[1], encoding="utf-8").read()
-print(json.dumps({"agent-router": {
-    "description": "Interpret each request and delegate the answer through Paseo.",
-    "prompt": prompt,
-    "model": sys.argv[2],
-}}))
-PY
-)" || exit 75
-aa_args=()
-while [ "\$#" -gt 0 ]; do
-  case "\$1" in
-    --model) shift; [ "\$#" -gt 0 ] && shift ;;
-    --model=*) shift ;;
-    *) aa_args+=("\$1"); shift ;;
-  esac
-done
-exec "\$aa_command" --agents "\$aa_agents" --agent agent-router "\${aa_args[@]}"
-EOF
-  chmod +x "$SHIM_BIN/agent-router"
-}
-
-
-# A hold never expires — which is right for "this account is refusing" and
-# WRONG the moment the month rolls over or the user raises the cap. Nothing
-# but a real call can tell the difference, so re-prove held accounts on a
-# schedule: one tiny call each, and any that serves is released immediately.
-# Move a conversation to a healthy account and print the one command that
-# continues it there. This is the honest form of "switch accounts": a running
-# process can never change account, but its next resume can.
-# A running process cannot change account. Retire only the exact Paseo agent
-# whose turn refused; account-wide eviction is deliberately impossible.
-cmd_evict() { # [provider] [model-slug] [agent-id] — end matching held processes
-  local p="${1:-claude}" model_slug="${2:-}" agent_id="${3:-}" pid dir key ended=0 until_ts command process_env
-  prov_valid "$p" || return 1
-  [ "$p" = claude ] || { echo "evict supports claude only" >&2; return 1; }
-  [ -n "$agent_id" ] || { echo "refusing unscoped process eviction" >&2; return 1; }
-  for pid in $(ps -axo pid,command | grep "[c]laude " | awk '{print $1}'); do
-    process_env="$(ps eww -p "$pid" 2>/dev/null || true)"
-    case "$process_env" in *"PASEO_AGENT_ID=$agent_id"*) ;; *) continue ;; esac
-    dir="$(printf '%s' "$process_env" | tr ' ' '\n' | grep '^CLAUDE_CONFIG_DIR=' | head -1 | cut -d= -f2-)"
-    [ -n "$dir" ] || continue
-    key="$(basename "$dir")"
-    if [ -n "$model_slug" ]; then
-      [ -f "$(pools_dir)/holdmodel-$p-$key-$model_slug" ] || continue
-      command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
-      case "$command" in *"$model_slug"*) ;; *) continue ;; esac
-      kill "$pid" 2>/dev/null && ended=$((ended+1))
-      continue
-    fi
-    # A timed cooldown is just as fatal as a hold while it lasts: a session
-    # limit resets at midnight, and until then every message to that pinned
-    # process comes back refused. Retire on either.
-    if [ ! -f "$(pools_dir)/hold-$p-$key" ]; then
-      until_ts="$(cat "$(pools_dir)/cooldown-$p-$key" 2>/dev/null || echo 0)"
-      [ "$until_ts" -gt "$(date +%s)" ] || continue
-    fi
-    kill "$pid" 2>/dev/null && ended=$((ended+1))
-  done
-  if [ "$ended" -gt 0 ]; then
-    echo "ended $ended process(es) pinned to an exhausted account"
-    echo "send those agents a message — the relaunch lands on a live account"
-    echo "$(date '+%Y-%m-%d %H:%M')  evicted $ended $p process(es) from held accounts" >> "$STATE/autopark.log"
-  else
-    echo "nothing pinned to an exhausted $p account"
-  fi
-}
-
-cmd_switch() { # [provider] [session-id] — default: the newest session in this cwd
-  local p="${1:-claude}" sid="${2:-}" target owner
-  prov_valid "$p" || { echo "usage: agent-link switch [claude|codex] [session-id]" >&2; return 1; }
-  if [ -z "$sid" ]; then
-    target="$(cmd_continue_target "$p" "$PWD" 2>/dev/null || true)"
-    local slug f best="" best_m=0 d m
-    slug="$(printf %s "$PWD" | LC_ALL=C sed 's/[^A-Za-z0-9]/-/g')"
-    for d in "$(primary_dir "$p")" "$ACCOUNTS/$p"/*/; do
-      d="${d%/}"
-      if [ "$p" = claude ]; then f="$(ls -t "$d/projects/$slug"/*.jsonl 2>/dev/null | head -1)"
-      else f="$(ls -t "$d"/sessions/*/*/*/*.jsonl 2>/dev/null | head -1)"; fi
-      [ -n "$f" ] || continue
-      m="$(stat -f %m "$f" 2>/dev/null || echo 0)"
-      [ "$m" -gt "$best_m" ] && { best_m="$m"; best="$f"; }
-    done
-    [ -n "$best" ] || { echo "no conversation found for $PWD" >&2; return 1; }
-    if [ "$p" = claude ]; then sid="$(basename "$best" .jsonl)"
-    else sid="$(basename "$best" .jsonl | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')"; fi
-  fi
-  owner="$(session_owner "$p" "$sid")" || { echo "session '$sid' not found in any $p account" >&2; return 1; }
-  echo "session $sid"
-  echo "  currently on: $owner"
-  target="$(cmd_resume_target "$p" "$sid" --go 2>/dev/null || true)"
-  [ -n "$target" ] || { echo "  no healthy account to move to — run: agent-link revalidate" >&2; return 1; }
-  if [ "$target" = primary ]; then
-    echo "  moved to: primary"
-    echo
-    echo "continue it with:  $p --resume $sid"
-  else
-    echo "  moved to: $(basename "$target")"
-    echo
-    echo "continue it with:  agent-link run $p $(basename "$target") $p --resume $sid"
-  fi
-  echo "(in Paseo: just send the agent a message — the launcher routes the resume for you)"
-}
-
-HOLD_RECHECK_HOURS=1
-
 probe_account_once() { # $1 provider, $2 config dir (empty = primary), $3 optional model
   local p="$1" dir="${2:-}" model="${3:-}" args=()
   if [ "$p" = claude ]; then
@@ -2145,46 +1024,6 @@ cmd_revalidate() { # [provider] — probe only HELD accounts, release those that
 
 # Fired detached from a launch when a hold has gone stale, so recovery happens
 # without anyone remembering to run anything.
-maybe_revalidate() { # $1 provider
-  local e f age now self
-  prov_valid "$1" || return 0
-  now="$(date +%s)"
-  for f in "$(pools_dir)"/hold-$1-*; do
-    [ -f "$f" ] || continue
-    e="${f##*/hold-$1-}"
-    age="$(cat "$(pools_dir)/holdcheck-$1-$e" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo 0)"
-    if [ $(( now - age )) -gt $(( HOLD_RECHECK_HOURS * 3600 )) ]; then
-      self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
-      [ -x "$self" ] && ( "$self" revalidate "$1" >/dev/null 2>&1 & ) 
-      return 0
-    fi
-  done
-}
-
-cmd_router() { # [install|status]
-  case "${1:-install}" in
-    install)
-      router_write_files
-      echo "AgentRouter brain written."
-      echo "  rules:  $(router_dir)/rules.md   (edit freely — read at every launch)"
-      echo "  policy: $(router_dir)/policy.md  (managed ordered target groups)"
-      echo "  prompt: $(router_dir)/prompt.md"
-      echo "  launcher: $SHIM_BIN/agent-router"
-      echo "Install the AgentRouter provider from the Paseo Agent Link panel."
-      ;;
-    status)
-      if [ -f "$(router_dir)/rules.md" ] && [ -x "$SHIM_BIN/agent-router" ]; then
-        echo "ready: $SHIM_BIN/agent-router"
-        echo "rules: $(router_dir)/rules.md"
-        echo "policy: $(router_dir)/policy.md"
-      else
-        echo "not installed — agent-link router install"
-      fi
-      ;;
-    *) echo "usage: agent-link router [install|status]" >&2; return 1 ;;
-  esac
-}
-
 cmd_usage() {
   local p e key f state pref quota_dir
   for p in $PROVIDERS; do
@@ -2305,7 +1144,6 @@ record_route_decision() { # provider target decision group
 # Print the slot to use next ("primary" or an email), and stamp it as used.
 pick_slot() { # $1 provider, $2 dry|live, $3 requested model
   local best="" best_ts="" e ts pemail covered pass decision="" rank_label="standard" model="${3:-}"
-  maybe_revalidate "$1"
   mkdir -p "$(pools_dir)"
   # The primary counts as a candidate unless a slot already holds that account.
   pemail="$(primary_email "$1")"
@@ -2730,6 +1568,209 @@ fi
 TRUST
 }
 
+acp_runtime_source() {
+  local here candidate
+  here="$(cd "$(dirname "$0")" && pwd)"
+  # A source checkout is authoritative during development. A standalone CLI
+  # uses the release-matched managed clone, never an older installed runtime.
+  if [ -d "$here/.git" ] || [ -d "$here/../.git" ]; then
+    candidate="$here/agent-link-acp.mjs"
+    [ -f "$candidate" ] && { echo "$candidate"; return 0; }
+    candidate="$here/../agent-link-acp.mjs"
+    [ -f "$candidate" ] && { echo "$candidate"; return 0; }
+  fi
+  candidate="$ROOT/src/agent-link-acp.mjs"
+  [ -f "$candidate" ] && { echo "$candidate"; return 0; }
+  return 1
+}
+
+disable_legacy_paseo_recovery() {
+  local sentry="$STATE/paseo-limit-sentry.json" helper="$SHIM_BIN/paseo-recover" retired="$STATE/retired/paseo-recover-v0.5"
+  if [ -f "$sentry" ]; then
+    python3 - "$sentry" <<'PY2'
+import json, os, sys, tempfile
+path = sys.argv[1]
+try:
+    with open(path, encoding="utf-8") as handle:
+        state = json.load(handle)
+except Exception:
+    sys.exit(0)
+if not isinstance(state, dict) or state.get("auto") is False:
+    sys.exit(0)
+state["auto"] = False
+fd, temporary = tempfile.mkstemp(prefix=".paseo-limit-sentry-", dir=os.path.dirname(path))
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(state, handle)
+        handle.write("\n")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+finally:
+    if os.path.exists(temporary):
+        os.unlink(temporary)
+PY2
+  fi
+  if [ -f "$helper" ]; then
+    mkdir -p "$(dirname "$retired")"
+    mv "$helper" "$retired"
+    chmod 600 "$retired" 2>/dev/null || true
+    echo "retired legacy Paseo recovery helper"
+  fi
+}
+
+install_acp_runtime() {
+  local source="" target="$SHIM_BIN/agent-link-acp" staged="$SHIM_BIN/agent-link-acp.new.mjs" tag url
+  mkdir -p "$SHIM_BIN"
+  source="$(acp_runtime_source 2>/dev/null || true)"
+  if [ -n "$source" ]; then
+    cp "$source" "$staged" || return 1
+  else
+    tag="$(latest_release_tag)"
+    url="https://raw.githubusercontent.com/itsjustanks/paseo-agent-link/${tag:-main}/agent-link-acp.mjs"
+    curl -fsSL "$url" -o "$staged" 2>/dev/null || {
+      rm -f "$staged"
+      echo "could not download the AgentLink ACP runtime" >&2
+      return 1
+    }
+  fi
+  node --check "$staged" >/dev/null 2>&1 || {
+    rm -f "$staged"
+    echo "the AgentLink ACP runtime did not pass its syntax check" >&2
+    return 1
+  }
+  chmod +x "$staged"
+  mv "$staged" "$target"
+  echo "wrote $target"
+}
+
+configure_paseo_agentlink() {
+  local config="$HOME/.paseo/config.json" runtime="$SHIM_BIN/agent-link-acp" changed
+  [ -f "$config" ] || return 0
+  changed="$(python3 - "$config" "$runtime" <<'PY2'
+import json, os, shutil, sys, tempfile, time
+path, runtime = sys.argv[1:3]
+try:
+    with open(path, encoding="utf-8") as handle:
+        config = json.load(handle)
+except Exception as error:
+    print(f"error:{error}")
+    sys.exit(0)
+providers = config.setdefault("agents", {}).setdefault("providers", {})
+desired = {
+    "extends": "acp",
+    "label": "AgentLink",
+    "description": "Primary one-chat provider with AgentRouter and every connected Paseo model/account",
+    "command": [runtime],
+}
+changed = providers.get("agent-link") != desired
+providers["agent-link"] = desired
+legacy_labels = {
+    "claude-auto": "Claude (Legacy AgentLink - existing chats)",
+    "codex-auto": "Codex (Legacy AgentLink - existing chats)",
+    "agent-router": "AgentRouter (Legacy - existing chats)",
+}
+for provider_id, label in legacy_labels.items():
+    value = providers.get(provider_id)
+    if isinstance(value, dict) and value.get("label") != label:
+        value["label"] = label
+        value["description"] = "Kept for existing sessions. Start new multi-account chats with AgentLink."
+        changed = True
+if not changed:
+    print("unchanged")
+    sys.exit(0)
+backup = f"{path}.bak-agent-link-acp-{int(time.time())}"
+shutil.copy2(path, backup)
+mode = os.stat(path).st_mode & 0o777
+fd, temporary = tempfile.mkstemp(prefix=".agent-link-config-", dir=os.path.dirname(path))
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(config, handle, indent=2)
+        handle.write("\n")
+    os.chmod(temporary, mode)
+    os.replace(temporary, path)
+finally:
+    if os.path.exists(temporary):
+        os.unlink(temporary)
+print("changed")
+PY2
+)"
+  case "$changed" in
+    changed)
+      echo "configured Paseo provider: AgentLink"
+      ;;
+    unchanged) ;;
+    error:*) echo "could not update Paseo config: ${changed#error:}" >&2; return 1 ;;
+  esac
+}
+
+refresh_paseo_provider_catalog() {
+  local config="$HOME/.paseo/config.json" target="$ROOT/state/acp/paseo-provider-catalog.json" paseo_bin=""
+  [ -f "$config" ] || return 0
+  paseo_bin="$(command -v paseo 2>/dev/null || true)"
+  [ -n "$paseo_bin" ] || return 0
+  python3 - "$config" "$target" "$paseo_bin" <<'PY2'
+import json, os, subprocess, sys, tempfile
+
+config_path, target, paseo = sys.argv[1:4]
+try:
+    config = json.load(open(config_path, encoding="utf-8"))
+except Exception:
+    sys.exit(0)
+configured = config.get("agents", {}).get("providers", {})
+try:
+    previous = json.load(open(target, encoding="utf-8")).get("providers", {})
+except Exception:
+    previous = {}
+providers = {}
+for provider_id, value in configured.items():
+    if not isinstance(value, dict) or value.get("extends") != "acp" or value.get("enabled") is False or provider_id == "agent-link":
+        continue
+    command = value.get("command")
+    if not isinstance(command, list) or not command or os.path.basename(str(command[0])).startswith("agent-link-acp"):
+        continue
+    try:
+        result = subprocess.run(
+            [paseo, "provider", "models", provider_id, "--json"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        rows = json.loads(result.stdout)
+        models = []
+        for row in rows if isinstance(rows, list) else []:
+            model_id = row.get("id") if isinstance(row, dict) else None
+            if not isinstance(model_id, str) or not model_id:
+                continue
+            models.append({
+                "id": model_id,
+                "name": row.get("model") if isinstance(row.get("model"), str) else model_id,
+                "description": row.get("description") if isinstance(row.get("description"), str) else "",
+            })
+        if models:
+            providers[provider_id] = {"label": value.get("label") or provider_id, "models": models}
+            continue
+    except Exception:
+        pass
+    if provider_id in previous:
+        providers[provider_id] = previous[provider_id]
+
+payload = {"version": 1, "providers": providers}
+os.makedirs(os.path.dirname(target), mode=0o700, exist_ok=True)
+fd, temporary = tempfile.mkstemp(prefix=".paseo-provider-catalog-", dir=os.path.dirname(target))
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+        handle.write("\n")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, target)
+finally:
+    if os.path.exists(temporary):
+        os.unlink(temporary)
+print(f"cached {sum(len(entry.get('models', [])) for entry in providers.values())} Paseo provider models")
+PY2
+}
+
 write_auto_launcher() { # $1 provider — one command that routes to a live account
   local p="$1" env_var self primary_search cont_flags
   # Continue-style flags differ by CLI — and clash: codex uses -c for a CONFIG
@@ -2807,18 +1848,16 @@ aa_pin=""
 # An explicitly inherited env var means the caller already chose the account —
 # compute nothing for it, or a mere launch would copy transcripts around.
 if [ -n "\${$env_var:-}" ]; then aa_sid=""; aa_cont=""; fi
-# "continue" means the newest chat — which may live in any account. The CLI
-# finds it and routes it like a resume of that session.
+# "continue" means the newest chat — which may live in any account. Pin it to
+# its owner; never copy or rotate a conversation implicitly.
 if [ -z "\$aa_sid" ] && [ -n "\$aa_cont" ] && [ -x "$self" ]; then
-  aa_pin="\$("$self" continue-target $p "\$PWD" --go "\$aa_model" 2>/dev/null || true)"
+  aa_pin="\$("$self" continue-target $p "\$PWD" "" "\$aa_model" 2>/dev/null || true)"
 fi
 if [ -n "\$aa_sid" ]; then
-  # The CLI resolves which account owns this session — and when that account is
-  # parked or was just refused for a limit, it hands the transcript to a
-  # healthy account and answers with THAT dir, so a plain --resume recovers a
-  # chat that died on a limit. "primary" means: leave the env var unset.
+  # A legacy native conversation remains on its owning account. AgentLink ACP
+  # is the only path that can switch account/model inside one logical chat.
   if [ -x "$self" ]; then
-    aa_pin="\$("$self" resume-target $p "\$aa_sid" --go "\$aa_model" 2>/dev/null || true)"
+    aa_pin="\$("$self" resume-target $p "\$aa_sid" "" "\$aa_model" 2>/dev/null || true)"
   fi
   if [ -z "\$aa_pin" ]; then
     # The CLI was missing or failed — at least pin to the owner so the resume
@@ -2864,30 +1903,26 @@ EOF
   echo "wrote $SHIM_BIN/$p-auto"
 }
 
-cmd_auto() { # write auto launchers and print the provider snippet
+cmd_auto() { # install the one-chat ACP provider and retain launchers for old sessions
   local p
+  disable_legacy_paseo_recovery
+  install_acp_runtime || return 1
   for p in $PROVIDERS; do write_auto_launcher "$p"; done
-  write_recovery_helper
+  configure_paseo_agentlink || return 1
+  refresh_paseo_provider_catalog || true
+  if command -v paseo >/dev/null 2>&1; then
+    paseo reload >/dev/null 2>&1 || echo "Paseo config was saved; reload it from Paseo if AgentLink does not appear yet." >&2
+    paseo provider diagnostic agent-link --json >/dev/null 2>&1 || true
+  fi
   cat <<EOF
 
-Point ONE provider at each launcher and it spreads new agents across your
-accounts automatically (health gate, priority groups, then least-recently-used).
+AgentLink is the provider for new chats. AgentRouter is its automatic model;
+every connected model/account remains directly selectable. Switching changes
+the next turn inside the same chat and never creates, archives or replaces a
+Paseo agent.
 
-Paseo — ~/.paseo/config.json under agents.providers (then reload the plugin):
-
-  "claude-auto": {
-    "extends": "claude",
-    "label": "Claude (Dynamic Agent Link)",
-    "command": ["$SHIM_BIN/claude-auto"]
-  },
-  "codex-auto": {
-    "extends": "codex",
-    "label": "Codex (Dynamic Agent Link)",
-    "command": ["$SHIM_BIN/codex-auto"]
-  }
-
-Anything else that runs a command works too — just run $SHIM_BIN/claude-auto
-in place of claude.
+The Claude/Codex legacy launchers remain installed only so existing chats can
+resume on their original account. They no longer rotate or copy a resumed chat.
 EOF
 }
 
@@ -2954,144 +1989,22 @@ session_dir() { # $1 provider, $2 owner (primary|email) — the config dir behin
 # Copy every file of one session between config dirs, preserving layout. A
 # session can be more than one file (transcript plus sidecars), so copy every
 # match rather than the first — a partial copy resumes with holes.
-session_copy() { # $1 src dir, $2 dest dir, $3 session-id
-  local hit rel copied=""
-  while IFS= read -r hit; do
-    [ -n "$hit" ] || continue
-    case "$hit" in *.al-moved) continue ;; esac
-    rel="${hit#$1/}"
-    # A destination copy that is newer than the source has real work in it —
-    # overwriting it would destroy conversation turns. Leave it (and its
-    # .al-moved floor) alone; the resume runs against the newer copy.
-    if [ -f "$2/$rel" ]; then
-      local src_m dest_m
-      src_m="$(stat -f %m "$hit" 2>/dev/null || stat -c %Y "$hit" 2>/dev/null || echo 0)"
-      dest_m="$(stat -f %m "$2/$rel" 2>/dev/null || stat -c %Y "$2/$rel" 2>/dev/null || echo 0)"
-      if [ "$dest_m" -ge "$src_m" ]; then copied=1; continue; fi
-    fi
-    mkdir -p "$(dirname "$2/$rel")"
-    if cp "$hit" "$2/$rel"; then
-      copied=1
-      # The copied tail describes the SOURCE account — its refusals and its
-      # rate_limits. Record where the move ended so the health scanners only
-      # read what THIS account appends afterwards; without this, moving a dead
-      # chat parks the healthy account it just moved to.
-      wc -c < "$2/$rel" | tr -d ' ' > "$2/$rel.al-moved"
-    fi
-  done <<EOF2
-$(find "$1" -maxdepth 5 -name "*$3*" -type f 2>/dev/null)
-EOF2
-  [ -n "$copied" ]
-}
-
-# Move a conversation to another account so it can be continued there.
-# Sessions are stored per config dir, so a chat started on account A simply
-# does not exist for account B — this copies the transcript across. The model
-# re-sends the transcript on resume, so the conversation continues; the new
-# account is billed from that point on. "primary" works on both ends.
-cmd_handoff() { # $1 provider, $2 session-id, $3 target email|primary
-  prov_valid "${1:-}" || { echo "usage: agent-link handoff <claude|codex> <session-id> <email|primary>" >&2; return 1; }
-  [ -n "${2:-}" ] || { echo "usage: agent-link handoff <claude|codex> <session-id> <email|primary>" >&2; return 1; }
-  { [ "${3:-}" = primary ] || valid_account "${3:-}"; } || { echo "usage: agent-link handoff <claude|codex> <session-id> <email|primary>" >&2; return 1; }
-  local p="$1" sid="$2" target="$3" owner src dest_dir
-  dest_dir="$(session_dir "$p" "$target")"
-  [ -d "$dest_dir" ] || { echo "no $p account '$target'" >&2; return 1; }
-  owner="$(session_owner "$p" "$sid")" || { echo "session '$sid' not found in any $p account" >&2; return 1; }
-  src="$(session_dir "$p" "$owner")"
-  [ "$src" = "$dest_dir" ] && { echo "already on $target"; return 0; }
-  session_copy "$src" "$dest_dir" "$sid" || { echo "copying session '$sid' failed" >&2; return 1; }
-  record_route_decision "$p" "$target" "session ${sid%%-*} handed off from $owner" fallback
-  echo "copied session $sid"
-  echo "  from: $owner"
-  echo "    to: $target"
-  if [ "$target" = primary ]; then
-    echo "continue it with: $p --resume $sid"
-  else
-    echo "continue it with: agent-link run $p $target $p --resume $sid"
-  fi
-}
-
-# Where should a resume run? Prints the config dir to export, "primary" for the
-# primary login (leave the env var unset), or nothing when the session is
-# unknown (the caller falls back to rotation). A running process can never
-# change accounts — but its NEXT resume can: when the owning account is parked,
-# or was just refused for a limit, the transcript is handed to the healthiest
-# other account and THAT dir is printed. This is what lets a chat that died on
-# a limit continue with a plain --resume, no rescue by hand.
-cmd_resume_target() { # $1 provider, $2 session-id [--go] [model]
+cmd_resume_target() { # $1 provider, $2 session-id — print its owning config directory
   prov_valid "${1:-}" && [ -n "${2:-}" ] || {
-    echo "usage: agent-link resume-target <claude|codex> <session-id> [--go]" >&2; return 1; }
-  # Without --go this is a pure query: it prints where a resume would land and
-  # touches nothing. The launchers pass --go, which is when the transcript
-  # actually moves and the LRU stamp is written.
-  local p="$1" sid="$2" go="" model="${4:-}" owner owner_dir healthy="" e ts best="" best_ts="" pemail covered dest_dir
-  [ "${3:-}" = --go ] && go=1
+    echo "usage: agent-link resume-target <claude|codex> <session-id>" >&2; return 1; }
+  if [ "${3:-}" = --go ]; then
+    echo "automatic transcript moves were removed; switch the AgentLink model/account in the same chat instead" >&2
+    return 1
+  fi
+  local p="$1" sid="$2" owner
   owner="$(session_owner "$p" "$sid")" || return 0
-  owner_dir="$(session_dir "$p" "$owner")"
-  if [ "$owner" = primary ]; then slot_available_primary "$p" "$model" && healthy=1
-  else slot_available "$p" "$owner" "$model" && healthy=1; fi
-  if [ -n "$healthy" ]; then
-    if [ -n "$go" ]; then
-      local owner_group="standard" owner_rank
-      owner_rank="$(pref_rank "$p" "$owner")"
-      case "$owner_rank" in 0) owner_group="preferred" ;; 2) owner_group="reserve" ;; 9) owner_group="fallback" ;; esac
-      date +%s > "$(pools_dir)/last-$p-$owner"
-      record_route_decision "$p" "$owner" "session ${sid%%-*} resumed on owner" "$owner_group"
-    fi
-    echo "$([ "$owner" = primary ] && echo primary || echo "$owner_dir")"
-    return 0
+  if [ "$owner" = primary ]; then
+    echo primary
+  else
+    session_dir "$p" "$owner"
   fi
-  # The owner is benched. LRU among the healthy others, nearing accounts last;
-  # the primary counts unless a slot already holds that account (pick_slot's rule).
-  mkdir -p "$(pools_dir)"
-  pemail="$(primary_email "$p")"
-  covered=""
-  if [ -n "$pemail" ] && [ "$owner" != primary ]; then
-    for e in $(slot_list "$p"); do
-      [ "$(prov_email "$p" "$(slot_dir "$p" "$e")")" = "$pemail" ] && covered=1
-    done
-  fi
-  local pass rank best_rank=""
-  for pass in fresh nearing; do
-    if [ -n "$pemail" ] && [ "$owner" != primary ] && [ -z "$covered" ] && slot_available_primary "$p" "$model"; then
-      if [ "$pass" = nearing ] || ! slot_nearing "$p" primary; then
-        best=primary; best_ts="$(cat "$(pools_dir)/last-$p-primary" 2>/dev/null || echo 0)"; best_rank="$(pref_rank "$p" primary)"
-      fi
-    fi
-    for e in $(slot_list "$p"); do
-      [ "$e" = "$owner" ] && continue
-      slot_available "$p" "$e" "$model" || continue
-      [ "$pass" = fresh ] && slot_nearing "$p" "$e" && continue
-      ts="$(cat "$(pools_dir)/last-$p-$e" 2>/dev/null || echo 0)"
-      rank="$(pref_rank "$p" "$e")"
-      if [ -z "$best" ] || [ "$rank" -lt "$best_rank" ] || { [ "$rank" -eq "$best_rank" ] && [ "$ts" -lt "$best_ts" ]; }; then
-        best="$e"; best_ts="$ts"; best_rank="$rank"
-      fi
-    done
-    [ -n "$best" ] && break
-  done
-  if [ -z "$best" ]; then
-    # Nowhere healthier to go — stay with the owner, where the transcript is.
-    echo "$([ "$owner" = primary ] && echo primary || echo "$owner_dir")"; return 0
-  fi
-  dest_dir="$(session_dir "$p" "$best")"
-  if [ -z "$go" ]; then
-    echo "$([ "$best" = primary ] && echo primary || echo "$dest_dir")"; return 0
-  fi
-  if ! session_copy "$owner_dir" "$dest_dir" "$sid"; then
-    echo "$([ "$owner" = primary ] && echo primary || echo "$owner_dir")"; return 0
-  fi
-  date +%s > "$(pools_dir)/last-$p-$best"
-  record_route_decision "$p" "$best" "session ${sid%%-*} resumed from $owner" fallback
-  echo "$(date '+%Y-%m-%d %H:%M')  moved session $sid $owner -> $best on resume (owner parked)" >> "$STATE/autopark.log"
-  echo "$([ "$best" = primary ] && echo primary || echo "$dest_dir")"
 }
 
-# `claude -c` means "continue the newest chat in this project" — but newest in
-# WHICH account? Find the freshest transcript for this cwd across the primary
-# and every slot, then route it exactly like a --resume of that session (so a
-# parked owner hands the chat to a healthy account first). Claude names project
-# dirs by replacing every non-alphanumeric in the cwd with a dash.
 cmd_continue_target() { # $1 provider, $2 cwd [--go]
   prov_valid "${1:-}" && [ -n "${2:-}" ] || return 0
   local p="$1" slug d f m best="" best_m=0 sid
@@ -3229,81 +2142,6 @@ cmd_probe() { # $1 provider (default claude), $2 model, [--park]
 # A running agent cannot be re-routed mid-flight — its account is fixed when the
 # process starts — so the honest recovery is: park the exhausted account, copy
 # the transcript to one that works, resume there.
-cmd_rescue() { # [hours] [--go]
-  local hours="${1:-6}" go=""
-  case "${2:-}" in --go) go=1 ;; esac
-  case "${1:-}" in --go) hours=6; go=1 ;; esac
-  local found=0 sid acct proj target
-  while IFS='|' read -r sid acct proj; do
-    [ -n "$sid" ] || continue
-    found=1
-    printf '  %s%s%s in %s\n' "$C_BOLD" "$sid" "$C_OFF" "$acct"
-    printf '    project: %s\n' "$proj"
-    if [ -z "$go" ]; then continue; fi
-    if [ "$acct" != primary ]; then
-      cmd_cooldown claude "$acct" 180 >/dev/null && printf '    parked %s for 180m\n' "$acct"
-    else
-      echo "$(( $(date +%s) + 10800 ))" > "$(pools_dir)/cooldown-claude-primary"
-      printf '    parked the primary for 180m\n'
-    fi
-    target="$(pick_slot claude dry 2>/dev/null || true)"
-    if [ -z "$target" ] || [ "$target" = "$acct" ]; then
-      printf '    %sno healthy account to move it to%s\n' "$C_RED" "$C_OFF"
-      continue
-    fi
-    if [ "$target" = primary ]; then
-      printf '    %sthe only healthy account is your primary — resume with: claude --resume %s%s\n' "$C_DIM" "$sid" "$C_OFF"
-      continue
-    fi
-    cmd_handoff claude "$sid" "$target" >/dev/null 2>&1 &&
-      printf '    moved to %s%s%s — resume with: agent-link run claude %s claude --resume %s\n' "$C_GREEN" "$target" "$C_OFF" "$target" "$sid"
-  done <<EOF
-$(python3 - "$ACCOUNTS" "$HOME" "$hours" <<'PY2'
-import glob, os, sys, time
-accounts_root, home, hours = sys.argv[1], sys.argv[2], float(sys.argv[3])
-since = time.time() - hours * 3600
-seen = set()
-def scan(root, label):
-    for f in glob.glob(os.path.join(root, "projects", "*", "*.jsonl")):
-        try:
-            st = os.stat(f)
-        except OSError:
-            continue
-        if st.st_mtime < since or st.st_size > 25_000_000:
-            continue
-        # Content before the .al-moved floor was copied in from another
-        # account; blaming this account for it would park a healthy account
-        # and move the chat AGAIN — the exact loop the marker exists to stop.
-        floor = 0
-        try:
-            floor = int(open(f + ".al-moved").read().strip())
-        except (OSError, ValueError):
-            pass
-        if st.st_size <= floor:
-            continue
-        try:
-            fh = open(f, errors="ignore")
-            fh.seek(floor)
-            text = fh.read()
-        except OSError:
-            continue
-        if "spend limit" not in text and "usage limit" not in text:
-            continue
-        sid = os.path.basename(f)[:-6]
-        if sid in seen:
-            continue
-        seen.add(sid)
-        print(f"{sid}|{label}|{os.path.basename(os.path.dirname(f)).split('--')[-1]}")
-scan(os.path.join(home, ".claude"), "primary")
-for d in sorted(glob.glob(os.path.join(accounts_root, "claude", "*"))):
-    scan(d, os.path.basename(d))
-PY2
-)
-EOF
-  [ "$found" = 1 ] || echo "  no conversations hit a limit in the last ${hours}h"
-  [ -n "$go" ] || echo "  (add --go to park the account and move these to a healthy one)"
-}
-
 cmd_insights() { # [days]
   local days="${1:-7}"
   python3 - "$ACCOUNTS" "$HOME" "$days" "$(pools_dir)" <<'PY2'
@@ -3507,6 +2345,8 @@ cmd_update() {
   # its Paseo panel drift apart.
   local base d id
   base="$(apps_dir)" || { echo "  no apps to update"; return 0; }
+  install_acp_runtime || update_rc=1
+  configure_paseo_agentlink || update_rc=1
   for d in "$base"/*/; do
     [ -f "$d/app.json" ] || continue
     [ "$(app_state "$d")" = installed ] || continue
@@ -4186,20 +3026,6 @@ cmd_plugin() {
 
 # One key that does the obvious maintenance: sideline accounts that cannot serve
 # your model, move conversations off them, and put every account back in step.
-cmd_fix() { # [model]
-  local model="${1:-}"
-  echo
-  printf '  %s1. testing each account%s\n' "$C_BOLD" "$C_OFF"
-  cmd_probe claude "$model" --park || true
-  printf '  %s2. conversations stopped by a limit%s\n' "$C_BOLD" "$C_OFF"
-  cmd_rescue 6 --go || true
-  printf '  %s3. bringing settings and MCP into line%s\n' "$C_BOLD" "$C_OFF"
-  cmd_sync 2>&1 | sed 's/^/    /'
-  echo
-  printf '  %sdone — current state:%s\n' "$C_BOLD" "$C_OFF"
-  cmd_status
-}
-
 cmd_whoami() { # [provider]
   local p pdir email kind runs nxt
   for p in ${1:-$PROVIDERS}; do
@@ -4624,6 +3450,7 @@ PY
 cmd_doctor() {
   local p ok=0
   command -v python3 >/dev/null || { echo "[!] python3 not found (required)"; ok=1; }
+  command -v node >/dev/null || { echo "[!] node not found (required by the AgentLink ACP provider)"; ok=1; }
   for p in $PROVIDERS; do
     if command -v "$p" >/dev/null; then
       echo "[x] $p binary: $(command -v "$p")"
@@ -4646,6 +3473,12 @@ cmd_doctor() {
     grep -q '^cli_auth_credentials_store *= *"file"' "$d/config.toml" 2>/dev/null \
       || { echo "[!] $(basename "$d"): codex slot missing cli_auth_credentials_store=\"file\" pin"; ok=1; }
   done
+  if [ -x "$SHIM_BIN/agent-link-acp" ]; then
+    echo "[x] AgentLink ACP runtime: $SHIM_BIN/agent-link-acp"
+  else
+    echo "[!] AgentLink ACP runtime missing — run: agent-link auto"
+    ok=1
+  fi
   cmd_route status
   [ "$ok" = 0 ] && echo "All good."
   return "$ok"
@@ -4664,25 +3497,21 @@ cmd_interactive() {
     [ "$parked" != 0 ] && warn="$warn${warn:+ · }$parked parked"
     [ "$blocked" != 0 ] && warn="$warn${warn:+ · }$blocked need sign-in"
     if [ -n "$warn" ]; then
-      printf '\n  %s! %s%s  %spress f to sort it out%s\n' "$C_YELLOW" "$warn" "$C_OFF" "$C_DIM" "$C_OFF"
+      printf '\n  %s! %s%s  %sopen Accounts in Paseo to repair sign-ins%s\n' "$C_YELLOW" "$warn" "$C_OFF" "$C_DIM" "$C_OFF"
     else
       printf '\n  %s✓ every account is signed in and in rotation%s\n' "$C_GREEN" "$C_OFF"
     fi
     echo
-    printf '  %sf%s %sfix everything%s   %sa%s add   %sl%s log in   %sr%s remove\n' \
+    printf '  %sd%s install AgentLink   %sa%s add   %sl%s log in   %sr%s remove\n' \
       "$C_CYAN" "$C_OFF" "$C_BOLD" "$C_OFF" "$C_CYAN" "$C_OFF" "$C_CYAN" "$C_OFF" "$C_CYAN" "$C_OFF"
-    printf '  %sd%s router   %su%s pin   %ss%s shims   %sp%s park   %sk%s unpark   %st%s test model   %sx%s rescue\n' \
-      "$C_CYAN" "$C_OFF" "$C_CYAN" "$C_OFF" "$C_CYAN" "$C_OFF" "$C_CYAN" "$C_OFF" "$C_CYAN" "$C_OFF" "$C_CYAN" "$C_OFF" "$C_CYAN" "$C_OFF"
+    printf '  %su%s pin   %ss%s shims   %sp%s park   %sk%s unpark   %st%s test model\n' \
+      "$C_CYAN" "$C_OFF" "$C_CYAN" "$C_OFF" "$C_CYAN" "$C_OFF" "$C_CYAN" "$C_OFF" "$C_CYAN" "$C_OFF"
     printf '  %si%s insights   %sw%s whoami   %sy%s sync   %sg%s apps   %s?%s doctor   %sq%s quit\n' \
       "$C_CYAN" "$C_OFF" "$C_CYAN" "$C_OFF" "$C_CYAN" "$C_OFF" "$C_CYAN" "$C_OFF" "$C_CYAN" "$C_OFF" "$C_CYAN" "$C_OFF"
     printf '  %s> %s' "$C_CYAN" "$C_OFF"
     # Single keypress when we have a terminal; fall back to a line otherwise.
     if [ -t 0 ]; then read -r -n 1 choice; echo; else read -r choice || return 0; fi
     case "$choice" in
-      f|F)
-        printf '  model to test [claude-fable-5]: '; read -r n
-        cmd_fix "${n:-claude-fable-5}" || true
-        ;;
       a|A)
         printf '  provider (claude/codex): '; read -r p
         printf '  account email: '; read -r e
@@ -4716,11 +3545,6 @@ cmd_interactive() {
         printf '  model [claude-fable-5]: '; read -r n
         printf '  park the ones that refuse? [y/N] '; read -r e
         case "$e" in y|Y) cmd_probe claude "${n:-claude-fable-5}" --park || true ;; *) cmd_probe claude "${n:-claude-fable-5}" || true ;; esac
-        ;;
-      x|X)
-        printf '  look back how many hours? [6] '; read -r n
-        printf '  move them to a healthy account? [y/N] '; read -r e
-        case "$e" in y|Y) cmd_rescue "${n:-6}" --go || true ;; *) cmd_rescue "${n:-6}" || true ;; esac
         ;;
       i|I)
         printf '  days [7]: '; read -r n
@@ -4756,18 +3580,15 @@ usage:
   agent-link use <prov> <email|N|primary>  route plain \`claude\`/\`codex\` to a slot
   agent-link route enable|disable|status   manage the routing shims
   agent-link shims                 write numbered shims: claude-1, claude-2, codex-1 ...
-  agent-link auto                  write auto-routing launchers (one provider, many accounts)
+  agent-link auto                  install the one-chat AgentLink ACP provider
   agent-link pools                 show what auto-routing sees (available / cooling down)
   agent-link cooldown <prov> <email> [min|clear]   park an exhausted account
   agent-link nearing <prov> [email|primary] [clear]  soft-flag an account nearing its limit
   agent-link usage                 /usage across accounts: live window %%, resets, park state
-  agent-link router [install|status]   AgentRouter virtual route: ordered cross-provider Paseo targets
-  agent-link switch [prov] [sid]   move this conversation to a healthy account and print the resume
   agent-link revalidate [prov]     re-prove HELD accounts; release any that serve again
   agent-link prefer <prov> [email|primary] [first|last|clear]  bias routing toward/away from an account
   agent-link cooldown <prov> <email> hold          park with NO expiry (release: clear, or a passing probe)
   agent-link hooks [install|remove|status] [--primary]  wire Claude Code itself to report limits
-  agent-link handoff <prov> <session-id> <email>   move a chat to another account
   agent-link env <prov> <email>    print an eval-able export for one slot
   agent-link run <prov> <email> [cmd...]   run a command under a slot's account
   agent-link claude [args...]      run Claude Code on the next account in rotation
@@ -4778,8 +3599,6 @@ usage:
   agent-link app [list|install|remove] [id] [--link]  optional integrations (Paseo panel, editors)
   agent-link update                update the CLI and reinstall the apps you have
   agent-link toolchain [status|update|enable|disable]  safely keep provider CLIs current
-  agent-link recover [--scan]      detect provider limits and process queued Paseo continuations
-  agent-link fix [model]           test accounts, rescue stuck chats, resync — the one-shot cleanup
   agent-link doctor                sanity checks
 
 slots live in \$AGENT_AUTH_HOME (default ~/.agent-link), one folder per account email.
@@ -4799,15 +3618,12 @@ main() {
     shims)   cmd_shims ;;
     auto)    cmd_auto ;;
     pick)    shift; cmd_pick "$@" ;;
-    handoff) shift; cmd_handoff "$@" ;;
     resume-target) shift; cmd_resume_target "$@" ;;
     continue-target) shift; cmd_continue_target "$@" ;;
     nearing) shift; cmd_nearing "$@" ;;
     prefer)  shift; cmd_prefer "$@" ;;
     usage)   cmd_usage ;;
-    router)  shift; cmd_router "$@" ;;
     revalidate) shift; cmd_revalidate "$@" ;;
-    switch)  shift; cmd_switch "$@" ;;
     refused) shift; cmd_refused "$@" ;;
     hooks)   shift; cmd_hooks "$@" ;;
     pools)   cmd_pools ;;
@@ -4817,8 +3633,6 @@ main() {
     update)  shift; cmd_update "$@" ;;
     toolchain) shift; cmd_toolchain "$@" ;;
     insights) shift; cmd_insights "$@" ;;
-    rescue)  shift; cmd_rescue "$@" ;;
-    recover) shift; cmd_recover "$@" ;;
     probe)   shift; cmd_probe "$@" ;;
     next)    shift; prov_valid "${1:-claude}" && pick_slot "${1:-claude}" dry ;;
     cooldown) shift; cmd_cooldown "$@" ;;
@@ -4827,7 +3641,6 @@ main() {
     remove)  shift; cmd_remove "$@" ;;
     sync)    cmd_sync ;;
     style)   shift; cmd_style "$@" ;;
-    fix)     shift; cmd_fix "$@" ;;
     doctor)  cmd_doctor ;;
     claude|codex) cmd_exec_auto "$@" ;;
     version|--version|-v) echo "$VERSION" ;;

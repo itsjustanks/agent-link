@@ -4,10 +4,8 @@ import { copyFileSync, createReadStream, existsSync, mkdirSync, readFileSync, re
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
-import type { RouteEvent, RouterTraceNode, Slot } from "./contracts.shared";
+import type { RouteEvent, Slot } from "./contracts.shared";
 import { onStart } from "./lifecycle.shared";
-import { ensureLimitSentry } from "./limits.server";
-import { resolveRuntimeModel } from "./model.shared";
 
 const HOME = homedir();
 // Home dir: prefer whichever location actually holds accounts. Picking a
@@ -221,17 +219,6 @@ function providerIdForDir(overrides: ProviderOverrides, provider: "claude" | "co
   return null;
 }
 
-function accountForProvider(provider: string, overrides: ProviderOverrides): string {
-  if (provider === "claude") return claudeAccountEmail(HOME) || "primary";
-  if (provider === "codex") return codexAccountEmail(join(HOME, ".codex")) || "primary";
-  const override = overrides[provider];
-  const claudeDir = override?.env?.CLAUDE_CONFIG_DIR;
-  if (claudeDir) return claudeAccountEmail(claudeDir) || basename(claudeDir);
-  const codexDir = override?.env?.CODEX_HOME;
-  if (codexDir) return codexAccountEmail(codexDir) || basename(codexDir);
-  return "Provider-managed sign-in (not exposed)";
-}
-
 function slugForEmail(provider: string, email: string): string {
   return `${provider}-${email.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")}`;
 }
@@ -334,29 +321,6 @@ function recentRouteEvents(): RouteEvent[] {
   } catch {
     return [];
   }
-}
-
-function routeForAgent(agentId: string): RouteEvent | null {
-  try {
-    const lines = readFileSync(join(poolsDir(), "routes.log"), "utf8").trim().split(/\r?\n/).reverse();
-    for (const line of lines) {
-      const [rawAt, provider, email, decision, group, routedAgentId = "", cwd = "", model = ""] = line.split("\t");
-      if (routedAgentId !== agentId || (provider !== "claude" && provider !== "codex") || !email) continue;
-      if (group !== "preferred" && group !== "standard" && group !== "reserve" && group !== "fallback") continue;
-      const at = Number.parseInt(rawAt ?? "", 10);
-      if (!Number.isFinite(at)) continue;
-      return { at, provider, email, decision: decision || "routed", group, agentId: routedAgentId, cwd, model };
-    }
-  } catch {
-    // No route evidence yet.
-  }
-  return null;
-}
-
-function displayedRouteAccount(route: RouteEvent | null): string {
-  if (!route) return "Unknown (no AgentLink launch record)";
-  if (route.email !== "primary") return route.email;
-  return route.provider === "claude" ? claudeAccountEmail(HOME) || "primary" : codexAccountEmail(join(HOME, ".codex")) || "primary";
 }
 
 export async function handleProbeAccounts({
@@ -482,8 +446,6 @@ function autoWiredId(overrides: ProviderOverrides, provider: "claude" | "codex")
 }
 
 export async function handleScan(_input: Record<string, never>, { paseo }: PluginHandlerContext) {
-  // First panel contact after a daemon start arms the resident limit sentry.
-  ensureLimitSentry(paseo);
   const overrides = await providerOverrides(paseo);
   // Everything the sections below share is read once here, not once per section.
   const baseSettings = readJson(join(HOME, ".claude", "settings.json")) ?? {};
@@ -583,8 +545,8 @@ export async function handleWireAuto({ provider }: { provider: "claude" | "codex
       providers: {
         [providerId]: {
           extends: provider,
-          label: `${provider === "claude" ? "Claude" : "Codex"} (Dynamic Agent Link)`,
-          description: `Chooses an available ${provider} sign-in for each new chat using priority and least-recently-used order`,
+          label: `${provider === "claude" ? "Claude" : "Codex"} (Legacy AgentLink)`,
+          description: "Kept for native legacy sessions. Start new multi-account chats with AgentLink.",
           command: [launcher],
         },
       },
@@ -595,7 +557,7 @@ export async function handleWireAuto({ provider }: { provider: "claude" | "codex
     ok: true,
     providerId,
     message: refreshed
-      ? `Installed '${providerId}'. It is available for new chats.`
+      ? `Installed legacy provider '${providerId}'. Use AgentLink for new chats.`
       : `Installed '${providerId}'. Use Paseo reload if it does not appear yet.`,
   };
 }
@@ -759,12 +721,6 @@ function currentRouterRules(): string {
   }
 }
 
-function agentLinkBinary(): string | null {
-  return searchPath()
-    .flatMap((directory) => [join(directory, "agent-link"), join(directory, "agent-auth")])
-    .find(existsSync) ?? null;
-}
-
 type RouterAccountOption = {
   provider: "claude" | "codex";
   id: string;
@@ -785,7 +741,6 @@ function routerAccountOptions(overrides: ProviderOverrides, availability: Map<st
     const primaryAvailable = providerReady && Boolean(primaryEmail) && !activelyParked(provider, "primary") && cooldownUntil(provider, "primary") === 0;
     const slotAvailable = (slot: (typeof familySlots)[number]) =>
       providerReady && slot.loggedIn && !slot.wrongAccount && !activelyParked(provider, slot.email) && cooldownUntil(provider, slot.email) === 0;
-    const autoId = autoWiredId(overrides, provider) ?? `${provider}-auto`;
     const anyAvailable = primaryAvailable || familySlots.some(slotAvailable);
     options.push({
       provider,
@@ -794,8 +749,8 @@ function routerAccountOptions(overrides: ProviderOverrides, availability: Map<st
       description: anyAvailable
         ? "Chooses by health, priority and least recent use"
         : "No healthy account is currently available",
-      available: existsSync(autoLauncherPath(provider)) && availability.get(autoId) !== false && anyAvailable,
-      resolvedProvider: autoId,
+      available: anyAvailable,
+      resolvedProvider: provider,
     });
     options.push({
       provider,
@@ -833,7 +788,7 @@ function logicalProviderOptions(
 ) {
   const hidden = new Set(accounts.flatMap((entry) => entry.resolvedProvider === entry.provider ? [] : [entry.resolvedProvider]));
   const options = [...availability.entries()]
-    .filter(([id]) => id !== ROUTER_PROVIDER_ID && !hidden.has(id) && id !== "claude-auto" && id !== "codex-auto")
+    .filter(([id]) => id !== "agent-link" && id !== ROUTER_PROVIDER_ID && !hidden.has(id) && id !== "claude-auto" && id !== "codex-auto")
     .map(([id, available]) => ({ id, label: labels.get(id) ?? id, available }));
   for (const provider of ["claude", "codex"] as const) {
     const family = accounts.filter((entry) => entry.provider === provider);
@@ -851,7 +806,7 @@ function logicalProviderOptions(
 }
 
 async function routerProviderStatus(paseo: PluginHandlerContext["paseo"], message = "") {
-  const launcherPath = join(AGENT_LINK_HOME_DIR, "bin", ROUTER_PROVIDER_ID);
+  const launcherPath = join(AGENT_LINK_HOME_DIR, "bin", "agent-link-acp");
   const rulesPath = routerRulesPath();
   const config = currentRouterConfig();
   const overrides = await providerOverrides(paseo);
@@ -865,7 +820,7 @@ async function routerProviderStatus(paseo: PluginHandlerContext["paseo"], messag
       availability.set(entry.provider, entry.available);
       providerLabels.set(entry.provider, entry.label ?? providerLabel(entry.provider, overrides));
     }
-    loaded = availability.get(ROUTER_PROVIDER_ID) === true;
+    loaded = availability.get("agent-link") === true;
     const modelResult = (await paseo.providers.listModels("claude" as never)) as unknown as {
       models?: Array<{ id?: string; label?: string; name?: string; model?: string }>;
     };
@@ -876,19 +831,16 @@ async function routerProviderStatus(paseo: PluginHandlerContext["paseo"], messag
     // Configured remains useful when an older daemon cannot report availability.
   }
   const accountOptions = routerAccountOptions(overrides, availability);
-  const selectedController = accountOptions.find(
-    (entry) => entry.provider === "claude" && entry.id === config.controllerAccount,
-  );
-  const installed = existsSync(launcherPath) && existsSync(rulesPath);
-  const configured = Boolean(overrides[ROUTER_PROVIDER_ID]);
+  const installed = existsSync(launcherPath);
+  const configured = Boolean(overrides["agent-link"]);
   return {
     installed,
     configured,
     loaded,
     launcherPath,
     rulesPath,
-    baseProvider: selectedController?.label ?? (config.controllerProvider === "claude-auto" ? "Claude · automatic sign-in" : "Claude · default sign-in"),
-    baseModel: config.controllerModel,
+    baseProvider: "AgentLink",
+    baseModel: ROUTER_VIRTUAL_MODEL,
     controllerProvider: config.controllerProvider,
     controllerAccount: config.controllerAccount,
     controllerModel: config.controllerModel,
@@ -900,70 +852,24 @@ async function routerProviderStatus(paseo: PluginHandlerContext["paseo"], messag
       ...group,
       targets: group.targets.map((target) => ({
         ...target,
-        available: availability.has(target.resolvedProvider) ? availability.get(target.resolvedProvider) ?? false : null,
+        available: availability.has(target.provider) ? availability.get(target.provider) ?? false : null,
       })),
     })),
     userRules: currentRouterRules(),
     message:
       message ||
       (loaded
-        ? "AgentRouter is ready in Paseo's provider picker."
+        ? "AgentRouter is ready as AgentLink's Automatic model."
         : configured
-          ? "AgentRouter is saved. Refresh providers if it does not appear yet."
+          ? "AgentLink is saved. Refresh providers if its Automatic model does not appear yet."
           : installed
-            ? "The AgentRouter command is ready. Add it to Paseo's provider list."
-            : "AgentRouter is not installed."),
+            ? "The AgentLink runtime is ready. Add AgentLink to Paseo's provider list."
+            : "AgentLink is not installed."),
   };
 }
 
 export async function handleRouterStatus(_input: Record<string, never>, { paseo }: PluginHandlerContext) {
   return routerProviderStatus(paseo);
-}
-
-export async function handleRouterInstall(_input: Record<string, never>, { paseo }: PluginHandlerContext) {
-  const binary = agentLinkBinary();
-  if (!binary) return routerProviderStatus(paseo, "Install the AgentLink CLI first.");
-  try {
-    execFileSync(binary, ["router", "install"], {
-      encoding: "utf8",
-      timeout: 15_000,
-      env: { ...process.env, AGENT_LINK_HOME: AGENT_LINK_HOME_DIR },
-    });
-    const launcherPath = join(AGENT_LINK_HOME_DIR, "bin", ROUTER_PROVIDER_ID);
-    if (!existsSync(launcherPath)) return routerProviderStatus(paseo, "AgentRouter launcher was not created.");
-    await paseo.config.patch({
-      agents: {
-        providers: {
-          [ROUTER_PROVIDER_ID]: {
-            extends: "claude",
-            label: "AgentRouter",
-            description: "Reads each request, then chooses an available Paseo provider and model from your preferred order",
-            command: [launcherPath],
-            models: [
-              {
-                id: ROUTER_VIRTUAL_MODEL,
-                label: "Automatic route",
-                description: "Chooses and records the provider and model that performs the task",
-                isDefault: true,
-              },
-            ],
-          },
-        },
-      },
-    } as never);
-    const refreshed = await refreshProviders(paseo, [ROUTER_PROVIDER_ID]);
-    return routerProviderStatus(
-      paseo,
-      refreshed
-        ? "AgentRouter is ready for new chats."
-        : "AgentRouter is installed. Use Paseo reload if it does not appear yet.",
-    );
-  } catch (caught) {
-    return routerProviderStatus(
-      paseo,
-      `AgentRouter install failed: ${caught instanceof Error ? caught.message.split("\n")[0] : String(caught)}`,
-    );
-  }
 }
 
 export async function handleRouterConfigure(
@@ -978,28 +884,17 @@ export async function handleRouterConfigure(
   if (new Set(input.targetGroups.map((group) => group.name)).size !== input.targetGroups.length) {
     return routerProviderStatus(context.paseo, "Every work type needs a different name.");
   }
-  const overrides = await providerOverrides(context.paseo);
   const slots = collectSlots();
-  const providerPatches: Record<string, NonNullable<ProviderOverrides[string]>> = {};
   const resolveTarget = (target: RouterTargetInput): RouterTarget => {
     if (target.provider !== "claude" && target.provider !== "codex") {
       return { ...target, account: "provider", resolvedProvider: target.provider };
     }
     const provider = target.provider;
     if (target.account === "auto") {
-      const launcher = autoLauncherPath(provider);
-      if (!existsSync(launcher)) throw new Error(`${provider} automatic account selection is not installed.`);
-      const providerId = autoWiredId(overrides, provider) ?? `${provider}-auto`;
-      providerPatches[providerId] = {
-        extends: provider,
-        label: `${provider === "claude" ? "Claude" : "Codex"} (Dynamic Agent Link)`,
-        command: [launcher],
-      };
-      return { ...target, resolvedProvider: providerId };
+      return { ...target, resolvedProvider: provider };
     }
     if (target.account === "primary") {
-      const primaryDir = provider === "claude" ? HOME : join(HOME, ".codex");
-      const email = provider === "claude" ? claudeAccountEmail(HOME) : codexAccountEmail(primaryDir);
+      const email = provider === "claude" ? claudeAccountEmail(HOME) : codexAccountEmail(join(HOME, ".codex"));
       if (!email || activelyParked(provider, "primary") || cooldownUntil(provider, "primary") > 0) {
         throw new Error(`${provider} primary account is not available. Choose Automatic or another healthy account.`);
       }
@@ -1010,14 +905,7 @@ export async function handleRouterConfigure(
     if (!slot.loggedIn || slot.wrongAccount || activelyParked(provider, slot.email) || cooldownUntil(provider, slot.email) > 0) {
       throw new Error(`${slot.actualEmail || slot.email} is not available. Choose Automatic or another healthy account.`);
     }
-    const providerId = providerIdForDir(overrides, provider, slot.dir) ?? slugForEmail(provider, slot.email);
-    providerPatches[providerId] = {
-      extends: provider,
-      label: `${provider === "claude" ? "Claude" : "Codex"} · ${slot.actualEmail || slot.email}`,
-      description: `${provider} pinned to ${slot.actualEmail || slot.email} by AgentLink`,
-      env: { [envVarFor(provider)]: slot.dir },
-    };
-    return { ...target, resolvedProvider: providerId };
+    return { ...target, resolvedProvider: provider };
   };
   let resolvedGroups: RouterTargetGroup[];
   try {
@@ -1028,25 +916,12 @@ export async function handleRouterConfigure(
   } catch (error) {
     return routerProviderStatus(context.paseo, error instanceof Error ? error.message : String(error));
   }
-  let controllerProvider: RouterController = "claude-auto";
-  let controllerConfigDir = "";
-  if (input.controllerAccount === "primary") {
-    if (!claudeAccountEmail(HOME) || activelyParked("claude", "primary") || cooldownUntil("claude", "primary") > 0) {
-      return routerProviderStatus(context.paseo, "The primary Claude account is unavailable. Use Automatic or another healthy request-reader account.");
-    }
-    controllerProvider = "claude";
-  } else if (input.controllerAccount !== "auto") {
-    const slot = slots.find((entry) => entry.provider === "claude" && entry.email === input.controllerAccount);
-    if (!slot || !slot.loggedIn || slot.wrongAccount || activelyParked("claude", slot.email) || cooldownUntil("claude", slot.email) > 0) {
-      return routerProviderStatus(context.paseo, "That request-reader account is unavailable. Use Automatic or another healthy Claude account.");
-    }
-    controllerProvider = "claude";
-    controllerConfigDir = slot.dir;
-  }
-  if (Object.keys(providerPatches).length > 0) {
-    await context.paseo.config.patch({ agents: { providers: providerPatches } } as never);
-    await refreshProviders(context.paseo, Object.keys(providerPatches));
-  }
+  // Retain these fields for backward-compatible config parsing. AgentRouter now
+  // classifies locally, so it never spends a separate request-reader turn.
+  const controllerProvider: RouterController = input.controllerAccount === "auto" ? "claude-auto" : "claude";
+  const controllerConfigDir = input.controllerAccount === "auto" || input.controllerAccount === "primary"
+    ? ""
+    : slots.find((entry) => entry.provider === "claude" && entry.email === input.controllerAccount)?.dir ?? "";
   mkdirSync(join(AGENT_LINK_HOME_DIR, "router"), { recursive: true });
   backupFile(routerConfigPath());
   backupFile(routerRulesPath());
@@ -1058,8 +933,8 @@ export async function handleRouterConfigure(
     targetGroups: resolvedGroups.map((group) => ({ ...group, selector: undefined })),
   });
   writeTextAtomic(routerRulesPath(), input.userRules.endsWith("\n") ? input.userRules : `${input.userRules}\n`);
-  const status = await handleRouterInstall({}, context);
-  return { ...status, message: "AgentRouter choices saved for new chats." };
+  const status = await routerProviderStatus(context.paseo);
+  return { ...status, message: "AgentRouter choices saved for AgentLink's Automatic model." };
 }
 
 export async function handleRouterModels({ provider }: { provider: string }, { paseo }: PluginHandlerContext) {
@@ -1083,327 +958,6 @@ export async function handleRouterModels({ provider }: { provider: string }, { p
       models: [],
       message: `Model catalog unavailable: ${error instanceof Error ? error.message.split("\n")[0] : String(error)}`,
     };
-  }
-}
-
-type ListedAgentRecord = {
-  id?: string;
-  provider?: string;
-  title?: string | null;
-  status?: string;
-  model?: string | null;
-  archivedAt?: string | null;
-  labels?: Record<string, string>;
-  createdAt?: string;
-  updatedAt?: string;
-  lastActivityAt?: string;
-};
-
-async function listedAgentById(agentId: string, paseo: PluginHandlerContext["paseo"]): Promise<ListedAgentRecord | null> {
-  let cursor: string | undefined;
-  do {
-    const page = await paseo.agents.list({
-      filter: { includeArchived: true },
-      sort: [{ key: "updated_at", direction: "desc" }],
-      page: { limit: 200, ...(cursor ? { cursor } : {}) },
-    });
-    for (const entry of page.entries as unknown[]) {
-      const raw = entry as Record<string, unknown>;
-      const agent = ((raw.agent as ListedAgentRecord | undefined) ?? raw) as ListedAgentRecord;
-      if (agent.id === agentId) return agent;
-    }
-    cursor = page.pageInfo.hasMore ? page.pageInfo.nextCursor ?? undefined : undefined;
-  } while (cursor);
-  return null;
-}
-
-async function currentContinuationForRoot(
-  rootId: string,
-  preferredId: string,
-  paseo: PluginHandlerContext["paseo"],
-): Promise<ListedAgentRecord | null> {
-  const page = await paseo.agents.list({
-    filter: { labels: { "agent-link-continuation-root": rootId }, includeArchived: false },
-    page: { limit: 100 },
-  });
-  const candidates = page.entries.flatMap((entry: unknown) => {
-    const raw = entry as unknown as Record<string, unknown>;
-    const agent = ((raw.agent as ListedAgentRecord | undefined) ?? raw) as ListedAgentRecord;
-    return agent.id && agent.labels?.["agent-link-continuation-current"] === "true" ? [agent] : [];
-  });
-  return candidates.find((candidate) => candidate.id === preferredId) ?? candidates.sort((a, b) =>
-    Date.parse(b.lastActivityAt ?? b.updatedAt ?? b.createdAt ?? "") - Date.parse(a.lastActivityAt ?? a.updatedAt ?? a.createdAt ?? "")
-  )[0] ?? null;
-}
-
-async function listedAgentChildren(parentAgentId: string, paseo: PluginHandlerContext["paseo"]): Promise<ListedAgentRecord[]> {
-  const page = await paseo.agents.list({
-    filter: { labels: { "paseo.parent-agent-id": parentAgentId }, includeArchived: true },
-    page: { limit: 100 },
-  });
-  return page.entries.map((entry: unknown) => {
-    const raw = entry as unknown as Record<string, unknown>;
-    return ((raw.agent as ListedAgentRecord | undefined) ?? raw) as ListedAgentRecord;
-  });
-}
-
-function paseoCliPath(): string {
-  const candidates = [
-    ...searchPath().map((directory) => join(directory, "paseo")),
-    "/Applications/Paseo.app/Contents/Resources/bin/paseo",
-  ];
-  return candidates.find((candidate) => existsSync(candidate)) ?? "";
-}
-
-function updatePaseoAgentLabels(agentId: string, labels: Record<string, string>): void {
-  const paseoCli = paseoCliPath();
-  if (!paseoCli) throw new Error("Paseo CLI was not found on the daemon machine");
-  const args = ["agent", "update", agentId, "--json"];
-  for (const [key, value] of Object.entries(labels)) args.push("--label", `${key}=${value}`);
-  execFileSync(paseoCli, args, { encoding: "utf8", timeout: 20_000 });
-}
-
-async function adoptContinuationTree({
-  sourceId,
-  targetId,
-  rootId,
-  children,
-  openTabLabels,
-  paseo,
-}: {
-  sourceId: string;
-  targetId: string;
-  rootId: string;
-  children: ListedAgentRecord[];
-  openTabLabels: string[];
-  paseo: PluginHandlerContext["paseo"];
-}): Promise<{ carried: string[]; detached: string[]; warnings: string[] }> {
-  const carried: string[] = [];
-  const detached: string[] = [];
-  const warnings: string[] = [];
-  for (const child of children) {
-    if (!child.id || child.archivedAt || child.id === targetId) continue;
-    try {
-      updatePaseoAgentLabels(child.id, {
-        "paseo.parent-agent-id": targetId,
-        "agent-link-continuation-root": rootId,
-      });
-      carried.push(child.id);
-    } catch (error) {
-      try {
-        await paseo.agents.ref(child.id).detach();
-        detached.push(child.id);
-      } catch (detachError) {
-        warnings.push(`${child.id}: ${detachError instanceof Error ? detachError.message : String(detachError || error)}`);
-      }
-    }
-  }
-  try {
-    updatePaseoAgentLabels(sourceId, {
-      "paseo.parent-agent-id": targetId,
-      "agent-link-continuation-root": rootId,
-      "agent-link-superseded-by": targetId,
-      "agent-link-history-segment": "true",
-      "agent-link-continuation-current": "false",
-      ...Object.fromEntries(openTabLabels.map((key) => [key, "false"])),
-    });
-  } catch (error) {
-    warnings.push(`source ${sourceId}: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  return { carried, detached, warnings };
-}
-
-export async function handleRouterTrace({ agentId }: { agentId: string }, { paseo }: PluginHandlerContext) {
-  const requested = await listedAgentById(agentId, paseo);
-  if (!requested) return { isAgentRouter: false, canMoveAccount: false, summary: "Agent is no longer available.", nodes: [] };
-  const labels = requested.labels ?? {};
-  const rootId = labels["agent-link-continuation-root"] ?? labels["agent-link-continuation-of"] ?? requested.id ?? agentId;
-  const current = labels["agent-link-history-segment"] === "true" || labels["agent-link-continuation-current"] === "false"
-    ? await currentContinuationForRoot(rootId, labels["agent-link-superseded-by"] ?? "", paseo)
-    : null;
-  const handle = paseo.agents.ref(current?.id ?? requested.id ?? agentId);
-  const refreshed = await handle.refresh();
-  const agent = refreshed?.agent;
-  if (!agent) return { isAgentRouter: false, canMoveAccount: false, summary: "Agent is no longer available.", nodes: [] };
-  const controlIdentity = resolveRuntimeModel(agent.provider, agent.model);
-  const isAgentRouter = controlIdentity.provider === ROUTER_PROVIDER_ID;
-  const controlRoute = routeForAgent(agent.id);
-  const overrides = await providerOverrides(paseo);
-
-  const nodes: RouterTraceNode[] = [
-    {
-      source: "control" as const,
-      id: agent.id,
-      title: agent.title ?? "Agent",
-      ...controlIdentity,
-      status: agent.status,
-      note: isAgentRouter ? "Reads the request and chooses the model that will answer." : controlRoute?.decision ?? "This chat uses its selected provider directly.",
-      account: controlRoute
-        ? displayedRouteAccount(controlRoute)
-        : isAgentRouter
-          ? currentRouterConfig().controllerAccount
-          : accountForProvider(controlIdentity.provider, overrides),
-      routedAt: controlRoute?.at ?? 0,
-    },
-  ];
-
-  let children: ListedAgentRecord[] = [];
-  try {
-    children = await listedAgentChildren(agent.id, paseo);
-  } catch {
-    // A legacy daemon may not support label filters; the control row still loads.
-  }
-  for (const child of children) {
-    const identity = resolveRuntimeModel(child.provider, child.model);
-    const childRoute = child.id ? routeForAgent(child.id) : null;
-    nodes.push({
-      source: "paseo" as const,
-      id: child.id ?? "unknown",
-      title: child.title ?? "Answering model",
-      ...identity,
-      status: child.archivedAt ? "archived" : child.status ?? "unknown",
-      note: "This provider and model performed the delegated work.",
-      account: childRoute ? displayedRouteAccount(childRoute) : accountForProvider(identity.provider, overrides),
-      routedAt: childRoute?.at ?? 0,
-    });
-  }
-
-  if (children.length === 0) {
-    try {
-      const timeline = await handle.timeline.refetch({ direction: "tail", limit: 300, projection: "canonical" });
-      for (const row of timeline.entries) {
-        const item = row.item;
-        if (item.type !== "tool_call" || item.detail.type !== "sub_agent") continue;
-        if (nodes.some((node) => node.id === item.callId)) continue;
-        nodes.push({
-          source: "provider-internal" as const,
-          id: item.callId,
-          title: item.detail.description ?? item.detail.subAgentType ?? "Provider helper",
-          provider: `${agent.provider} internal`,
-          model: "Unknown (runtime not exposed)",
-          status: item.status,
-          note: "This helper ran inside the provider, so Paseo cannot report its exact model.",
-          account: "Unknown (provider-internal)",
-          routedAt: 0,
-        });
-      }
-    } catch {
-      // An archived timeline may no longer be available.
-    }
-  }
-
-  const concrete = nodes.filter((node) => node.source === "paseo");
-  const internal = nodes.filter((node) => node.source === "provider-internal");
-  const summary = concrete.length > 0
-    ? `${concrete.length} answering model${concrete.length === 1 ? "" : "s"} recorded.`
-    : internal.length > 0
-      ? "The provider used an internal helper whose exact model was not reported."
-      : isAgentRouter
-        ? "No answering model is recorded yet; only the request reader ran."
-        : "This agent runs directly; its provider and model are shown below.";
-  return { isAgentRouter, canMoveAccount: Boolean(controlRoute), summary, nodes };
-}
-
-export async function handleAgentContinue(
-  {
-    agentId,
-    provider,
-    model,
-    account,
-    thinking,
-  }: { agentId: string; provider: string; model: string; account: string; thinking: string },
-  { paseo }: PluginHandlerContext,
-) {
-  try {
-    const requested = await listedAgentById(agentId, paseo);
-    if (!requested) return { ok: false, agentId: null, message: "The source chat is no longer available." };
-    const requestedLabels = requested.labels ?? {};
-    const requestedRootId = requestedLabels["agent-link-continuation-root"] ?? requestedLabels["agent-link-continuation-of"] ?? requested.id ?? agentId;
-    const current = requestedLabels["agent-link-history-segment"] === "true" || requestedLabels["agent-link-continuation-current"] === "false"
-      ? await currentContinuationForRoot(requestedRootId, requestedLabels["agent-link-superseded-by"] ?? "", paseo)
-      : null;
-    const sourceId = current?.id ?? requested.id ?? agentId;
-    const refreshed = await paseo.agents.ref(sourceId).refresh();
-    const source = refreshed?.agent;
-    if (!source) return { ok: false, agentId: null, message: "The source chat is no longer available." };
-    const rootId = source.labels["agent-link-continuation-root"] ?? source.labels["agent-link-continuation-of"] ?? source.id;
-    if (source.status === "running" || source.status === "initializing") {
-      return { ok: false, agentId: null, message: "Wait for the current turn to stop before continuing in another provider." };
-    }
-    const sourceParentId = source.labels["paseo.parent-agent-id"] ?? "";
-    const openTabLabels = Object.entries(source.labels).flatMap(([key, value]) =>
-      key.startsWith("paseo.open-agent-tab.") && value === "true" ? [key] : []
-    );
-    const children = await listedAgentChildren(source.id, paseo);
-    const activeChildIds = children.flatMap((child) => child.id && !child.archivedAt ? [child.id] : []);
-    let resolvedProvider = provider;
-    let accountLabel = "provider account";
-    if (provider === "claude" || provider === "codex") {
-      if (account === "auto") {
-        const result = await handleWireAuto({ provider }, { paseo } as PluginHandlerContext);
-        if (!result.ok) return { ok: false, agentId: null, message: result.message };
-        resolvedProvider = result.providerId ?? `${provider}-auto`;
-        accountLabel = "automatic healthy account";
-      } else if (account === "primary") {
-        if (activelyParked(provider, "primary") || cooldownUntil(provider, "primary") > 0) {
-          return { ok: false, agentId: null, message: `${provider} primary account is unavailable.` };
-        }
-        accountLabel = "primary account";
-      } else {
-        const slot = collectSlots().find((entry) => entry.provider === provider && entry.email === account);
-        if (!slot || !slot.loggedIn || slot.wrongAccount || activelyParked(provider, account) || cooldownUntil(provider, account) > 0) {
-          return { ok: false, agentId: null, message: `${provider} account '${account}' is unavailable.` };
-        }
-        const wired = await handleWireProvider(
-          { provider, email: slot.actualEmail || slot.email, dir: slot.dir },
-          { paseo } as PluginHandlerContext,
-        );
-        resolvedProvider = wired.providerId;
-        accountLabel = slot.actualEmail || slot.email;
-      }
-    }
-    const target = `${resolvedProvider}/${model}`;
-    const childNote = activeChildIds.length > 0
-      ? ` Existing live Paseo children to preserve: ${activeChildIds.join(", ")}.`
-      : "";
-    const prompt =
-      `AgentLink provider continuation for logical task ${rootId}, replacing Paseo execution segment ${source.id}. Continue using ${target} (${accountLabel}). ` +
-      `First run \`paseo agent logs ${source.id}\` and inspect the current workspace and git diff. ` +
-      `Continue from the first incomplete step; do not redo completed work. Preserve every user constraint and existing agent/subagent result.${childNote} ` +
-      `Begin with one short line: \`Continued from ${source.id} on ${target}\` and then take the next action.`;
-    const options = {
-      config: { provider: target, thinkingOptionId: thinking },
-      title: (source.title ?? "Agent").slice(0, 120),
-      prompt,
-      labels: {
-        "agent-link-continuation-of": source.id,
-        "agent-link-continuation-root": rootId,
-        "agent-link-continuation-current": "true",
-        "agent-link-manual-provider-switch": "true",
-        ...Object.fromEntries(openTabLabels.map((key) => [key, "true"])),
-        ...(sourceParentId ? { "paseo.parent-agent-id": sourceParentId } : {}),
-      },
-    };
-    const created = source.workspaceId
-      ? await paseo.workspaces.ref(source.workspaceId).agents.create(options)
-      : await paseo.agents.create({ ...options, cwd: source.cwd });
-    const adoption = await adoptContinuationTree({
-      sourceId: source.id,
-      targetId: created.id,
-      rootId,
-      children,
-      openTabLabels,
-      paseo,
-    });
-    const carried = adoption.carried.length > 0 ? ` · carried ${adoption.carried.length} subagent${adoption.carried.length === 1 ? "" : "s"}` : "";
-    const warning = adoption.warnings.length > 0
-      ? ` Continuity warning: ${adoption.warnings.join("; ")}`
-      : adoption.detached.length > 0
-        ? ` ${adoption.detached.length} subagent${adoption.detached.length === 1 ? " was" : "s were"} detached safely because reparenting was unavailable.`
-        : "";
-    return { ok: true, agentId: created.id, message: `Continued task on ${target} · ${accountLabel}${carried}.${warning}` };
-  } catch (error) {
-    return { ok: false, agentId: null, message: error instanceof Error ? error.message : String(error) };
   }
 }
 
@@ -1485,7 +1039,7 @@ export async function handleSetPreference({
     updateLineSet(join(state, `prefer-${provider}-first`), email, preference === "preferred");
     updateLineSet(join(state, `prefer-${provider}-last`), email, preference === "reserve");
     const label = preference === "preferred" ? "priority" : preference === "reserve" ? "reserve" : "default";
-    return { ok: true, message: `${provider} · ${email} now has ${label} priority for new chats.` };
+    return { ok: true, message: `${provider} · ${email} now has ${label} priority for AgentRouter turns.` };
   } catch (error) {
     return { ok: false, message: error instanceof Error ? error.message : String(error) };
   }
@@ -1554,7 +1108,7 @@ export async function handleRemoveAccount(
         shims = " Numbered launchers need a refresh: agent-link shims.";
       }
     }
-    return { ok: true, message: `${email} removed from new-chat selection and archived at ${archived}.${shims}` };
+    return { ok: true, message: `${email} removed from AgentLink and archived at ${archived}.${shims}` };
   } catch (error) {
     return { ok: false, message: error instanceof Error ? error.message : String(error) };
   }
@@ -1575,7 +1129,7 @@ export async function handleSetCooldown({
       rmSync(file, { force: true });
       rmSync(join(poolsDir(), `hold-${provider}-${email}`), { force: true });
       rmSync(join(poolsDir(), `reason-${provider}-${email}`), { force: true });
-      return { ok: true, message: `${email} is available for new chats again.` };
+      return { ok: true, message: `${email} is available in AgentLink again.` };
     }
     mkdirSync(poolsDir(), { recursive: true });
     writeFileSync(file, String(Math.floor(Date.now() / 1000) + minutes * 60));
