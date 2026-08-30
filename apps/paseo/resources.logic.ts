@@ -114,7 +114,13 @@ export function planGovernorActions(
   candidates: ProcessRow[],
   ownedPausedPids: ReadonlySet<number>,
   freePercent: number | null,
-  options: { maxActive: number; pauseAtPercent: number; resumeAtPercent: number; pressureMinRssKb: number },
+  options: {
+    maxActive: number;
+    pauseAtPercent: number;
+    resumeAtPercent: number;
+    pressureMinRssKb: number;
+    pressureActive?: boolean;
+  },
 ): GovernorPlan {
   const active = candidates
     .filter((row) => !row.state.includes("T"))
@@ -123,7 +129,7 @@ export function planGovernorActions(
     .filter((row) => row.state.includes("T") && ownedPausedPids.has(row.pid))
     .sort((a, b) => b.elapsedSeconds - a.elapsedSeconds);
 
-  if (freePercent !== null && freePercent <= options.pauseAtPercent) {
+  if (options.pressureActive || (freePercent !== null && freePercent <= options.pauseAtPercent)) {
     return {
       pause: active.filter((row) => row.rssKb >= options.pressureMinRssKb),
       resume: [],

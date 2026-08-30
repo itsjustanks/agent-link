@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { onShutdown, onStart } from "./lifecycle.shared";
 import { parseProcessTable, paseoTypechecks, planGovernorActions, type ProcessRow } from "./resources.logic";
-import type { ResourceEvent, ResourceProcess, ResourceStatus } from "./resources.shared";
+import type { FleetGuard, ResourceEvent, ResourceProcess, ResourceStatus } from "./resources.shared";
 
 // This governor is intentionally narrow. It does not kill agents, cap Node's
 // heap or touch work launched from Terminal. It only SIGSTOPs TypeScript checks
@@ -25,6 +25,8 @@ const PAUSE_AT_PERCENT = percent(process.env.AGENT_LINK_MEMORY_PAUSE_PERCENT, 15
 const RESUME_AT_PERCENT = Math.max(PAUSE_AT_PERCENT + 1, percent(process.env.AGENT_LINK_MEMORY_RESUME_PERCENT, 25));
 const POLL_MS = positiveInt(process.env.AGENT_LINK_RESOURCE_POLL_SECONDS, 5) * 1000;
 const PRESSURE_MIN_RSS_KB = 512 * 1024;
+const FLEET_STATUS_PATH = process.env.AGENT_LINK_FLEET_STATUS_PATH ?? "/run/paseo-fleet-watchdog/status.json";
+const FLEET_STATUS_MAX_AGE_MS = positiveInt(process.env.AGENT_LINK_FLEET_STATUS_MAX_AGE_SECONDS, 180) * 1000;
 
 type PausedRecord = ResourceProcess & { fingerprint: string };
 type Persisted = { enabled: boolean; paused: PausedRecord[]; events: ResourceEvent[] };
@@ -33,6 +35,7 @@ let state = loadState();
 let timer: ReturnType<typeof setInterval> | null = null;
 let watching = false;
 let freePercent: number | null = null;
+let fleetGuard = readFleetGuard();
 let activeTypechecks = 0;
 let ticking = false;
 
@@ -101,6 +104,42 @@ function currentFreePercent(): number | null {
     }
   }
   return null;
+}
+
+function readFleetGuard(now = Date.now()): FleetGuard {
+  const unavailable: FleetGuard = {
+    available: false,
+    fresh: false,
+    pressured: false,
+    reasons: [],
+    healthyCount: 0,
+    instanceCount: 0,
+    checkedAt: null,
+  };
+  try {
+    const raw = JSON.parse(readFileSync(FLEET_STATUS_PATH, "utf8")) as {
+      generated_at?: unknown;
+      healthy_count?: unknown;
+      instance_count?: unknown;
+      pressure?: { pressured?: unknown; reasons?: unknown };
+    };
+    const checkedAt = typeof raw.generated_at === "string" ? raw.generated_at : null;
+    const checkedAtMs = checkedAt ? Date.parse(checkedAt) : Number.NaN;
+    const fresh = Number.isFinite(checkedAtMs) && Math.abs(now - checkedAtMs) <= FLEET_STATUS_MAX_AGE_MS;
+    return {
+      available: true,
+      fresh,
+      pressured: fresh && raw.pressure?.pressured === true,
+      reasons: Array.isArray(raw.pressure?.reasons)
+        ? raw.pressure.reasons.filter((reason): reason is string => typeof reason === "string").slice(0, 5)
+        : [],
+      healthyCount: typeof raw.healthy_count === "number" ? raw.healthy_count : 0,
+      instanceCount: typeof raw.instance_count === "number" ? raw.instance_count : 0,
+      checkedAt,
+    };
+  } catch {
+    return unavailable;
+  }
 }
 
 function fingerprint(command: string): string {
@@ -184,6 +223,7 @@ function tick(): void {
       if (row && !candidatePids.has(entry.pid)) resume(row, "process left the Paseo agent tree");
     }
     freePercent = currentFreePercent();
+    fleetGuard = readFleetGuard();
     activeTypechecks = candidates.filter((row) => !row.state.includes("T")).length;
     if (!state.enabled) {
       for (const row of candidates) resume(row, "guard disabled");
@@ -195,10 +235,13 @@ function tick(): void {
       pauseAtPercent: PAUSE_AT_PERCENT,
       resumeAtPercent: RESUME_AT_PERCENT,
       pressureMinRssKb: PRESSURE_MIN_RSS_KB,
+      pressureActive: fleetGuard.pressured,
     });
     const pauseReason =
       plan.reason === "pressure"
-        ? `memory pressure (${freePercent}% available)`
+        ? fleetGuard.pressured
+          ? `fleet memory pressure (${fleetGuard.reasons.join("; ") || "watchdog cooldown active"})`
+          : `memory pressure (${freePercent}% available)`
         : `another Paseo type-check is already running (limit ${MAX_ACTIVE})`;
     for (const row of plan.pause) pause(row, pauseReason);
     for (const row of plan.resume) resume(row, `memory recovered; type-check lane available`);
@@ -256,6 +299,7 @@ function status(): ResourceStatus {
     enabled: state.enabled,
     freePercent,
     activeTypechecks,
+    fleetGuard,
     paused: state.paused.map(({ fingerprint: _fingerprint, ...entry }) => entry),
     events: state.events,
   };

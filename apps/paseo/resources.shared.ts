@@ -19,11 +19,23 @@ export const ResourceEventSchema = z.object({
 });
 export type ResourceEvent = z.infer<typeof ResourceEventSchema>;
 
+export const FleetGuardSchema = z.object({
+  available: z.boolean(),
+  fresh: z.boolean(),
+  pressured: z.boolean(),
+  reasons: z.array(z.string()),
+  healthyCount: z.number(),
+  instanceCount: z.number(),
+  checkedAt: z.string().nullable(),
+});
+export type FleetGuard = z.infer<typeof FleetGuardSchema>;
+
 export const ResourceStatusSchema = z.object({
   watching: z.boolean(),
   enabled: z.boolean(),
   freePercent: z.number().nullable(),
   activeTypechecks: z.number(),
+  fleetGuard: FleetGuardSchema,
   paused: z.array(ResourceProcessSchema),
   events: z.array(ResourceEventSchema),
 });

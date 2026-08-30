@@ -34,4 +34,14 @@ const plan = planGovernorActions(candidates, new Set(), 50, {
 assert.deepEqual(plan.pause.map(({ pid }) => pid), [21]);
 assert.equal(plan.reason, "concurrency");
 
+const fleetPressurePlan = planGovernorActions(candidates, new Set(), 50, {
+  maxActive: 1,
+  pauseAtPercent: 15,
+  resumeAtPercent: 25,
+  pressureMinRssKb: 512 * 1_024,
+  pressureActive: true,
+});
+assert.deepEqual(fleetPressurePlan.pause.map(({ pid }) => pid), [12, 21]);
+assert.equal(fleetPressurePlan.reason, "pressure");
+
 console.log("resource governor fixture passed");

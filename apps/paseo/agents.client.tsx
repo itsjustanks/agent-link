@@ -1827,7 +1827,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
             <Row
               first
               title="Pause heavy checks before RAM runs out"
-              subtitle="Paseo runs one type-check at a time. When memory is low, it pauses the check—not the chat—and continues after macOS recovers."
+              subtitle="Paseo runs one type-check at a time. When memory is low, it pauses the check—not the chat—and continues after the host recovers."
               meta={
                 <Facts
                   items={[
@@ -1849,6 +1849,34 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                 />
               }
             />
+            {resourceQuery.data.fleetGuard.available ? (
+              <Row
+                title="Fleet watchdog"
+                subtitle={
+                  resourceQuery.data.fleetGuard.fresh
+                    ? `${resourceQuery.data.fleetGuard.healthyCount}/${resourceQuery.data.fleetGuard.instanceCount} daemons healthy${resourceQuery.data.fleetGuard.reasons.length > 0 ? ` · ${resourceQuery.data.fleetGuard.reasons.join("; ")}` : ""}`
+                    : "Status is stale; local memory checks remain active"
+                }
+                trailing={
+                  <StatusPill
+                    status={
+                      !resourceQuery.data.fleetGuard.fresh
+                        ? "neutral"
+                        : resourceQuery.data.fleetGuard.pressured
+                          ? "attention"
+                          : "ok"
+                    }
+                    label={
+                      !resourceQuery.data.fleetGuard.fresh
+                        ? "stale"
+                        : resourceQuery.data.fleetGuard.pressured
+                          ? "cooling down"
+                          : "healthy"
+                    }
+                  />
+                }
+              />
+            ) : null}
             {resourceQuery.data.paused.map((entry) => (
               <Row
                 key={entry.pid}
