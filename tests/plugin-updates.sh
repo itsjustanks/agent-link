@@ -33,7 +33,7 @@ run_install() {
 
 run_install directory
 grep -Fq 'plugin remove agent-link' "$test_dir/calls.log"
-grep -Fq 'plugin add itsjustanks/agent-link --path apps/paseo --id agent-link' "$test_dir/calls.log"
+grep -Fq 'plugin add itsjustanks/paseo-agent-link --path apps/paseo --id agent-link' "$test_dir/calls.log"
 
 run_install git
 grep -Fq 'plugin update agent-link' "$test_dir/calls.log"

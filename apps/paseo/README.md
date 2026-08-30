@@ -10,7 +10,7 @@
 
 </div>
 
-This is the Paseo app that ships with [agent-link](https://github.com/itsjustanks/agent-link). The CLI works perfectly well on its own; this is the same thing with a UI.
+This is the Paseo app that ships in the [paseo-agent-link repository](https://github.com/itsjustanks/paseo-agent-link). The product and CLI remain **Agent Link** and `agent-link`. The CLI works perfectly well on its own; this is the same thing with a UI.
 
 One Agent Link sidebar tab:
 
@@ -67,7 +67,7 @@ On Paseo 0.7+, it installs from Git and hands updates to Paseo's candidate valid
 **Directly with Paseo 0.7+** — no clone or AgentLink CLI needed:
 
 ```sh
-paseo plugin add itsjustanks/agent-link --path apps/paseo
+paseo plugin add itsjustanks/paseo-agent-link --path apps/paseo
 paseo plugin update agent-link
 ```
 
@@ -76,7 +76,7 @@ The default branch tracks updates. `--ref <tag-or-commit>` creates a pinned inst
 **Local development**:
 
 ```sh
-git clone https://github.com/itsjustanks/agent-link
+git clone https://github.com/itsjustanks/paseo-agent-link
 ```
 
 1. **Settings → Plugins**
@@ -103,7 +103,7 @@ No, for account visibility, usage, provider checks, memory protection, and recov
 
 ### Optional: the agent-link CLI
 
-[**agent-link**](https://github.com/itsjustanks/agent-link) creates and logs in account slots (`agent-link add claude you@work.com`), writes routing launchers, and can hot-switch the plain `claude` / `codex` command. The panel can inspect existing slots without the CLI, but routing requires its launcher.
+[**Agent Link**](https://github.com/itsjustanks/paseo-agent-link) creates and logs in account slots (`agent-link add claude you@work.com`), writes routing launchers, and can hot-switch the plain `claude` / `codex` command. The panel can inspect existing slots without the CLI, but routing requires its launcher.
 
 ## About rate limits and failover
 

@@ -1,8 +1,8 @@
 <div align="center">
 
-# agent-link
+# paseo-agent-link
 
-**Run several Claude Code and Codex accounts from one machine — and see what your agents actually build.**
+**Agent Link for Paseo — route multiple AI coding accounts, recover from usage limits, and keep agents running without switching credentials.**
 
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 ![Platform](https://img.shields.io/badge/macOS%20%C2%B7%20Linux-informational)
@@ -25,8 +25,6 @@
 
 **A usage limit kills your afternoon.** As an account climbs toward its limit, agent-link drains new work off it; account-wide limits park the account while named-model limits exclude only that account/model pair; and a conversation that died mid-task continues on an eligible account with a plain `--resume` — or resumes itself, if it was a [Paseo](https://paseo.sh) agent. Claude reports through its statusline and hooks, Codex through its own rollout files. You stop noticing limits.
 
-**Your agents write things you never see.** Dashboards, reports and diagrams land in a worktree you would have to go and find in a terminal. agent-link finds them and renders them — live, inside your editor.
-
 It is one bash file with no dependencies beyond `python3`, plus an optional [Paseo](https://paseo.sh) plugin that puts all of it in a UI.
 
 ---
@@ -35,7 +33,7 @@ It is one bash file with no dependencies beyond `python3`, plus an optional [Pas
 
 ```sh
 mkdir -p ~/.local/bin
-curl -fsSL https://raw.githubusercontent.com/itsjustanks/agent-link/main/agent-link -o ~/.local/bin/agent-link
+curl -fsSL https://raw.githubusercontent.com/itsjustanks/paseo-agent-link/main/agent-link -o ~/.local/bin/agent-link
 chmod +x ~/.local/bin/agent-link
 ```
 
@@ -53,7 +51,7 @@ agent-link claude                       # Claude Code on the next account in rot
 
 `agent-link status` shows every account: signed in, in rotation, parked, out of credit, or the wrong account signed into a slot.
 
-**Updating** is one command — it installs the [latest release](https://github.com/itsjustanks/agent-link/releases) (CLI and app sources from the same tag) and reinstalls the apps you have, so the CLI and its UI never drift apart:
+**Updating** is one command — it installs the [latest release](https://github.com/itsjustanks/paseo-agent-link/releases) (CLI and app sources from the same tag) and reinstalls the apps you have, so the CLI and its UI never drift apart:
 
 ```sh
 agent-link update
@@ -125,7 +123,7 @@ agent-link app install paseo
 **Directly with Paseo 0.7+**:
 
 ```sh
-paseo plugin add itsjustanks/agent-link --path apps/paseo
+paseo plugin add itsjustanks/paseo-agent-link --path apps/paseo
 paseo plugin update agent-link
 ```
 

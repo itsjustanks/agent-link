@@ -5,7 +5,7 @@ import { delimiter, join } from "node:path";
 import type { CliStatus } from "./cli.shared";
 
 const HOME = homedir();
-const SOURCE = "https://raw.githubusercontent.com/itsjustanks/agent-link/main/agent-link";
+const SOURCE = "https://raw.githubusercontent.com/itsjustanks/paseo-agent-link/main/agent-link";
 const BIN_DIR = join(HOME, ".local", "bin");
 const INSTALL_COMMAND = `mkdir -p ~/.local/bin && curl -fsSL ${SOURCE} -o ~/.local/bin/agent-link && chmod +x ~/.local/bin/agent-link`;
 
@@ -65,10 +65,10 @@ export async function handleCliStatus(): Promise<CliStatus> {
 
 // Updates follow RELEASES: compare the installed build against the latest
 // release tag's commit, falling back to main only when no release resolves.
-const LATEST_RELEASE_URL = "https://api.github.com/repos/itsjustanks/agent-link/releases/latest";
-const COMMIT_SHA_URL = (ref: string) => `https://api.github.com/repos/itsjustanks/agent-link/commits/${encodeURIComponent(ref)}`;
+const LATEST_RELEASE_URL = "https://api.github.com/repos/itsjustanks/paseo-agent-link/releases/latest";
+const COMMIT_SHA_URL = (ref: string) => `https://api.github.com/repos/itsjustanks/paseo-agent-link/commits/${encodeURIComponent(ref)}`;
 const COMPARE_URL = (base: string, head: string) =>
-  `https://api.github.com/repos/itsjustanks/agent-link/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`;
+  `https://api.github.com/repos/itsjustanks/paseo-agent-link/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`;
 
 function pluginInfo(command: "ls" | "status"): Record<string, unknown> | null {
   try {
