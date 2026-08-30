@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.5.51"
+VERSION="0.5.52"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -398,7 +398,10 @@ now = time.time()
 for path in glob.glob(os.path.join(pending, f"{agent}-*.json")):
     try:
         prior = json.load(open(path))
-        if now - float(prior.get("createdAt", 0)) < 30 and prior.get("account") == account and prior.get("model") == model:
+        # One unresolved failure needs one recovery owner. The StopFailure hook
+        # and the daemon scanner can observe the same refusal a few seconds
+        # apart; keeping both requests used to produce duplicate continuations.
+        if now - float(prior.get("createdAt", 0)) < 6 * 60 * 60 and prior.get("account") == account and prior.get("model") == model:
             print(path)
             sys.exit(0)
     except Exception:
@@ -821,20 +824,30 @@ def start_cross_provider(request, detail, target):
     return "cross-provider-continuation", ""
 
 def reconcile_continuation_archives():
-    """Restore a current segment archived while its logical history is still visible."""
+    """Restore current segments and keep client tabs on them, never their history."""
     rc, output, _ = run([paseo, "agent", "ls", "--global", "--all", "--json"], 20)
     listing = load_json(output) if rc == 0 else None
     if isinstance(listing, dict): listing = listing.get("entries")
-    if not isinstance(listing, list): return 0
+    if not isinstance(listing, list): return 0, 0
     records = {}
     for raw in listing:
         if not isinstance(raw, dict): continue
         agent = raw.get("agent") if isinstance(raw.get("agent"), dict) else raw
         agent_id = str(agent.get("id") or "")
         if agent_id: records[agent_id] = agent_record(agent_id) or agent
-    restored = 0
+    restored = moved_tabs = 0
     for agent_id, record in records.items():
         labels = record_labels(record)
+        if labels.get("agent-link-history-segment") == "true":
+            target_id = str(labels.get("agent-link-superseded-by") or "")
+            open_labels = {
+                key: value for key, value in labels.items()
+                if key.startswith("paseo.open-agent-tab.") and str(value).lower() == "true"
+            }
+            if target_id and open_labels:
+                target_ok, _ = update_agent_labels(target_id, {key: "true" for key in open_labels})
+                source_ok, _ = update_agent_labels(agent_id, {key: "false" for key in open_labels})
+                if target_ok and source_ok: moved_tabs += 1
         root_id = str(labels.get("agent-link-continuation-root") or "")
         if (
             not record.get("archivedAt") or
@@ -854,7 +867,7 @@ def reconcile_continuation_archives():
         if not visible_history: continue
         reload_rc, _, _ = run([paseo, "agent", "reload", agent_id, "--json"], 30)
         if reload_rc == 0: restored += 1
-    return restored
+    return restored, moved_tabs
 
 def limit_phrase(log_text, status):
     assistant = re.compile(
@@ -958,6 +971,13 @@ def scan_recent_limits():
         status = str(raw.get("status") or "").lower()
         if not agent_id or status not in {"error", "idle", "closed"}: continue
         record = agent_record(agent_id)
+        labels = record_labels(record)
+        # A superseded segment is immutable history. Its old provider refusal
+        # is expected and must never start another continuation.
+        if (
+            labels.get("agent-link-history-segment") == "true" or
+            (labels.get("agent-link-continuation-root") and labels.get("agent-link-continuation-current") == "false")
+        ): continue
         last_activity = str(record.get("lastActivityAt") or record.get("updatedAt") or "")
         age = now - parse_iso(last_activity)
         max_age = 30 * 60 if status == "error" else 5 * 60
@@ -1029,9 +1049,11 @@ def finish(path, request, outcome):
     except OSError: pass
     update_sentry_outcome(request, outcome)
 
-restored_continuations = reconcile_continuation_archives()
+restored_continuations, moved_tabs = reconcile_continuation_archives()
 if restored_continuations:
     print(f"Paseo recovery: restored {restored_continuations} orphaned continuation(s)")
+if moved_tabs:
+    print(f"Paseo recovery: moved {moved_tabs} tab(s) from history to current continuation")
 
 if scan_enabled:
     scan_recent_limits()
@@ -1073,6 +1095,14 @@ for path in sorted(glob.glob(os.path.join(pending, "*.json")))[:8]:
             rc, output, inspect_error = run([paseo, "inspect", agent_id, "--json"], 15)
             source_detail = load_json(output) if rc == 0 else None
             source_status = str((source_detail or {}).get("Status") or (source_detail or {}).get("status") or "").lower()
+            # Inspect can briefly report `running` after the provider process
+            # has already failed. Retry quickly; a five-minute backoff here is
+            # what made users type Continue several times.
+            if source_status == "running":
+                request["notBefore"] = time.time() + 20
+                write(path, request)
+                deferred += 1
+                continue
             fallback = cross_provider_target(request)
             if isinstance(source_detail, dict) and source_status in {"idle", "error", "closed"} and fallback:
                 outcome, fallback_error = start_cross_provider(request, source_detail, fallback)
@@ -1530,7 +1560,9 @@ autopark() { # $1 provider, $2 key (email or "primary"), $3 until-epoch or hold:
     local model_slug="${3#hold:model:}"
     [ -n "$model_slug" ] || return 1
     printf '%s\n' "model limit refusal — probe this model to release" > "$(pools_dir)/holdmodel-$1-$2-$model_slug"
-    ( cmd_evict "$1" "$model_slug" >/dev/null 2>&1 & )
+    # Never terminate every Paseo chat on the same account. Only the agent
+    # whose turn actually refused is eligible for retirement.
+    [ -n "${PASEO_AGENT_ID:-}" ] && ( cmd_evict "$1" "$model_slug" "$PASEO_AGENT_ID" >/dev/null 2>&1 & )
     echo "$(date '+%Y-%m-%d %H:%M')  HELD $1/$2 for model $model_slug" >> "$STATE/autopark.log"
     return 0
     ;;
@@ -1540,7 +1572,7 @@ autopark() { # $1 provider, $2 key (email or "primary"), $3 until-epoch or hold:
     hold_set "$1" "$2" "$hold_reason"
     # Live processes on a just-held account will answer "usage limit" to every
     # message until they end, so retire them now; the next message re-routes.
-    ( cmd_evict "$1" >/dev/null 2>&1 & )
+    [ -n "${PASEO_AGENT_ID:-}" ] && ( cmd_evict "$1" "" "$PASEO_AGENT_ID" >/dev/null 2>&1 & )
     echo "$(date '+%Y-%m-%d %H:%M')  HELD $1/$2 (limit refusal — probe must pass before release)" >> "$STATE/autopark.log"
     if [ "${3:-}" = hold:spend ]; then
       echo "auto: monthly spend limit" > "$(pools_dir)/reason-$1-$2"
@@ -1995,12 +2027,16 @@ EOF
 # be re-pointed — but it can be ended, and the next message then relaunches it
 # through the launcher, which picks a live account. Only processes bound to a
 # HELD (refusing) account are touched: they cannot serve anything anyway.
-cmd_evict() { # [provider] [model-slug] — end processes pinned to a held account/model
-  local p="${1:-claude}" model_slug="${2:-}" pid dir key ended=0 until_ts command
+cmd_evict() { # [provider] [model-slug] [agent-id] — end matching held processes
+  local p="${1:-claude}" model_slug="${2:-}" agent_id="${3:-}" pid dir key ended=0 until_ts command process_env
   prov_valid "$p" || { echo "usage: agent-link evict [claude]" >&2; return 1; }
   [ "$p" = claude ] || { echo "evict supports claude only" >&2; return 1; }
   for pid in $(ps -axo pid,command | grep "[c]laude " | awk '{print $1}'); do
-    dir="$(ps eww -p "$pid" 2>/dev/null | tr ' ' '\n' | grep '^CLAUDE_CONFIG_DIR=' | head -1 | cut -d= -f2-)"
+    process_env="$(ps eww -p "$pid" 2>/dev/null || true)"
+    if [ -n "$agent_id" ]; then
+      case "$process_env" in *"PASEO_AGENT_ID=$agent_id"*) ;; *) continue ;; esac
+    fi
+    dir="$(printf '%s' "$process_env" | tr ' ' '\n' | grep '^CLAUDE_CONFIG_DIR=' | head -1 | cut -d= -f2-)"
     [ -n "$dir" ] || continue
     key="$(basename "$dir")"
     if [ -n "$model_slug" ]; then
@@ -3401,7 +3437,9 @@ RELEASES_URL="https://api.github.com/repos/itsjustanks/paseo-agent-link/releases
 # announce, main is whatever landed last. Falls back to main when the API is
 # unreachable, so an update is never impossible.
 latest_release_tag() {
-  curl -fsSL -m 8 "$RELEASES_URL" 2>/dev/null |
+  # GitHub/CDN responses can briefly cache the previous `latest` release.
+  # A cache-buster prevents `agent-link update` from downgrading a fresh fix.
+  curl -fsSL -m 8 "${RELEASES_URL}?nocache=$(date +%s)" 2>/dev/null |
     python3 -c 'import json,sys
 try: print(json.load(sys.stdin).get("tag_name") or "")
 except Exception: pass' 2>/dev/null

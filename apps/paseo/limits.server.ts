@@ -84,6 +84,7 @@ let unsubscribe: (() => void) | null = null;
 let lastPaseo: PaseoLike | null = null;
 const lastSeen = new Map<string, number>();
 const continuationRestorations = new Map<string, number>();
+const tabOwnershipTransfers = new Map<string, number>();
 
 function routeForAgent(agentId: string): AgentRoute | null {
   try {
@@ -250,10 +251,40 @@ async function restoreOrphanedContinuation(paseo: PaseoLike, candidate: AgentSna
   }
 }
 
+function transferOpenTabOwnership(candidate: AgentSnapshot): void {
+  const sourceId = candidate.id;
+  const targetId = candidate.labels["agent-link-superseded-by"];
+  if (!sourceId || !targetId || candidate.labels["agent-link-history-segment"] !== "true") return;
+  const openLabels = Object.entries(candidate.labels)
+    .filter(([key, value]) => key.startsWith("paseo.open-agent-tab.") && value === "true")
+    .map(([key]) => key);
+  if (openLabels.length === 0) return;
+  const last = tabOwnershipTransfers.get(sourceId) ?? 0;
+  if (Date.now() - last < 5_000) return;
+  tabOwnershipTransfers.set(sourceId, Date.now());
+  const binary = paseoBinary();
+  if (!binary) return;
+  try {
+    const targetArgs = ["agent", "update", targetId, "--json"];
+    for (const key of openLabels) targetArgs.push("--label", `${key}=true`);
+    execFileSync(binary, targetArgs, { encoding: "utf8", timeout: 20_000 });
+    const sourceArgs = ["agent", "update", sourceId, "--json"];
+    for (const key of openLabels) sourceArgs.push("--label", `${key}=false`);
+    execFileSync(binary, sourceArgs, { encoding: "utf8", timeout: 20_000 });
+    console.log(`[agent-link] moved open tab ownership from history ${sourceId} to current continuation ${targetId}`);
+  } catch (error) {
+    console.error(`[agent-link] could not move continuation tab ownership: ${String(error)}`);
+  }
+}
+
 async function reconcileContinuations(paseo: PaseoLike): Promise<void> {
   try {
     const page = (await paseo.agents.list({ filter: { includeArchived: true } })) as { entries?: unknown[] };
-    for (const raw of page.entries ?? []) await restoreOrphanedContinuation(paseo, snapshotOf(raw));
+    for (const raw of page.entries ?? []) {
+      const snapshot = snapshotOf(raw);
+      await restoreOrphanedContinuation(paseo, snapshot);
+      transferOpenTabOwnership(snapshot);
+    }
   } catch {
     // The archive guard remains active on streamed updates.
   }
@@ -310,6 +341,12 @@ async function newestEntryRefusal(paseo: PaseoLike, agentId: string): Promise<st
 
 async function handleErroredAgent(paseo: PaseoLike, update: unknown): Promise<void> {
   const snap = snapshotOf(update);
+  // Superseded provider sessions are readable history, not retry targets.
+  // Their terminal error is already represented by the current continuation.
+  if (
+    snap.labels["agent-link-history-segment"] === "true" ||
+    (snap.labels["agent-link-continuation-root"] && snap.labels["agent-link-continuation-current"] === "false")
+  ) return;
   // An ACP agent whose turn failed can settle as idle-with-attention rather
   // than "error" — both shapes mean the same thing here.
   const errored = snap.status === "error" || snap.attentionReason === "error";
@@ -458,54 +495,6 @@ async function actOnLimitDeath(
   }
 }
 
-// Janitor: every live agent holds its whole timeline in the daemon's JS heap,
-// and heap pressure is what starts the eviction spiral (dead runtimes, blank
-// tabs). Agents idle for over a day are finished work nobody archived — sweep
-// them into the archive, a few at a time, once an hour. Soft-delete only:
-// archived agents remain in the archived list.
-const JANITOR_IDLE_MS = 24 * 60 * 60 * 1000;
-const JANITOR_INTERVAL_MS = 60 * 60 * 1000;
-const JANITOR_BATCH = 10;
-let janitorTimer: ReturnType<typeof setInterval> | null = null;
-
-async function janitorSweep(paseo: PaseoLike): Promise<void> {
-  try {
-    const page = (await paseo.agents.list({})) as { entries?: unknown[] };
-    const now = Date.now();
-    let archived = 0;
-    const liveParentIds = new Set(
-      (page.entries ?? []).flatMap((raw) => {
-        const parentId = snapshotOf(raw).labels["paseo.parent-agent-id"];
-        return parentId ? [parentId] : [];
-      }),
-    );
-    for (const raw of page.entries ?? []) {
-      if (archived >= JANITOR_BATCH) break;
-      const snap = ((raw as Record<string, unknown>).agent ?? raw) as Record<string, unknown>;
-      const id = typeof snap.id === "string" ? snap.id : "";
-      const status = typeof snap.status === "string" ? snap.status : "";
-      const last = typeof snap.lastActivityAt === "string" ? Date.parse(snap.lastActivityAt) : NaN;
-      if (!id || (status !== "idle" && status !== "closed")) continue;
-      const labels = snapshotOf(raw).labels;
-      if (
-        liveParentIds.has(id) ||
-        labels["agent-link-continuation-current"] === "true" ||
-        labels["agent-link-history-segment"] === "true"
-      ) continue;
-      if (!Number.isFinite(last) || now - last < JANITOR_IDLE_MS) continue;
-      try {
-        await paseo.agents.ref(id).archive();
-        archived += 1;
-      } catch {
-        // an agent that refuses to archive is left alone
-      }
-    }
-    if (archived > 0) console.log(`[agent-link] janitor archived ${archived} agents idle >24h`);
-  } catch {
-    // list unavailable — try again next hour
-  }
-}
-
 export function ensureLimitSentry(paseo: unknown): void {
   lastPaseo = paseo as PaseoLike;
   if (armed) return;
@@ -514,6 +503,7 @@ export function ensureLimitSentry(paseo: unknown): void {
   unsubscribe = p.agents.subscribe((update) => {
     void handleErroredAgent(p, update).catch(() => {});
     const snap = snapshotOf(update);
+    transferOpenTabOwnership(snap);
     if (snap.archivedAt && Object.keys(snap.labels).length === 0) void reconcileContinuations(p);
     else void restoreOrphanedContinuation(p, snap).catch(() => {});
   });
@@ -526,10 +516,6 @@ export function ensureLimitSentry(paseo: unknown): void {
     // An older daemon without subscription support still works panel-side.
   }
   void reconcileContinuations(p);
-  if (!janitorTimer) {
-    janitorTimer = setInterval(() => void janitorSweep(p), JANITOR_INTERVAL_MS);
-    void janitorSweep(p);
-  }
   armed = true;
 }
 
@@ -539,10 +525,6 @@ onShutdown(() => {
   } finally {
     unsubscribe = null;
     armed = false;
-    if (janitorTimer) {
-      clearInterval(janitorTimer);
-      janitorTimer = null;
-    }
   }
 });
 

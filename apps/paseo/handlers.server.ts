@@ -1094,7 +1094,47 @@ type ListedAgentRecord = {
   model?: string | null;
   archivedAt?: string | null;
   labels?: Record<string, string>;
+  createdAt?: string;
+  updatedAt?: string;
+  lastActivityAt?: string;
 };
+
+async function listedAgentById(agentId: string, paseo: PluginHandlerContext["paseo"]): Promise<ListedAgentRecord | null> {
+  let cursor: string | undefined;
+  do {
+    const page = await paseo.agents.list({
+      filter: { includeArchived: true },
+      sort: [{ key: "updated_at", direction: "desc" }],
+      page: { limit: 500, ...(cursor ? { cursor } : {}) },
+    });
+    for (const entry of page.entries as unknown[]) {
+      const raw = entry as Record<string, unknown>;
+      const agent = ((raw.agent as ListedAgentRecord | undefined) ?? raw) as ListedAgentRecord;
+      if (agent.id === agentId) return agent;
+    }
+    cursor = page.pageInfo.hasMore ? page.pageInfo.nextCursor ?? undefined : undefined;
+  } while (cursor);
+  return null;
+}
+
+async function currentContinuationForRoot(
+  rootId: string,
+  preferredId: string,
+  paseo: PluginHandlerContext["paseo"],
+): Promise<ListedAgentRecord | null> {
+  const page = await paseo.agents.list({
+    filter: { labels: { "agent-link-continuation-root": rootId }, includeArchived: false },
+    page: { limit: 100 },
+  });
+  const candidates = page.entries.flatMap((entry: unknown) => {
+    const raw = entry as unknown as Record<string, unknown>;
+    const agent = ((raw.agent as ListedAgentRecord | undefined) ?? raw) as ListedAgentRecord;
+    return agent.id && agent.labels?.["agent-link-continuation-current"] === "true" ? [agent] : [];
+  });
+  return candidates.find((candidate) => candidate.id === preferredId) ?? candidates.sort((a, b) =>
+    Date.parse(b.lastActivityAt ?? b.updatedAt ?? b.createdAt ?? "") - Date.parse(a.lastActivityAt ?? a.updatedAt ?? a.createdAt ?? "")
+  )[0] ?? null;
+}
 
 async function listedAgentChildren(parentAgentId: string, paseo: PluginHandlerContext["paseo"]): Promise<ListedAgentRecord[]> {
   const page = await paseo.agents.list({
@@ -1174,7 +1214,14 @@ async function adoptContinuationTree({
 }
 
 export async function handleRouterTrace({ agentId }: { agentId: string }, { paseo }: PluginHandlerContext) {
-  const handle = paseo.agents.ref(agentId);
+  const requested = await listedAgentById(agentId, paseo);
+  if (!requested) return { isAgentRouter: false, canMoveAccount: false, summary: "Agent is no longer available.", nodes: [] };
+  const labels = requested.labels ?? {};
+  const rootId = labels["agent-link-continuation-root"] ?? labels["agent-link-continuation-of"] ?? requested.id ?? agentId;
+  const current = labels["agent-link-history-segment"] === "true" || labels["agent-link-continuation-current"] === "false"
+    ? await currentContinuationForRoot(rootId, labels["agent-link-superseded-by"] ?? "", paseo)
+    : null;
+  const handle = paseo.agents.ref(current?.id ?? requested.id ?? agentId);
   const refreshed = await handle.refresh();
   const agent = refreshed?.agent;
   if (!agent) return { isAgentRouter: false, canMoveAccount: false, summary: "Agent is no longer available.", nodes: [] };
@@ -1202,7 +1249,7 @@ export async function handleRouterTrace({ agentId }: { agentId: string }, { pase
 
   let children: ListedAgentRecord[] = [];
   try {
-    children = await listedAgentChildren(agentId, paseo);
+    children = await listedAgentChildren(agent.id, paseo);
   } catch {
     // A legacy daemon may not support label filters; the control row still loads.
   }
@@ -1268,14 +1315,21 @@ export async function handleAgentContinue(
   { paseo }: PluginHandlerContext,
 ) {
   try {
-    const sourceHandle = paseo.agents.ref(agentId);
-    const refreshed = await sourceHandle.refresh();
+    const requested = await listedAgentById(agentId, paseo);
+    if (!requested) return { ok: false, agentId: null, message: "The source chat is no longer available." };
+    const requestedLabels = requested.labels ?? {};
+    const requestedRootId = requestedLabels["agent-link-continuation-root"] ?? requestedLabels["agent-link-continuation-of"] ?? requested.id ?? agentId;
+    const current = requestedLabels["agent-link-history-segment"] === "true" || requestedLabels["agent-link-continuation-current"] === "false"
+      ? await currentContinuationForRoot(requestedRootId, requestedLabels["agent-link-superseded-by"] ?? "", paseo)
+      : null;
+    const sourceId = current?.id ?? requested.id ?? agentId;
+    const refreshed = await paseo.agents.ref(sourceId).refresh();
     const source = refreshed?.agent;
     if (!source) return { ok: false, agentId: null, message: "The source chat is no longer available." };
+    const rootId = source.labels["agent-link-continuation-root"] ?? source.labels["agent-link-continuation-of"] ?? source.id;
     if (source.status === "running" || source.status === "initializing") {
       return { ok: false, agentId: null, message: "Wait for the current turn to stop before continuing in another provider." };
     }
-    const rootId = source.labels["agent-link-continuation-root"] ?? source.labels["agent-link-continuation-of"] ?? source.id;
     const sourceParentId = source.labels["paseo.parent-agent-id"] ?? "";
     const openTabLabels = Object.entries(source.labels).flatMap(([key, value]) =>
       key.startsWith("paseo.open-agent-tab.") && value === "true" ? [key] : []
@@ -1313,16 +1367,16 @@ export async function handleAgentContinue(
       ? ` Existing live Paseo children to preserve: ${activeChildIds.join(", ")}.`
       : "";
     const prompt =
-      `AgentLink provider continuation for logical task ${rootId}, replacing Paseo execution segment ${agentId}. Continue using ${target} (${accountLabel}). ` +
-      `First run \`paseo agent logs ${agentId}\` and inspect the current workspace and git diff. ` +
+      `AgentLink provider continuation for logical task ${rootId}, replacing Paseo execution segment ${source.id}. Continue using ${target} (${accountLabel}). ` +
+      `First run \`paseo agent logs ${source.id}\` and inspect the current workspace and git diff. ` +
       `Continue from the first incomplete step; do not redo completed work. Preserve every user constraint and existing agent/subagent result.${childNote} ` +
-      `Begin with one short line: \`Continued from ${agentId} on ${target}\` and then take the next action.`;
+      `Begin with one short line: \`Continued from ${source.id} on ${target}\` and then take the next action.`;
     const options = {
       config: { provider: target, thinkingOptionId: thinking },
       title: (source.title ?? "Agent").slice(0, 120),
       prompt,
       labels: {
-        "agent-link-continuation-of": agentId,
+        "agent-link-continuation-of": source.id,
         "agent-link-continuation-root": rootId,
         "agent-link-continuation-current": "true",
         "agent-link-manual-provider-switch": "true",
