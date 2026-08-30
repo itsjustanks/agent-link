@@ -24,10 +24,15 @@ grep -q -- '- Next: the most useful immediate action, only when relevant.' "$fix
 grep -q -- '- Next: the most useful immediate action, only when relevant.' "$fixture_root/.codex/AGENTS.md"
 grep -q 'Runtime model identity comes from AgentLink' \
   "$fixture_root/agent-link/accounts/codex/codex@example.com/AGENTS.md"
+grep -q 'Never call Paseo `create_terminal` for ordinary shell commands' \
+  "$fixture_root/.codex/AGENTS.md"
+grep -q 'Never call Paseo `create_terminal` for ordinary shell commands' \
+  "$fixture_root/.claude/output-styles/concise.md"
 test "$(jq -r '.outputStyle' "$fixture_root/.claude/settings.json")" = "Concise"
 test "$(jq -r '.outputStyle' "$fixture_root/agent-link/accounts/claude/claude@example.com/settings.json")" = "Concise"
 test "$(jq -r '.daemon.appendSystemPrompt | startswith("## Response contract")' "$fixture_root/.paseo/config.json")" = "true"
 jq -r '.daemon.appendSystemPrompt' "$fixture_root/.paseo/config.json" | grep -q -- '- Next: the most useful immediate action, only when relevant.'
+jq -r '.daemon.appendSystemPrompt' "$fixture_root/.paseo/config.json" | grep -q 'Never call Paseo `create_terminal` for ordinary shell commands'
 ! rg -q 'Session: \[brief context\]' "$fixture_root/.paseo/config.json"
 rg -q 'keep this' "$fixture_root/.paseo/config.json"
 
