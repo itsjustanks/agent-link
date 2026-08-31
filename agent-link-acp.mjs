@@ -17,7 +17,7 @@ import { homedir } from "node:os";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 
-const VERSION = "0.8.2";
+const VERSION = "0.8.3";
 if (["--version", "-v", "version"].includes(process.argv[2])) {
   process.stdout.write(`${VERSION}\n`);
   process.exit(0);

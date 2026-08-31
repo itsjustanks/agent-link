@@ -72,7 +72,7 @@ Paseo validates Git-managed plugin candidates before activation. Removing the pl
 
 ## Existing chats
 
-AgentLink retains legacy `claude-auto`, `codex-auto`, and `agent-router` provider definitions for existing histories. Those chats stay attached to their original native account; no conversion or archive is attempted. The legacy Codex launcher also protects Paseo's JSON-RPC reader from Unicode line separators without changing transcript bytes. Use **AgentLink** for new chats.
+AgentLink retains legacy `claude-auto`, `codex-auto`, and `agent-router` provider definitions for existing histories. Those chats stay attached to their original native account; no conversion or archive is attempted. The legacy Codex launcher protects Paseo's JSON-RPC reader from Unicode line separators and safely hands over an idle native writer during **Reload agent**, without changing transcript bytes or IDs. Use **AgentLink** for new chats.
 
 ## CLI requirement
 

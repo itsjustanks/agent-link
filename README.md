@@ -75,7 +75,7 @@ Paseo owns the new-chat provider preference. Select AgentLink once in the compos
 
 `agent-link auto` installs the new **AgentLink** ACP provider and keeps the legacy `claude-auto`, `codex-auto`, and `agent-router` definitions so existing Paseo histories remain loadable. Legacy chats remain bound to their original account. New chats should use **AgentLink**.
 
-The legacy Codex launcher escapes JSON-safe Unicode line separators on app-server stdout before Paseo reads it. This prevents a valid long transcript from being split into invalid JSON-RPC lines; it does not rewrite the transcript or change its thread ID.
+The legacy Codex launcher escapes JSON-safe Unicode line separators on app-server stdout before Paseo reads it. This prevents a valid long transcript from being split into invalid JSON-RPC lines; it does not rewrite the transcript or change its thread ID. It also hands an idle writer from Paseo's existing session to the replacement during **Reload agent**, avoiding the upstream two-writer collision while keeping the same chat and native thread IDs.
 
 No history is automatically archived, deleted, renamed, or migrated.
 
