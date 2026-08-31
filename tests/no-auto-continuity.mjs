@@ -49,17 +49,18 @@ const bin = join(temp, "bin");
 mkdirSync(join(home, ".paseo"), { recursive: true });
 mkdirSync(join(agentLinkHome, "bin"), { recursive: true });
 mkdirSync(join(agentLinkHome, "state"), { recursive: true });
+mkdirSync(join(agentLinkHome, "state", "paseo-recovery"), { recursive: true });
 mkdirSync(bin, { recursive: true });
 writeFileSync(join(bin, "paseo"), "#!/bin/sh\ncase \"$*\" in *'provider models'*) printf '[]\\n';; esac\nexit 0\n", { mode: 0o755 });
 writeFileSync(join(agentLinkHome, "bin", "paseo-recover"), "obsolete recovery helper\n", { mode: 0o755 });
+writeFileSync(join(agentLinkHome, "bin", "agent-router"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
 writeFileSync(join(agentLinkHome, "state", "paseo-limit-sentry.json"), JSON.stringify({ auto: true, events: [] }));
+writeFileSync(join(agentLinkHome, "state", "paseo-recovery", "scanner.json"), JSON.stringify({ active: false }));
+writeFileSync(join(agentLinkHome, "state", "paseo-recovery", "seen.json"), JSON.stringify({}));
 writeFileSync(join(home, ".paseo", "config.json"), JSON.stringify({
   version: 1,
   agents: {
-    providers: {
-      "claude-auto": { extends: "claude", label: "old claude", command: ["/old/claude-auto"] },
-      "codex-auto": { extends: "codex", label: "old codex", command: ["/old/codex-auto"] },
-    },
+    providers: {},
   },
 }, null, 2));
 
@@ -76,10 +77,18 @@ assert.equal(providers["agent-link"].extends, "acp");
 assert.deepEqual(providers["agent-link"].command, [join(agentLinkHome, "bin", "agent-link-acp")]);
 assert.match(providers["claude-auto"].label, /Legacy/);
 assert.match(providers["codex-auto"].label, /Legacy/);
+assert.deepEqual(providers["claude-auto"].command, [join(agentLinkHome, "bin", "claude-auto")]);
+assert.deepEqual(providers["codex-auto"].command, [join(agentLinkHome, "bin", "codex-auto")]);
+assert.match(providers["agent-router"].label, /Legacy/);
+assert.deepEqual(providers["agent-router"].command, [join(agentLinkHome, "bin", "agent-router")]);
 assert.doesNotMatch(readFileSync(join(agentLinkHome, "bin", "claude-auto"), "utf8"), /resume-target[^\n]*--go|continue-target[^\n]*--go/);
+assert.match(readFileSync(join(agentLinkHome, "bin", "codex-auto"), "utf8"), /codex-app-server-proxy/);
 assert.equal(JSON.parse(readFileSync(join(agentLinkHome, "state", "paseo-limit-sentry.json"), "utf8")).auto, false);
 assert.equal(existsSync(join(agentLinkHome, "bin", "paseo-recover")), false);
 assert.equal(existsSync(join(agentLinkHome, "state", "retired", "paseo-recover-v0.5")), true);
+assert.equal(existsSync(join(agentLinkHome, "state", "paseo-recovery")), false);
+assert.equal(existsSync(join(agentLinkHome, "state", "retired", "paseo-recovery-v0.5", "scanner.json")), true);
 execFileSync(process.execPath, ["--check", join(agentLinkHome, "bin", "agent-link-acp")], { timeout: 10_000 });
+execFileSync(process.execPath, ["--check", join(agentLinkHome, "bin", "codex-app-server-proxy")], { timeout: 10_000 });
 
 console.log("PASS automatic continuation, tab replacement and recovery process control are inactive");

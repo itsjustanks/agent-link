@@ -12,7 +12,7 @@ mkdir -p \
   "$fixture_root/agent-link/accounts/claude/claude@example.com" \
   "$fixture_root/agent-link/accounts/codex/codex@example.com"
 printf '%s\n' '{}' > "$fixture_root/.claude/settings.json"
-printf '%s\n' '{}' > "$fixture_root/agent-link/accounts/claude/claude@example.com/settings.json"
+printf '%s\n' '{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"if [ -n \"$PASEO_TERMINAL_ID\" ]; then \"${PASEO_HOOK_CLI:-paseo}\" hooks claude Stop; fi"}]},{"hooks":[{"type":"command","command":"keep-this-hook"}]}],"StopFailure":[{"matcher":"rate_limit|billing_error","hooks":[{"type":"command","command":"agent-link refused claude"}]}]}}' > "$fixture_root/agent-link/accounts/claude/claude@example.com/settings.json"
 printf '%s\n' '{"daemon":{"appendSystemPrompt":"Session: [brief context]\\n\\n## Your role\\n\\n- keep this"}}' > "$fixture_root/.paseo/config.json"
 
 HOME="$fixture_root" AGENT_LINK_HOME="$fixture_root/agent-link" \
@@ -36,7 +36,12 @@ grep -q 'Never create a workspace merely to delegate, retry, continue, investiga
   "$fixture_root/.codex/AGENTS.md"
 test "$(jq -r '.outputStyle' "$fixture_root/.claude/settings.json")" = "Concise"
 test "$(jq -r '.outputStyle' "$fixture_root/agent-link/accounts/claude/claude@example.com/settings.json")" = "Concise"
+! rg -q 'PASEO_TERMINAL_ID|PASEO_HOOK_CLI|paseo.*hooks claude' "$fixture_root/agent-link/accounts/claude/claude@example.com/settings.json"
+rg -q 'keep-this-hook' "$fixture_root/agent-link/accounts/claude/claude@example.com/settings.json"
+rg -q 'agent-link refused claude' "$fixture_root/agent-link/accounts/claude/claude@example.com/settings.json"
 test "$(jq -r '.daemon.appendSystemPrompt | startswith("<!-- agent-link:paseo-contract:start -->")' "$fixture_root/.paseo/config.json")" = "true"
+test "$(jq -r '.daemon.autoArchiveAfterMerge' "$fixture_root/.paseo/config.json")" = "false"
+test "$(jq -r '.daemon.enableTerminalAgentHooks' "$fixture_root/.paseo/config.json")" = "false"
 jq -r '.daemon.appendSystemPrompt' "$fixture_root/.paseo/config.json" | grep -q -- '- Next: the most useful immediate action, only when relevant.'
 jq -r '.daemon.appendSystemPrompt' "$fixture_root/.paseo/config.json" | grep -q 'Never call Paseo `create_terminal` for ordinary shell commands'
 jq -r '.daemon.appendSystemPrompt' "$fixture_root/.paseo/config.json" | grep -q 'Use Paseo `create_agent`'

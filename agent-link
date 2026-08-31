@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.8.1"
+VERSION="0.8.2"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -1604,8 +1604,23 @@ acp_runtime_source() {
   return 1
 }
 
+codex_proxy_runtime_source() {
+  local here candidate
+  here="$(cd "$(dirname "$0")" && pwd)"
+  if [ -d "$here/.git" ] || [ -d "$here/../.git" ]; then
+    candidate="$here/codex-app-server-proxy.mjs"
+    [ -f "$candidate" ] && { echo "$candidate"; return 0; }
+    candidate="$here/../codex-app-server-proxy.mjs"
+    [ -f "$candidate" ] && { echo "$candidate"; return 0; }
+  fi
+  candidate="$ROOT/src/codex-app-server-proxy.mjs"
+  [ -f "$candidate" ] && { echo "$candidate"; return 0; }
+  return 1
+}
+
 disable_legacy_paseo_recovery() {
   local sentry="$STATE/paseo-limit-sentry.json" helper="$SHIM_BIN/paseo-recover" retired="$STATE/retired/paseo-recover-v0.5"
+  local recovery_state="$STATE/paseo-recovery" retired_state="$STATE/retired/paseo-recovery-v0.5"
   if [ -f "$sentry" ]; then
     python3 - "$sentry" <<'PY2'
 import json, os, sys, tempfile
@@ -1636,6 +1651,15 @@ PY2
     chmod 600 "$retired" 2>/dev/null || true
     echo "retired legacy Paseo recovery helper"
   fi
+  if [ -d "$recovery_state" ]; then
+    mkdir -p "$STATE/retired"
+    if [ -e "$retired_state" ]; then
+      retired_state="$retired_state-$(date '+%Y%m%d-%H%M%S')"
+    fi
+    mv "$recovery_state" "$retired_state"
+    chmod -R u=rwX,go= "$retired_state" 2>/dev/null || true
+    echo "retired legacy Paseo recovery state"
+  fi
 }
 
 install_acp_runtime() {
@@ -1656,6 +1680,31 @@ install_acp_runtime() {
   node --check "$staged" >/dev/null 2>&1 || {
     rm -f "$staged"
     echo "the AgentLink ACP runtime did not pass its syntax check" >&2
+    return 1
+  }
+  chmod +x "$staged"
+  mv "$staged" "$target"
+  echo "wrote $target"
+}
+
+install_codex_app_server_proxy() {
+  local source="" target="$SHIM_BIN/codex-app-server-proxy" staged="$SHIM_BIN/codex-app-server-proxy.new.mjs" tag url
+  mkdir -p "$SHIM_BIN"
+  source="$(codex_proxy_runtime_source 2>/dev/null || true)"
+  if [ -n "$source" ]; then
+    cp "$source" "$staged" || return 1
+  else
+    tag="$(latest_release_tag)"
+    url="https://raw.githubusercontent.com/itsjustanks/paseo-agent-link/${tag:-main}/codex-app-server-proxy.mjs"
+    curl -fsSL "$url" -o "$staged" 2>/dev/null || {
+      rm -f "$staged"
+      echo "could not download the Codex app-server compatibility proxy" >&2
+      return 1
+    }
+  fi
+  node --check "$staged" >/dev/null 2>&1 || {
+    rm -f "$staged"
+    echo "the Codex app-server compatibility proxy did not pass its syntax check" >&2
     return 1
   }
   chmod +x "$staged"
@@ -1684,16 +1733,38 @@ desired = {
 }
 changed = providers.get("agent-link") != desired
 providers["agent-link"] = desired
-legacy_labels = {
-    "claude-auto": "Claude (Legacy AgentLink - existing chats)",
-    "codex-auto": "Codex (Legacy AgentLink - existing chats)",
-    "agent-router": "AgentRouter (Legacy - existing chats)",
+shim_dir = os.path.dirname(runtime)
+legacy_providers = {
+    "claude-auto": {
+        "extends": "claude",
+        "label": "Claude (Legacy AgentLink history)",
+        "description": "History-only compatibility provider. Start new multi-account chats with AgentLink.",
+        "command": [os.path.join(shim_dir, "claude-auto")],
+    },
+    "codex-auto": {
+        "extends": "codex",
+        "label": "Codex (Legacy AgentLink history)",
+        "description": "History-only compatibility provider. Start new multi-account chats with AgentLink.",
+        "command": [os.path.join(shim_dir, "codex-auto")],
+    },
 }
-for provider_id, label in legacy_labels.items():
-    value = providers.get(provider_id)
-    if isinstance(value, dict) and value.get("label") != label:
-        value["label"] = label
-        value["description"] = "Kept for existing sessions. Start new multi-account chats with AgentLink."
+router_runtime = os.path.join(shim_dir, "agent-router")
+if os.path.isfile(router_runtime):
+    legacy_providers["agent-router"] = {
+        "extends": "claude",
+        "label": "AgentRouter (Legacy history)",
+        "description": "History-only compatibility provider. Start new routed chats with AgentLink / AgentRouter.",
+        "command": [router_runtime],
+        "models": [{
+            "id": "agent-router-auto",
+            "label": "Automatic route (legacy)",
+            "description": "Retained only so existing AgentRouter histories can reload.",
+            "isDefault": True,
+        }],
+    }
+for provider_id, value in legacy_providers.items():
+    if providers.get(provider_id) != value:
+        providers[provider_id] = value
         changed = True
 if not changed:
     print("unchanged")
@@ -1792,7 +1863,7 @@ PY2
 }
 
 write_auto_launcher() { # $1 provider — one command that routes to a live account
-  local p="$1" env_var self primary_search cont_flags
+  local p="$1" env_var self primary_search cont_flags app_server_proxy_block=""
   # Continue-style flags differ by CLI — and clash: codex uses -c for a CONFIG
   # override, so treating it as "continue" would reroute a fresh launch.
   case "$p" in
@@ -1801,6 +1872,11 @@ write_auto_launcher() { # $1 provider — one command that routes to a live acco
   esac
   local trust_block=""
   [ "$p" = claude ] && trust_block="$(claude_trust_block)"
+  if [ "$p" = codex ]; then
+    app_server_proxy_block='if [ "${1:-}" = app-server ] && [ -x "$here/codex-app-server-proxy" ]; then
+  exec "$here/codex-app-server-proxy" "$real" "$@"
+fi'
+  fi
   primary_search="$(primary_dir "$1")"
   env_var="$(prov_env_var "$p")"
   self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
@@ -1917,6 +1993,7 @@ if [ -z "\${$env_var:-}" ] && [ "\$aa_pin" != primary ]; then
   fi
 fi
 $trust_block
+$app_server_proxy_block
 exec "\$real" "\$@"
 EOF
   chmod +x "$SHIM_BIN/$p-auto"
@@ -1927,6 +2004,7 @@ cmd_auto() { # install the one-chat ACP provider and retain launchers for old se
   local p
   disable_legacy_paseo_recovery
   install_acp_runtime || return 1
+  install_codex_app_server_proxy || return 1
   for p in $PROVIDERS; do write_auto_launcher "$p"; done
   configure_paseo_agentlink || return 1
   cmd_style install || return 1
@@ -2159,10 +2237,6 @@ cmd_probe() { # $1 provider (default claude), $2 model, [--park]
 
 # What the numbers actually say: where work went, what it cost in tokens, how
 # much came from cache, and which accounts got refused.
-# Find conversations that died on a limit and move them to a healthy account.
-# A running agent cannot be re-routed mid-flight — its account is fixed when the
-# process starts — so the honest recovery is: park the exhausted account, copy
-# the transcript to one that works, resume there.
 cmd_insights() { # [days]
   local days="${1:-7}"
   python3 - "$ACCOUNTS" "$HOME" "$days" "$(pools_dir)" <<'PY2'
@@ -3303,6 +3377,47 @@ def write_atomic(path, text):
             os.unlink(temp)
     return True
 
+def remove_paseo_terminal_hooks(settings):
+    """Remove Paseo's legacy terminal-agent bridge without touching other hooks."""
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    changed = False
+    for event in list(hooks):
+        entries = hooks.get(event)
+        if not isinstance(entries, list):
+            continue
+        kept_entries = []
+        for entry in entries:
+            if not isinstance(entry, dict) or not isinstance(entry.get("hooks"), list):
+                kept_entries.append(entry)
+                continue
+            kept_hooks = []
+            for hook in entry["hooks"]:
+                command = hook.get("command", "") if isinstance(hook, dict) else ""
+                legacy_terminal_hook = (
+                    "PASEO_TERMINAL_ID" in command
+                    and ("PASEO_HOOK_CLI" in command or "paseo" in command)
+                    and " hooks " in command
+                )
+                if legacy_terminal_hook:
+                    changed = True
+                else:
+                    kept_hooks.append(hook)
+            if kept_hooks:
+                if len(kept_hooks) != len(entry["hooks"]):
+                    entry = dict(entry)
+                    entry["hooks"] = kept_hooks
+                kept_entries.append(entry)
+        if kept_entries:
+            hooks[event] = kept_entries
+        else:
+            del hooks[event]
+            changed = True
+    if not hooks:
+        settings.pop("hooks", None)
+    return changed
+
 claude_dirs = [os.path.join(home, ".claude")] + sorted(glob.glob(os.path.join(accounts, "claude", "*")))
 codex_dirs = sorted(glob.glob(os.path.join(accounts, "codex", "*"))) + [os.path.join(home, ".codex")]
 changed = 0
@@ -3314,8 +3429,11 @@ for directory in claude_dirs:
     except Exception as error:
         print(f"SKIPPED {settings_path}: invalid JSON ({error})")
         continue
+    settings_changed = remove_paseo_terminal_hooks(settings)
     if settings.get("outputStyle") != "Concise":
         settings["outputStyle"] = "Concise"
+        settings_changed = True
+    if settings_changed:
         changed += write_atomic(settings_path, json.dumps(settings, indent=2) + "\n")
 for directory in codex_dirs:
     changed += write_atomic(os.path.join(directory, "AGENTS.md"), codex_agents)
@@ -3324,6 +3442,11 @@ if os.path.exists(paseo_config_path):
     try:
         paseo_config = json.load(open(paseo_config_path, encoding="utf-8"))
         daemon = paseo_config.setdefault("daemon", {})
+        # AgentLink owns model/account switching inside the current chat. Paseo's
+        # legacy merge auto-archive and terminal-agent capture can otherwise hide
+        # histories or surface terminal processes as unrelated chat tabs.
+        daemon["autoArchiveAfterMerge"] = False
+        daemon["enableTerminalAgentHooks"] = False
         current_prompt = daemon.get("appendSystemPrompt") or ""
         current_prompt = current_prompt.strip()
         if managed_start in current_prompt and managed_end in current_prompt:
@@ -3357,7 +3480,7 @@ if os.path.exists(paseo_config_path):
 skills = ["paseo", "paseo-handoff", "paseo-advisor", "paseo-committee"]
 missing = [name for name in skills if not os.path.isfile(os.path.join(home, ".agents", "skills", name, "SKILL.md"))]
 print(f"response and Paseo orchestration contracts installed across {len(claude_dirs)} Claude and {len(codex_dirs)} Codex config directories ({changed} file updates)")
-print("Paseo appendSystemPrompt updated for every provider; run `paseo reload` to apply it.")
+print("Paseo appendSystemPrompt updated for every provider; automatic history archive and terminal-agent capture disabled. Run `paseo reload` to apply it.")
 if missing:
     print("WARNING: missing Paseo orchestration skills: " + ", ".join(missing))
     print("Install them from Paseo Settings -> Host -> Agents -> Orchestration skills.")

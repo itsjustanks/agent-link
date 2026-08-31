@@ -72,7 +72,7 @@ Paseo validates Git-managed plugin candidates before activation. Removing the pl
 
 ## Existing chats
 
-AgentLink retains legacy `claude-auto`, `codex-auto`, and `agent-router` provider definitions for existing histories. Those chats stay attached to their original native account; no conversion or archive is attempted. Use **AgentLink** for new chats.
+AgentLink retains legacy `claude-auto`, `codex-auto`, and `agent-router` provider definitions for existing histories. Those chats stay attached to their original native account; no conversion or archive is attempted. The legacy Codex launcher also protects Paseo's JSON-RPC reader from Unicode line separators without changing transcript bytes. Use **AgentLink** for new chats.
 
 ## CLI requirement
 
@@ -109,7 +109,7 @@ Only an explicit login or provider authentication flow may need Terminal. Normal
 - **AgentLink is absent** — run `agent-link auto`, then `paseo reload`.
 - **Profiles are missing** — repair the sign-in in AgentLink → Accounts, run `agent-link auto`, and start or reload the AgentLink session.
 - **Automatic picked the wrong work type** — edit the order in AgentLink → Orchestration.
-- **An old chat fails to resume** — keep its legacy provider and original account.
+- **An old chat fails to resume** — run `agent-link auto`, keep its legacy provider and original account, then reload that chat.
 - **Plugin controls stop after reload** — reopen the AgentLink surface to load the new bundle.
 
 ## Security
