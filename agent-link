@@ -18,7 +18,7 @@
 # Works on macOS and Linux. Requires: bash, python3, and the CLIs you manage.
 set -u
 
-VERSION="0.8.0"
+VERSION="0.8.1"
 # Home dir. Prefer whichever location actually holds accounts — Claude binds
 # credentials to the literal config-dir path, so an existing install must keep
 # using the directory its logins were created under, whatever it is called.
@@ -3365,7 +3365,10 @@ PY
       ;;
     status)
       printf 'Claude style: %s\n' "$(jq -r '.outputStyle // "unset"' "$HOME/.claude/settings.json" 2>/dev/null || echo unreadable)"
-      [ -f "$HOME/.codex/AGENTS.md" ] && echo "Codex instructions: installed" || echo "Codex instructions: missing"
+      grep -Fq '## Paseo orchestration' "$HOME/.claude/output-styles/concise.md" 2>/dev/null \
+        && echo "Claude orchestration contract: installed" || echo "Claude orchestration contract: missing or outdated"
+      grep -Fq '## Paseo orchestration' "$HOME/.codex/AGENTS.md" 2>/dev/null \
+        && echo "Codex orchestration contract: installed" || echo "Codex orchestration contract: missing or outdated"
       jq -e '.daemon.appendSystemPrompt | contains("<!-- agent-link:paseo-contract:start -->")' "$HOME/.paseo/config.json" >/dev/null 2>&1 \
         && echo "Paseo provider contract: installed" || echo "Paseo provider contract: missing"
       local skill

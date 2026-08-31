@@ -58,4 +58,8 @@ rg -q 'keep safe server rules' "$fixture_root/.paseo/config.json"
 ! rg -q '## Finishing' "$fixture_root/.paseo/config.json"
 jq -r '.daemon.appendSystemPrompt' "$fixture_root/.paseo/config.json" | grep -q 'Omit `workspaceId` for ordinary delegation'
 
+status="$(HOME="$fixture_root" AGENT_LINK_HOME="$fixture_root/agent-link" "$repo_root/agent-link" style status)"
+grep -q 'Claude orchestration contract: installed' <<< "$status"
+grep -q 'Codex orchestration contract: installed' <<< "$status"
+
 echo "response style fixture passed"
