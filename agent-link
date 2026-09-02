@@ -166,11 +166,9 @@ import json, sys
 try: config = json.load(open(sys.argv[1]))
 except Exception: print("0 0"); sys.exit(0)
 providers = config.get("providers") or config.get("agents", {}).get("providers", {})
-def count(name):
-    entry = providers.get(name) or {}
-    models = entry.get("models") or entry.get("additionalModels") or []
-    return sum(1 for m in models if isinstance(m, dict) and str(m.get("id", "")).startswith(("cc/", "cx/")))
-print(f"{count('ninerouter')} {count('ninerouter-codex')}")
+entry = providers.get("ninerouter") or {}
+models = entry.get("models") or []
+print(f"{len(models)} {sum(1 for m in models if isinstance(m, dict) and str(m.get('id', '')).startswith(('cc/', 'cx/')))}")
 PY
 }
 # Does 9router currently own this CLI's config? 9router answers for itself.
@@ -226,34 +224,34 @@ def label(model_id):
 providers = config.setdefault("agents", {}).setdefault("providers", {})
 cc = [{"id": i, "label": label(i)} for i in ids if i.startswith("cc/")]
 cx = [{"id": i, "label": label(i)} for i in ids if i.startswith("cx/")]
-# Paseo rejects a provider id that starts with a digit, so "9router" cannot be
-# one; the label carries the branding instead.
-desired = {}
-if cc:
-    desired["ninerouter"] = {"extends": "claude", "label": "9Router",
-                             "description": "Claude models routed through your local 9router",
-                             "env": {"ANTHROPIC_BASE_URL": url, "ANTHROPIC_AUTH_TOKEN": key},
-                             "models": cc}
-if cx:
-    desired["ninerouter-codex"] = {"extends": "codex", "label": "9Router \u00b7 Codex",
-                                   "description": "Codex models routed through your local 9router",
-                                   "env": {"OPENAI_BASE_URL": url + "/v1", "OPENAI_API_KEY": key},
-                                   "models": cx}
+every = [{"id": i, "label": label(i)} for i in ids]
+# One provider carries the whole catalogue: 9router translates every pool into
+# the Claude wire format, so splitting by pool would only mirror its internals.
+# Paseo rejects a provider id starting with a digit, so the id cannot be
+# "9router"; the label carries the branding.
+desired = {"ninerouter": {"extends": "claude", "label": "9Router",
+                          "description": "Every model your local 9router serves",
+                          "env": {"ANTHROPIC_BASE_URL": url, "ANTHROPIC_AUTH_TOKEN": key},
+                          "models": every}}
 changed = False
 for pid, value in desired.items():
     if providers.get(pid) != value:
         providers[pid] = value
         changed = True
-for stock in ("claude", "codex"):
-    entry = providers.get(stock)
-    if isinstance(entry, dict) and entry.get("additionalModels"):
-        entry["additionalModels"] = []
+if providers.pop("ninerouter-codex", None) is not None:
+    changed = True
+# Keep the models on the stock providers too: emptying that list breaks any
+# existing chat pinned to one of them.
+for stock, models in (("claude", cc), ("codex", cx)):
+    entry = providers.setdefault(stock, {})
+    if isinstance(entry, dict) and entry.get("additionalModels") != models:
+        entry["additionalModels"] = models
         changed = True
 removed = [k for k in legacy if providers.pop(k, None) is not None]
 if removed:
     changed = True
 if not changed:
-    print("unchanged " + str(len(cc)) + " " + str(len(cx)))
+    print("unchanged " + str(len(every)) + " " + str(len(cc)))
     sys.exit(0)
 shutil.copy2(path, path + ".bak-agent-link-" + str(int(time.time())))
 mode = os.stat(path).st_mode & 0o777
@@ -267,13 +265,13 @@ try:
 finally:
     if os.path.exists(tmp):
         os.unlink(tmp)
-print("changed " + str(len(cc)) + " " + str(len(cx)) + " " + " ".join(removed))
+print("changed " + str(len(every)) + " " + str(len(cc)) + " " + " ".join(removed))
 PY
 )"
   case "$result" in
     error:*) echo "could not update Paseo config: ${result#error:}" >&2; return 1 ;;
-    unchanged*) set -- $result; ok "Paseo already lists $2 Claude and $3 Codex models" ;;
-    changed*) set -- $result; ok "listed $2 Claude and $3 Codex models in Paseo${4:+ · removed: ${*:4}}" ;;
+    unchanged*) set -- $result; ok "9Router provider already offers $2 models" ;;
+    changed*) set -- $result; ok "9Router provider now offers $2 models${4:+ · removed: ${*:4}}" ;;
   esac
 }
 
@@ -330,8 +328,8 @@ cmd_status() {
   printf '  %sagent-link %s%s   %s%s%s\n' "$C_BOLD" "$VERSION" "$C_OFF" "$C_DIM" "$ROOT" "$C_OFF"
   router_status
   local counts; counts="$(models_listed)"; set -- $counts
-  if [ "${1:-0}" != 0 ] || [ "${2:-0}" != 0 ]; then ok "Paseo lists $1 Claude and $2 Codex 9router models"
-  else bad "Paseo lists no 9router models — agent-link auto"; fi
+  if [ "${1:-0}" != 0 ]; then ok "9Router provider offers $1 models ($2 from your Claude/Codex accounts)"
+  else bad "no 9Router provider in Paseo — agent-link auto"; fi
   cli_routed claude && ok "Claude Code routes through 9router" || warn "Claude Code is direct — agent-link route claude on"
   cli_routed codex && ok "Codex routes through 9router" || warn "Codex is direct — agent-link route codex on"
   local l; l="$(legacy_providers_present)"; [ -n "$l" ] && warn "legacy Paseo providers still present: $l (agent-link auto removes them)"
@@ -351,8 +349,8 @@ cmd_doctor() {
   else bad "$SETTINGS missing — agent-link 9router key"; rc=1; fi
   r_running && ok "9router answering at $(r_url)" || { bad "9router not running at $(r_url)"; rc=1; }
   local counts; counts="$(models_listed)"; set -- $counts
-  if [ "${1:-0}" != 0 ] || [ "${2:-0}" != 0 ]; then ok "Paseo lists $1 Claude and $2 Codex 9router models"
-  else bad "Paseo lists no 9router models — agent-link auto"; rc=1; fi
+  if [ "${1:-0}" != 0 ]; then ok "9Router provider offers $1 models"
+  else bad "no 9Router provider in Paseo — agent-link auto"; rc=1; fi
   [ -n "${ANTHROPIC_API_KEY:-}" ] && warn "ANTHROPIC_API_KEY is set in this shell; it overrides the 9router token for Claude Code"
   [ "$rc" = 0 ] && echo "  All good."
   return "$rc"

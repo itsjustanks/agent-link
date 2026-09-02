@@ -70,7 +70,9 @@ This is machine-wide, not Paseo-only. The panel says so before you press it.
 | `kimi/`, `cu/`, `gh/`, `glm/`… | other connected providers |
 | combo name | an ordered fallback list that behaves like one model |
 
-**Sync into Paseo** lists the `cc/` and `cx/` models on Paseo's own providers so they show up in an ordinary chat's model picker. Other pools stay in 9router deliberately — one Cursor sign-in contributes 200+ ids, which is noise in a picker. Reach those through a combo or an alias instead.
+**Sync into Paseo** writes a single **9Router** provider carrying every model 9router serves, whatever pool it came from — 9router translates them all into one wire format, so one provider is enough. Paseo's own Claude and Codex providers also keep their matching models, so a chat already pinned to one of those keeps working.
+
+The provider id is `ninerouter`, not `9router`: Paseo requires ids to match `/^[a-z][a-z0-9-]*$/`, and an id starting with a digit makes the whole config invalid.
 
 ### Exposing a model 9router does not know
 

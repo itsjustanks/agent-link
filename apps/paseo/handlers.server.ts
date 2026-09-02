@@ -33,8 +33,9 @@ const HOME = homedir();
  * rejected outright — a leading digit makes the whole config invalid and takes
  * the CLI down with it. The label carries the branding instead.
  */
-const CLAUDE_PROVIDER_ID = "ninerouter";
-const CODEX_PROVIDER_ID = "ninerouter-codex";
+const PROVIDER_ID = "ninerouter";
+/** The split Codex entry an earlier build wrote; removed on the next sync. */
+const LEGACY_CODEX_PROVIDER_ID = "ninerouter-codex";
 
 
 type ProviderModel = { id?: unknown; label?: unknown };
@@ -218,8 +219,9 @@ export async function handleRouterStatus(_input: unknown, { paseo }: PluginHandl
   const running = await client.health();
 
   const overrides = await providerOverrides(paseo);
-  const paseoClaude = listedModels(overrides, CLAUDE_PROVIDER_ID);
-  const paseoCodex = listedModels(overrides, CODEX_PROVIDER_ID);
+  const listed = listedModels(overrides, PROVIDER_ID);
+  const paseoClaude = listed.filter((id) => cliForModel(id) === "claude");
+  const paseoCodex = listed.filter((id) => cliForModel(id) === "codex");
   const staleProviders = DEAD_PROVIDER_IDS.filter((id) => overrides[id] !== undefined);
   const staleShims = listStaleShims(isLegacyShim);
 
@@ -293,8 +295,9 @@ export async function handleRouterStatus(_input: unknown, { paseo }: PluginHandl
     models: Array.isArray(entry.models) ? entry.models.map((model) => String(model)) : [],
   }));
 
-  const wantClaude = ids.filter((id) => cliForModel(id) === "claude");
-  const wantCodex = ids.filter((id) => cliForModel(id) === "codex");
+  // What the provider should carry: the explicit selection, or everything.
+  const selection = new Set(settings.syncSelection);
+  const wantedIds = selection.size === 0 ? ids : ids.filter((id) => selection.has(id));
 
   return {
     ...empty,
@@ -314,8 +317,7 @@ export async function handleRouterStatus(_input: unknown, { paseo }: PluginHandl
     hijack: await readHijack(client),
     paseo: {
       listedModels: { claude: paseoClaude, codex: paseoCodex },
-      modelsInSync:
-        ids.length > 0 && sameModelSet(paseoClaude, wantClaude) && sameModelSet(paseoCodex, wantCodex),
+      modelsInSync: ids.length > 0 && sameModelSet(listed, wantedIds),
       staleProviders,
       staleShims,
     },
@@ -495,54 +497,44 @@ export async function handleRouterSyncModels(_input: unknown, { paseo }: PluginH
     };
   }
 
-  // An explicit selection wins; an empty one means every native-pool model.
+  // One provider, every pool. 9router translates each pool into the Claude
+  // wire format on /v1/messages — verified against cx/ and kimi/ as well as
+  // cc/ — so a single Claude-extended provider can serve the whole catalogue.
+  // Splitting it by pool would only mirror 9router's internals into a menu.
   const chosen = new Set(settings.syncSelection);
   const wanted = (id: string) => chosen.size === 0 || chosen.has(id);
-  const forClaude = ids
-    .filter((id) => cliForModel(id) === "claude" && wanted(id))
-    .map((id) => ({ id, label: modelLabel(id) }));
-  const forCodex = ids
-    .filter((id) => cliForModel(id) === "codex" && wanted(id))
-    .map((id) => ({ id, label: modelLabel(id) }));
+  const models = ids.filter(wanted).map((id) => ({ id, label: modelLabel(id) }));
+  const forClaude = models.filter((model) => cliForModel(model.id) === "claude");
+  const forCodex = models.filter((model) => cliForModel(model.id) === "codex");
 
   const overrides = await providerOverrides(paseo);
   const removedProviders = DEAD_PROVIDER_IDS.filter((id) => overrides[id] !== undefined);
-  const patch: Record<string, unknown> = {};
-
-  if (forClaude.length > 0) {
-    patch[CLAUDE_PROVIDER_ID] = {
+  const patch: Record<string, unknown> = {
+    [PROVIDER_ID]: {
       extends: "claude",
       label: "9Router",
-      description: "Claude models routed through your local 9router",
+      description: "Every model your local 9router serves",
       env: { ANTHROPIC_BASE_URL: settings.url, ANTHROPIC_AUTH_TOKEN: key },
-      models: forClaude,
-    };
-  }
-  if (forCodex.length > 0) {
-    patch[CODEX_PROVIDER_ID] = {
-      extends: "codex",
-      label: "9Router · Codex",
-      description: "Codex models routed through your local 9router",
-      env: { OPENAI_BASE_URL: `${settings.url}/v1`, OPENAI_API_KEY: key },
-      models: forCodex,
-    };
-  }
-  // Earlier builds wrote these onto Paseo's own providers; undo that so the
-  // stock entries go back to being a plain direct connection.
-  for (const stock of ["claude", "codex"]) {
-    if (Array.isArray((overrides[stock] as { additionalModels?: unknown } | undefined)?.additionalModels)) {
-      patch[stock] = { additionalModels: [] };
-    }
-  }
+      models,
+    },
+  };
+  // The earlier split provider is gone; remove it rather than leaving a second
+  // entry offering a subset of the same catalogue.
+  if (overrides[LEGACY_CODEX_PROVIDER_ID] !== undefined) patch[LEGACY_CODEX_PROVIDER_ID] = null;
+  // Paseo's own providers keep their 9router models too: emptying that list
+  // breaks any existing chat pinned to one of them, because a running agent
+  // holds a model id and a provider that no longer offers it fails the turn.
+  patch.claude = { additionalModels: forClaude };
+  patch.codex = { additionalModels: forCodex };
   for (const id of removedProviders) patch[id] = null;
 
   await paseo.config.patch({ agents: { providers: patch } } as never);
-  await refreshProviders(paseo, [CLAUDE_PROVIDER_ID, CODEX_PROVIDER_ID]);
+  await refreshProviders(paseo, [PROVIDER_ID, "claude", "codex"]);
 
   const removedShims = listStaleShims(isLegacyShim);
   for (const name of removedShims) removeShim(name);
 
-  const notes = [`9Router provider now offers ${forClaude.length} Claude and ${forCodex.length} Codex model(s).`];
+  const notes = [`9Router provider now offers ${models.length} model(s).`];
   if (removedProviders.length > 0) notes.push(`Removed ${removedProviders.join(", ")}.`);
   if (removedShims.length > 0) notes.push(`Retired ${removedShims.length} old shim(s).`);
   return {

@@ -36,7 +36,7 @@ Then open **9Router** in the sidebar.
 
 **Accounts** lists every connection grouped by provider, with a quota bar per window (5-hour, weekly, whatever that provider reports) and its reset time. Claude signs in by pasting the code from its approval page; Codex hands off to 9router's loopback listener and polls. A **Parked accounts** panel appears when 9router has taken an account out of rotation, showing the error that did it.
 
-**Models** syncs the `cc/` and `cx/` ids onto Paseo's own Claude and Codex providers, tests any id with a real completion, exposes a model 9router's catalogue lacks, and manages aliases and combos.
+**Models** writes one **9Router** provider holding every model 9router serves, tests any id with a real completion, exposes a model 9router's catalogue lacks, and manages aliases and combos. Paseo's stock Claude and Codex providers keep their matching models too, so an existing chat pinned to one keeps working.
 
 **Tuning** switches 9router's token savers — RTK (compresses tool output), Caveman (terser system prompt, lite or full), Ponytail (YAGNI coding style), Headroom (external context compression) — and shows the combo strategy and sticky round-robin limit.
 
@@ -59,7 +59,8 @@ Restoring Claude also clears any `ANTHROPIC_DEFAULT_*` value still pointing at a
 
 - **The dashboard cannot be embedded.** Plugin surfaces are React Native with no WebView, and the SDK exposes no browser-tab API. "Open dashboard" uses the system browser; ⌘⇧B opens a Paseo browser tab to paste into.
 - **No token material is read.** The panel reads account identity and provider-reported usage. The API key is reported as present plus its last four characters; the dashboard password is written to `9router.json` (mode 600) and never returned.
-- **Only `cc/` and `cx/` are listed in Paseo.** A single Cursor sign-in contributes 200+ model ids; listing every pool turns the picker into a haystack. Other pools stay reachable through an alias or a combo.
+- **One provider, every pool.** 9router translates each pool into the Claude wire format, so a single Claude-extended provider serves the whole catalogue. Splitting it by pool would only mirror 9router's internals into a menu.
+- **A stock-provider chat sends a bare model name.** 9router routes by pool prefix, so `claude-opus-5` with no `cc/` reaches nothing and returns `model_not_found` — which Claude Code reports as "model may not exist or you may not have access". An alias fixes it; the 9Router provider avoids it by sending prefixed ids.
 - **Reads are cheap and never spend a turn.** The one exception is the Test button in **Models**, which sends a 16-token completion because that is the only honest way to answer "is this reachable".
 
 ## Troubleshooting

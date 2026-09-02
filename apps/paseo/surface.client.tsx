@@ -888,8 +888,9 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
           <Card theme={theme}>
             <Step theme={theme} index={0} title="In Paseo's picker" hint={data?.paseo.modelsInSync ? "in sync" : undefined} />
             <Note theme={theme}>
-              Claude (cc/) and Codex (cx/) models can be listed on Paseo's own providers. Other pools stay in 9router —
-              reach them with an alias or a combo instead of crowding the picker.
+              Sync writes a single 9Router provider carrying every model 9router serves — Claude, Codex, and every
+              other connected pool — because 9router translates them all into one wire format. Paseo's own Claude and
+              Codex providers also keep their matching models, so a chat pinned to one of those keeps working.
             </Note>
             <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
               <Chip theme={theme} label={`${data?.paseo.listedModels.claude.length ?? 0} Claude`} tone={data?.paseo.listedModels.claude.length ? "success" : "neutral"} />
@@ -901,13 +902,11 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
             ) : null}
             <Note theme={theme}>
               {(syncSelection.data?.selected.length ?? 0) === 0
-                ? "Syncing every Claude and Codex model. Tap below to choose a shorter list instead."
+                ? `Syncing all ${data?.models.count ?? 0} models. Tap below to choose a shorter list instead.`
                 : `Syncing ${syncSelection.data?.selected.length} chosen model(s).`}
             </Note>
             <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
-              {(data?.models.ids ?? [])
-                .filter((id) => cliForModel(id) !== "other")
-                .map((id) => {
+              {(data?.models.ids ?? []).slice(0, 60).map((id) => {
                   const chosen = syncSelection.data?.selected.includes(id) ?? false;
                   return (
                     <Pressable
