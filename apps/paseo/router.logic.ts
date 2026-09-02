@@ -221,7 +221,7 @@ export function modelLabel(id: string): string {
     .replace(/\bclaude\b/gi, "Claude")
     .replace(/\b([a-z])/g, (match) => match.toUpperCase())
     .replace(/\s+(\d)/g, " $1");
-  return `${pretty} · 9router`;
+  return `9Router · ${pretty}`;
 }
 
 /** Order-insensitive comparison, used to tell whether Paseo already lists what 9router serves. */

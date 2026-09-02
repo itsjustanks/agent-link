@@ -24,8 +24,16 @@ import {
   routerTuning,
   routerTuningSet,
   routerLogs,
+  routerKeys,
+  routerKeyCreate,
+  routerKeyDelete,
+  routerKeyReveal,
+  routerCombos,
+  routerComboSave,
+  routerComboDelete,
+  routerPasswordChange,
 } from "./contracts.shared";
-import { formatReset, groupModelIds, parseOauthPaste, providerLabel, quotaTone } from "./router.logic";
+import { cliForModel, formatReset, groupModelIds, parseOauthPaste, providerLabel, quotaTone } from "./router.logic";
 
 type Theme = PluginTheme;
 
@@ -211,6 +219,7 @@ const TABS = [
   { id: "setup", label: "Setup" },
   { id: "accounts", label: "Accounts" },
   { id: "models", label: "Models" },
+  { id: "keys", label: "Keys" },
   { id: "tuning", label: "Tuning" },
   { id: "usage", label: "Usage" },
   { id: "logs", label: "Logs" },
@@ -331,6 +340,14 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
   const callTuning = useRpc(routerTuning);
   const callTuningSet = useRpc(routerTuningSet);
   const callLogs = useRpc(routerLogs);
+  const callKeys = useRpc(routerKeys);
+  const callKeyCreate = useRpc(routerKeyCreate);
+  const callKeyDelete = useRpc(routerKeyDelete);
+  const callKeyReveal = useRpc(routerKeyReveal);
+  const callCombos = useRpc(routerCombos);
+  const callComboSave = useRpc(routerComboSave);
+  const callComboDelete = useRpc(routerComboDelete);
+  const callPasswordChange = useRpc(routerPasswordChange);
 
   const status = useQuery({
     queryKey: ["agent-link", "router-status"],
@@ -362,6 +379,10 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
   const [aliasFrom, setAliasFrom] = useState("");
   const [aliasTo, setAliasTo] = useState("");
   const [comboName, setComboName] = useState("");
+  const [comboModels, setComboModels] = useState<string[]>([]);
+  const [keyName, setKeyName] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<{ model: string; ok: boolean; message: string } | null>(null);
 
   const usage = useQuery({
@@ -380,6 +401,16 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
     queryFn: () => callLogs({ limit: 200 }),
     enabled: live && tab === "logs",
     refetchInterval: tab === "logs" ? 4_000 : false,
+  });
+  const keys = useQuery({
+    queryKey: ["agent-link", "keys"],
+    queryFn: () => callKeys({}),
+    enabled: live && tab === "keys",
+  });
+  const combos = useQuery({
+    queryKey: ["agent-link", "combos"],
+    queryFn: () => callCombos({}),
+    enabled: live && (tab === "keys" || tab === "models"),
   });
   const holds = useQuery({
     queryKey: ["agent-link", "holds"],
@@ -409,6 +440,21 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
   const aliasRemoveMutation = useMutation({ mutationFn: callAliasRemove, ...feedback });
   const clearHoldMutation = useMutation({ mutationFn: callClearHold, ...feedback });
   const tuningMutation = useMutation({ mutationFn: callTuningSet, ...feedback });
+  const keyCreateMutation = useMutation({ mutationFn: callKeyCreate, ...feedback });
+  const keyDeleteMutation = useMutation({ mutationFn: callKeyDelete, ...feedback });
+  const comboSaveMutation = useMutation({ mutationFn: callComboSave, ...feedback });
+  const comboDeleteMutation = useMutation({ mutationFn: callComboDelete, ...feedback });
+  const passwordMutation = useMutation({ mutationFn: callPasswordChange, ...feedback });
+  const keyRevealMutation = useMutation({
+    mutationFn: callKeyReveal,
+    onSuccess: (result) => {
+      // The only path that materialises a full key, and it goes straight to the
+      // clipboard rather than onto the screen.
+      if (result.ok && result.key) Clipboard.setString(result.key);
+      setMessage(result.message);
+    },
+    onError: (error: unknown) => setMessage(error instanceof Error ? error.message : String(error)),
+  });
   const testMutation = useMutation({
     mutationFn: callTestModel,
     onSuccess: (result, input) => setTestResult({ model: input.model, ok: result.ok, message: result.message }),
@@ -519,6 +565,7 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
           setup: remaining > 0 ? String(remaining) : undefined,
           accounts: holdCount > 0 ? String(holdCount) : undefined,
           models: data?.models.count ? String(data.models.count) : undefined,
+          keys: keys.data?.keys.length ? String(keys.data.keys.length) : undefined,
         }}
       />
 
@@ -577,8 +624,13 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
             </View>
             <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
               {!data?.running ? (
-                <Button theme={theme} label="Start 9router" tone="primary" disabled={!data?.binary.path} busy={startMutation.isPending} onPress={() => startMutation.mutate({})} />
-              ) : null}
+                <Button theme={theme} label="Start 9router" tone="primary" disabled={!data?.binary.path} busy={startMutation.isPending} onPress={() => startMutation.mutate({ action: "start" })} />
+              ) : (
+                <>
+                  <Button theme={theme} label="Restart" busy={startMutation.isPending && startMutation.variables?.action === "restart"} onPress={() => startMutation.mutate({ action: "restart" })} />
+                  <Button theme={theme} label="Stop" busy={startMutation.isPending && startMutation.variables?.action === "stop"} onPress={() => startMutation.mutate({ action: "stop" })} />
+                </>
+              )}
               <Button theme={theme} label="Open dashboard" onPress={openDashboard} />
               <Button
                 theme={theme}
@@ -612,6 +664,28 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
               />
             </View>
             <Note theme={theme}>Stored at {data?.settingsPath} (mode 600). The key is never shown in full.</Note>
+            {data?.auth.ok ? (
+              <View style={{ gap: 6 }}>
+                <Text style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "600" }}>Change it</Text>
+                <Note theme={theme}>
+                  Leaving 9router on its shipped password means anyone who can reach this port owns your accounts.
+                </Note>
+                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+                  <Field theme={theme} value={newPassword} onChangeText={setNewPassword} placeholder="new password" secure />
+                  <Button
+                    theme={theme}
+                    label="Change password"
+                    busy={passwordMutation.isPending}
+                    disabled={!live || newPassword.length < 6}
+                    onPress={() => {
+                      passwordMutation.mutate({ currentPassword: password, newPassword });
+                      setPassword(newPassword);
+                      setNewPassword("");
+                    }}
+                  />
+                </View>
+              </View>
+            ) : null}
           </Card>
 
           <Card theme={theme}>
@@ -893,6 +967,135 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
         </>
       ) : null}
 
+
+
+      {/* -------------------------------------------------------------- KEYS */}
+      {tab === "keys" ? (
+        <>
+          <Card theme={theme}>
+            <Step theme={theme} index={0} title="API keys" hint={`${keys.data?.keys.length ?? 0}`} />
+            <Note theme={theme}>
+              Anything pointed at {data?.url}/v1 authenticates with one of these. Give each tool its own, so revoking
+              one does not sign the others out.
+            </Note>
+            {!live ? <Note theme={theme} tone="warning">Finish Setup first.</Note> : null}
+            {(keys.data?.keys ?? []).map((entry) => (
+              <View
+                key={entry.id}
+                style={{ borderColor: theme.colors.border, borderWidth: 1, borderRadius: 8, padding: 10, gap: 6, backgroundColor: theme.colors.surface0 }}
+              >
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <Text style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "600", flex: 1 }}>{entry.name}</Text>
+                  <Chip theme={theme} label={`···${entry.last4}`} />
+                  {!entry.isActive ? <Chip theme={theme} label="inactive" tone="warning" /> : null}
+                </View>
+                <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
+                  <Button theme={theme} label="Copy key" busy={keyRevealMutation.isPending} onPress={() => keyRevealMutation.mutate({ id: entry.id })} />
+                  {confirmDelete === entry.id ? (
+                    <>
+                      <Button
+                        theme={theme}
+                        label="Really delete"
+                        tone="danger"
+                        busy={keyDeleteMutation.isPending}
+                        onPress={() => {
+                          keyDeleteMutation.mutate({ id: entry.id });
+                          setConfirmDelete(null);
+                        }}
+                      />
+                      <Button theme={theme} label="Cancel" onPress={() => setConfirmDelete(null)} />
+                    </>
+                  ) : (
+                    <Button theme={theme} label="Delete" onPress={() => setConfirmDelete(entry.id)} />
+                  )}
+                </View>
+              </View>
+            ))}
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+              <Field theme={theme} value={keyName} onChangeText={setKeyName} placeholder="name, e.g. Zed" />
+              <Button
+                theme={theme}
+                label="Create key"
+                busy={keyCreateMutation.isPending}
+                disabled={!live || !keyName}
+                onPress={() => {
+                  keyCreateMutation.mutate({ name: keyName });
+                  setKeyName("");
+                }}
+              />
+            </View>
+          </Card>
+
+          <Card theme={theme}>
+            <Step theme={theme} index={0} title="Combos" hint={`${combos.data?.combos.length ?? 0}`} />
+            <Note theme={theme}>
+              A combo is an ordered fallback list that behaves like a single model: when the first is exhausted or
+              erroring, 9router moves down the list without you choosing again.
+            </Note>
+            {(combos.data?.combos ?? []).map((combo) => (
+              <View
+                key={combo.id}
+                style={{ borderColor: theme.colors.border, borderWidth: 1, borderRadius: 8, padding: 10, gap: 6, backgroundColor: theme.colors.surface0 }}
+              >
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                  <Text style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "600", flex: 1 }}>{combo.name}</Text>
+                  {combo.kind ? <Chip theme={theme} label={combo.kind} /> : null}
+                  <Button theme={theme} label="Delete" busy={comboDeleteMutation.isPending} onPress={() => comboDeleteMutation.mutate({ id: combo.id })} />
+                </View>
+                <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>{combo.models.join("  →  ")}</Text>
+              </View>
+            ))}
+            <Note theme={theme}>Build one by tapping models in order, first choice first.</Note>
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+              {(data?.models.ids ?? [])
+                .filter((id) => cliForModel(id) !== "other")
+                .slice(0, 24)
+                .map((id) => {
+                  const position = comboModels.indexOf(id);
+                  return (
+                    <Pressable
+                      key={id}
+                      onPress={() =>
+                        setComboModels((current) =>
+                          current.includes(id) ? current.filter((entry) => entry !== id) : [...current, id],
+                        )
+                      }
+                      style={{
+                        paddingHorizontal: 8,
+                        paddingVertical: 4,
+                        borderRadius: 999,
+                        borderWidth: 1,
+                        borderColor: position >= 0 ? theme.colors.accent : theme.colors.border,
+                        backgroundColor: position >= 0 ? theme.colors.accent : "transparent",
+                      }}
+                    >
+                      <Text style={{ color: position >= 0 ? theme.colors.accentForeground : theme.colors.foregroundMuted, fontSize: 11 }}>
+                        {position >= 0 ? `${position + 1}. ` : ""}
+                        {id}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+            </View>
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+              <Field theme={theme} value={comboName} onChangeText={setComboName} placeholder="combo name" />
+              <Button
+                theme={theme}
+                label={`Save combo (${comboModels.length})`}
+                tone="primary"
+                busy={comboSaveMutation.isPending}
+                disabled={!live || !comboName || comboModels.length === 0}
+                onPress={() => {
+                  comboSaveMutation.mutate({ name: comboName, models: comboModels });
+                  setComboName("");
+                  setComboModels([]);
+                }}
+              />
+              {comboModels.length > 0 ? <Button theme={theme} label="Clear" onPress={() => setComboModels([])} /> : null}
+            </View>
+          </Card>
+        </>
+      ) : null}
 
       {/* ------------------------------------------------------------ TUNING */}
       {tab === "tuning" ? (

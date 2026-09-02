@@ -26,6 +26,9 @@ export type RouterSettings = { url: string; apiKey: string | null; password: str
 
 const DEFAULT_URL = "http://127.0.0.1:20128";
 
+/** 9router's first-run dashboard password, unchanged on most installs. */
+export const DEFAULT_ROUTER_PASSWORD = "123456";
+
 function readJsonFile(path: string): Record<string, unknown> | null {
   try {
     return JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
@@ -256,6 +259,22 @@ export async function startRouter(url: string): Promise<{ ok: boolean; message: 
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
   return { ok: false, message: "9router did not become healthy within 20s. Run `9router` in a terminal to see why." };
+}
+
+/**
+ * Ask the running server to exit, then wait for the port to go quiet. 9router
+ * exposes its own shutdown route, which is cleaner than hunting the PID —
+ * a tray-launched instance is not always this process's child.
+ */
+export async function stopRouter(url: string): Promise<{ ok: boolean; message: string }> {
+  const client = new RouterClient({ url, apiKey: null, password: readSettings().password });
+  if (!(await client.health())) return { ok: true, message: "9router was not running." };
+  await client.api("shutdown", { method: "POST" }).catch(() => null);
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (!(await client.health())) return { ok: true, message: "9router stopped." };
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return { ok: false, message: "9router did not stop within 10s." };
 }
 
 /** Files the pre-9router agent-link installed into ROOT/bin, listed so wiring can remove them. */

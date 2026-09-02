@@ -97,8 +97,8 @@ check("groupModelIds groups by pool and keeps every id", () => {
 });
 
 check("modelLabel reads as a name, not an id", () => {
-  assert.equal(modelLabel("cc/claude-opus-5"), "Claude Opus 5 · 9router");
-  assert.match(modelLabel("cx/gpt-5.6-sol"), /^GPT 5\.6 Sol · 9router$/);
+  assert.equal(modelLabel("cc/claude-opus-5"), "9Router · Claude Opus 5");
+  assert.match(modelLabel("cx/gpt-5.6-sol"), /^9Router · GPT 5\.6 Sol$/);
 });
 
 check("sameModelSet ignores order", () => {

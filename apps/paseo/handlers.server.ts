@@ -12,6 +12,7 @@ import {
   sameModelSet,
 } from "./router.logic";
 import {
+  DEFAULT_ROUTER_PASSWORD,
   ROOT,
   RouterClient,
   SETTINGS_PATH,
@@ -20,6 +21,7 @@ import {
   readSettings,
   removeShim,
   startRouter,
+  stopRouter,
   writeSettings,
 } from "./router.server";
 
@@ -98,7 +100,24 @@ async function readHijack(client: RouterClient): Promise<CliHijack[]> {
 
 // ------------------------------------------------------------------- status
 
+/**
+ * 9router ships with a known first-run password that most installs keep. When
+ * none is saved and that one works, adopt it: otherwise a fresh install shows
+ * a panel that can see nothing until the user types a password we already know.
+ */
+async function adoptDefaultPassword(): Promise<void> {
+  const current = readSettings();
+  if (current.password) return;
+  const probe = new RouterClient({ ...current, password: DEFAULT_ROUTER_PASSWORD });
+  if (!(await probe.health())) return;
+  if ((await probe.api<unknown>("providers")) === null) return;
+  writeSettings({ password: DEFAULT_ROUTER_PASSWORD });
+  const key = await new RouterClient(readSettings()).ensureApiKey();
+  if (key) writeSettings({ apiKey: key });
+}
+
 export async function handleRouterStatus(_input: unknown, { paseo }: PluginHandlerContext): Promise<RouterStatus> {
+  await adoptDefaultPassword();
   const settings = readSettings();
   const client = new RouterClient(settings);
   const binaryPath = findBinary("9router");
@@ -208,8 +227,19 @@ export async function handleRouterStatus(_input: unknown, { paseo }: PluginHandl
 
 // ----------------------------------------------------------------- lifecycle
 
-export async function handleRouterStart() {
+export async function handleRouterStart({ action }: { action?: "start" | "stop" | "restart" } = {}) {
   const settings = readSettings();
+  if (action === "stop") {
+    const stopped = await stopRouter(settings.url);
+    return { ok: stopped.ok, running: !stopped.ok, message: stopped.message };
+  }
+  if (action === "restart") {
+    // Stop failures are not fatal: the start below still has to prove health,
+    // and a server that refused to stop will simply already be listening.
+    await stopRouter(settings.url);
+    const started = await startRouter(settings.url);
+    return { ok: started.ok, running: started.ok, message: started.ok ? "9router restarted." : started.message };
+  }
   const result = await startRouter(settings.url);
   return { ok: result.ok, running: result.ok, message: result.message };
 }
@@ -676,4 +706,104 @@ export async function handleRouterLogs({ limit }: { limit?: number }) {
   const raw = await client.api<{ logs?: unknown[] }>(`translator/console-logs?limit=${limit ?? 200}`);
   const lines = (raw?.logs ?? []).filter((line): line is string => typeof line === "string");
   return { lines: lines.slice(-(limit ?? 200)) };
+}
+
+// ------------------------------------------------------------------ round 3
+
+export async function handleRouterKeys() {
+  const client = new RouterClient();
+  const raw = await client.api<{ keys?: Array<Record<string, unknown>> }>("keys");
+  return {
+    keys: (raw?.keys ?? []).map((entry) => ({
+      id: String(entry.id ?? ""),
+      name: String(entry.name ?? "unnamed"),
+      // The secret itself never leaves the handler; only its tail identifies it.
+      last4: typeof entry.key === "string" ? entry.key.slice(-4) : "",
+      isActive: entry.isActive !== false,
+      createdAt: typeof entry.createdAt === "string" ? entry.createdAt : null,
+    })),
+  };
+}
+
+export async function handleRouterKeyCreate({ name }: { name: string }) {
+  const client = new RouterClient();
+  const result = await client.apiJson<{ key?: unknown; name?: string }>("keys", "POST", { name });
+  const created = typeof result?.key === "string" ? result.key : null;
+  if (!created) return { ok: false, message: client.authError ?? "Could not create that key.", last4: null };
+  return { ok: true, message: `Created "${name}".`, last4: created.slice(-4) };
+}
+
+export async function handleRouterKeyDelete({ id }: { id: string }) {
+  const client = new RouterClient();
+  const result = await client.api<{ success?: boolean }>(`keys/${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (result === null) return { ok: false, message: client.authError ?? "Could not delete that key." };
+  return { ok: true, message: "Key deleted." };
+}
+
+/**
+ * The one place a full key is returned, and only because the caller pressed a
+ * button meaning "put this on my clipboard". It is never rendered.
+ */
+export async function handleRouterKeyReveal({ id }: { id: string }) {
+  const client = new RouterClient();
+  const raw = await client.api<{ keys?: Array<Record<string, unknown>> }>("keys");
+  const match = (raw?.keys ?? []).find((entry) => String(entry.id ?? "") === id);
+  const key = typeof match?.key === "string" ? match.key : null;
+  if (!key) return { ok: false, key: null, message: client.authError ?? "That key is no longer available." };
+  return { ok: true, key, message: "Key copied to the clipboard." };
+}
+
+export async function handleRouterCombos() {
+  const client = new RouterClient();
+  const raw = await client.api<{ combos?: Array<Record<string, unknown>> }>("combos");
+  return {
+    combos: (raw?.combos ?? []).map((entry) => ({
+      id: String(entry.id ?? entry.name ?? ""),
+      name: String(entry.name ?? ""),
+      models: Array.isArray(entry.models) ? entry.models.map((model) => String(model)) : [],
+      kind: typeof entry.kind === "string" ? entry.kind : null,
+    })),
+  };
+}
+
+export async function handleRouterComboSave({ id, name, models }: { id?: string; name: string; models: string[] }) {
+  const client = new RouterClient();
+  const body = { name, models, kind: "fallback" };
+  const result = id
+    ? await client.apiJson<{ success?: boolean; error?: string }>(`combos/${encodeURIComponent(id)}`, "PUT", body)
+    : await client.apiJson<{ success?: boolean; error?: string }>("combos", "POST", body);
+  if (result === null) return { ok: false, message: client.authError ?? "Could not save that combo." };
+  return { ok: true, message: `Combo "${name}" falls back across ${models.length} model(s).` };
+}
+
+export async function handleRouterComboDelete({ id }: { id: string }) {
+  const client = new RouterClient();
+  const result = await client.api<{ success?: boolean }>(`combos/${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (result === null) return { ok: false, message: client.authError ?? "Could not delete that combo." };
+  return { ok: true, message: "Combo deleted." };
+}
+
+/**
+ * Change 9router's dashboard password. The saved copy is only updated after
+ * 9router accepts the change — otherwise a failed attempt would leave this
+ * panel holding a password that no longer opens anything.
+ */
+export async function handleRouterPasswordChange({
+  currentPassword,
+  newPassword,
+}: {
+  currentPassword: string;
+  newPassword: string;
+}) {
+  if (newPassword.length < 6) return { ok: false, message: "Pick a password of at least 6 characters." };
+  const client = new RouterClient();
+  const result = await client.apiJson<{ success?: boolean; error?: string }>("settings", "PATCH", {
+    currentPassword,
+    newPassword,
+  });
+  if (result === null || result.error) {
+    return { ok: false, message: result?.error ?? client.authError ?? "9router refused that password change." };
+  }
+  writeSettings({ password: newPassword });
+  return { ok: true, message: "Password changed and saved." };
 }

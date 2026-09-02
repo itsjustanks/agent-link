@@ -91,9 +91,14 @@ export const routerStatus = defineRpc({
   output: RouterStatusSchema,
 });
 
+/**
+ * Lifecycle for the local server: start it, stop it, or bounce it. A restart
+ * is what picks up a change made outside this panel, so it is worth a button
+ * rather than a trip to a terminal.
+ */
 export const routerStart = defineRpc({
   name: "agent-link.router.start",
-  input: z.object({}),
+  input: z.object({ action: z.enum(["start", "stop", "restart"]).optional() }),
   output: z.object({ ok: z.boolean(), running: z.boolean(), message: z.string() }),
 });
 
@@ -299,4 +304,72 @@ export const routerLogs = defineRpc({
   name: "agent-link.router.logs",
   input: z.object({ limit: z.number().optional() }),
   output: z.object({ lines: z.array(z.string()) }),
+});
+
+// ------------------------------------------------------------------ round 3
+
+/** An API key as the panel is allowed to see it: identity, never the secret. */
+export const ApiKeySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  last4: z.string(),
+  isActive: z.boolean(),
+  createdAt: z.string().nullable(),
+});
+
+export const ComboSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  models: z.array(z.string()),
+  kind: z.string().nullable(),
+});
+
+export const routerKeys = defineRpc({
+  name: "agent-link.router.keys",
+  input: z.object({}),
+  output: z.object({ keys: z.array(ApiKeySchema) }),
+});
+
+export const routerKeyCreate = defineRpc({
+  name: "agent-link.router.key.create",
+  input: z.object({ name: z.string() }),
+  output: z.object({ ok: z.boolean(), message: z.string(), last4: z.string().nullable() }),
+});
+
+export const routerKeyDelete = defineRpc({
+  name: "agent-link.router.key.delete",
+  input: z.object({ id: z.string() }),
+  output: z.object({ ok: z.boolean(), message: z.string() }),
+});
+
+/** Copy a key's full value to the clipboard, on explicit request only. */
+export const routerKeyReveal = defineRpc({
+  name: "agent-link.router.key.reveal",
+  input: z.object({ id: z.string() }),
+  output: z.object({ ok: z.boolean(), key: z.string().nullable(), message: z.string() }),
+});
+
+export const routerCombos = defineRpc({
+  name: "agent-link.router.combos",
+  input: z.object({}),
+  output: z.object({ combos: z.array(ComboSchema) }),
+});
+
+export const routerComboSave = defineRpc({
+  name: "agent-link.router.combo.save",
+  input: z.object({ id: z.string().optional(), name: z.string(), models: z.array(z.string()) }),
+  output: z.object({ ok: z.boolean(), message: z.string() }),
+});
+
+export const routerComboDelete = defineRpc({
+  name: "agent-link.router.combo.delete",
+  input: z.object({ id: z.string() }),
+  output: z.object({ ok: z.boolean(), message: z.string() }),
+});
+
+/** Change the dashboard password from here, and keep the saved copy in step. */
+export const routerPasswordChange = defineRpc({
+  name: "agent-link.router.password.change",
+  input: z.object({ currentPassword: z.string(), newPassword: z.string() }),
+  output: z.object({ ok: z.boolean(), message: z.string() }),
 });
