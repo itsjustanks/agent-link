@@ -1,8 +1,8 @@
 <div align="center">
 
-# agent-link for Paseo
+# 9Router Agent Link
 
-**One chat, every connected Paseo model/account.**
+**A Paseo panel for a local [9router](https://github.com/decolua/9router).**
 
 ![Paseo](https://img.shields.io/badge/Paseo-%E2%89%A5%200.5-8A63D2)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
@@ -10,111 +10,69 @@
 
 </div>
 
-This plugin adds the **AgentLink** surface for account capacity, provider health, AgentRouter orchestration, toolchains, and memory protection. The `agent-link auto` command installs the unified **AgentLink** ACP provider used by Paseo's native model picker.
+9router holds your Claude Code and Codex subscriptions, tracks their quotas, rotates between accounts and falls back when one runs out. This plugin is the Paseo front for it: set it up, watch it, and put its models where Paseo's model picker can see them.
 
-## Cursor-style chat behavior
-
-Create one Paseo chat with **AgentLink**, then use its model picker to choose **AgentRouter · Automatic route** or any connected Claude/Codex account and enabled Paseo ACP model. Account email or provider name is included in every profile label.
-
-A model change applies to the next turn while the Paseo agent ID, tab, and canonical transcript stay fixed. AgentLink resumes a private native backend session for each account and bridges missed turns when you switch back.
-
-AgentRouter classifies locally, then uses the configured work type and ordered model/account choices. A clean launch failure can move to the next choice before tool activity, without creating another Paseo agent.
-
-It does not:
-
-- create a replacement Paseo agent or terminal window
-- archive or hide the original chat
-- run an automatic continuation after a failure
-- move subagents between parent chats
-- silently choose a different account than the selected profile
-
-If an account is unavailable, the turn reports that state in the same chat and waits for you to choose another model/account.
-
-## AgentLink surface
-
-The sidebar surface has **Accounts**, **Orchestration**, and **Memory protection**:
-
-- connected primary and managed sign-ins
-- account identity, login state, usage evidence, reset times, and holds
-- activity details loaded on request
-- setup diagnostics and explicit paid account probes
-- add, remove, prefer, hold, and release account controls
-- AgentRouter work types with model/account/mode ordering, required skills, and scoped instructions
-- safe provider-CLI update controls
-- Paseo-owned compiler memory protection
-
-No token material is read. Health polling is read-only and never spends a model request; unknown capacity remains explicitly unknown until a provider reports it or the user explicitly runs a limit probe.
+Requires 9router (`npm install -g 9router`). Without it the panel shows an install guide and nothing else.
 
 ## Install
 
-With the CLI:
-
-```sh
-agent-link app install paseo
-agent-link auto
-```
-
-Directly with Paseo:
-
 ```sh
 paseo plugin add itsjustanks/paseo-agent-link --path apps/paseo --id agent-link
-paseo plugin update agent-link
+paseo plugin reload agent-link
 ```
 
-For local development:
+For local development from a checkout:
 
 ```sh
 agent-link app install paseo --link
 paseo plugin reload agent-link
 ```
 
-Paseo validates Git-managed plugin candidates before activation. Removing the plugin removes its configuration, not account data or chat history.
+Then open **9Router** in the sidebar.
 
-## Existing chats
+## Tabs
 
-AgentLink retains legacy `claude-auto`, `codex-auto`, and `agent-router` provider definitions for existing histories. Those chats stay attached to their original native account; no conversion or archive is attempted. The legacy Codex launcher protects Paseo's JSON-RPC reader from Unicode line separators and safely hands over an idle native writer during **Reload agent**, without changing transcript bytes or IDs. Use **AgentLink** for new chats.
+**Setup** is a checklist that doubles as the wizard — installed, running, password saved, an account connected, a CLI routed. It carries the `npm install -g 9router` command when the binary is missing, a Start button, and the dashboard password prefilled with 9router's first-run default so a fresh install is one press.
 
-## CLI requirement
+**Accounts** lists every connection grouped by provider, with a quota bar per window (5-hour, weekly, whatever that provider reports) and its reset time. Claude signs in by pasting the code from its approval page; Codex hands off to 9router's loopback listener and polls. A **Parked accounts** panel appears when 9router has taken an account out of rotation, showing the error that did it.
 
-The panel can inspect accounts without the CLI. The one-chat provider requires the CLI-installed ACP runtime:
+**Models** syncs the `cc/` and `cx/` ids onto Paseo's own Claude and Codex providers, tests any id with a real completion, exposes a model 9router's catalogue lacks, and manages aliases and combos.
 
-```sh
-agent-link auto
-```
+**Tuning** switches 9router's token savers — RTK (compresses tool output), Caveman (terser system prompt, lite or full), Ponytail (YAGNI coding style), Headroom (external context compression) — and shows the combo strategy and sticky round-robin limit.
 
-This writes `~/.agent-auth/bin/agent-link-acp`, adds the **AgentLink** provider to Paseo config, caches connected provider model catalogs, and requests a provider reload. It does not restart the daemon or active agents. Paseo remembers AgentLink after it is selected once; the plugin does not overwrite an explicit composer preference.
+**Usage** reports requests, prompt/cached/completion tokens and the equivalent API cost, broken down by provider and by model.
 
-## Rate limits
+**Logs** tails 9router's console every 4 seconds, colour-coded, copyable. This is where a routing decision or failure explains itself.
 
-AgentLink displays provider-owned usage evidence and explicit holds. It does not infer health from a successful login. A selected profile that is held, signed out, or unavailable refuses the turn without replacing the chat.
+## What routing actually changes
 
-## Modes and orchestration
+Toggling a CLI in **Setup** calls 9router's own endpoint, which rewrites that CLI's config:
 
-AgentLink exposes **Plan**, **Auto**, and **Full access**. Claude and Codex receive their native equivalents; connected ACP providers are matched from the modes they report. Full access never falls back to a safer or unrelated mode: unsupported direct selections report the incompatibility, while AgentRouter can try its next target before tool activity.
+- Claude Code → the `env` block in `~/.claude/settings.json`
+- Codex → `model_provider` and `[model_providers.9router]` in `~/.codex/config.toml`
 
-In **AgentLink → Orchestration**, each ordered target can inherit the chat mode or pin one of these modes. Each work type can name up to 24 installed skills and add scoped instructions. AgentRouter resolves every required `SKILL.md` before starting a paid provider turn and refuses when one is missing.
+That is machine-wide. Every launch of that binary routes through 9router, whether Paseo started it or you did. Paseo's stock providers need no further wiring as a result.
 
-Claude usage comes from provider-owned interactive status or cached usage state. Codex usage comes from rollout telemetry. Account-limit probes are explicit because they spend a small model turn.
+Restoring Claude also clears any `ANTHROPIC_DEFAULT_*` value still pointing at a 9router id — 9router's own reset list misses some of those slots, which would otherwise leave a model slot pointing at an id that no longer resolves.
 
-## Memory protection
+## Design notes
 
-Only eligible Paseo-owned type-check/compiler process trees are managed. One heavy job runs at a time; critical memory pressure pauses it and recovery resumes it. Provider agents and terminal-owned processes are never killed.
-
-## Account sign-in
-
-Claude and Codex accounts are connected from **AgentLink → Accounts**. The panel starts the provider-owned browser flow, forwards Claude's one-time response directly to Claude Code, or waits for Codex device authorization. It never stores that response, reads OAuth tokens, or opens Terminal. CLI login commands remain available for headless recovery.
+- **The dashboard cannot be embedded.** Plugin surfaces are React Native with no WebView, and the SDK exposes no browser-tab API. "Open dashboard" uses the system browser; ⌘⇧B opens a Paseo browser tab to paste into.
+- **No token material is read.** The panel reads account identity and provider-reported usage. The API key is reported as present plus its last four characters; the dashboard password is written to `9router.json` (mode 600) and never returned.
+- **Only `cc/` and `cx/` are listed in Paseo.** A single Cursor sign-in contributes 200+ model ids; listing every pool turns the picker into a haystack. Other pools stay reachable through an alias or a combo.
+- **Reads are cheap and never spend a turn.** The one exception is the Test button in **Models**, which sends a 16-token completion because that is the only honest way to answer "is this reachable".
 
 ## Troubleshooting
 
-- **AgentLink is absent** — run `agent-link auto`, then `paseo reload`.
-- **Profiles are missing** — repair the sign-in in AgentLink → Accounts, run `agent-link auto`, and start or reload the AgentLink session.
-- **Automatic picked the wrong work type** — edit the order in AgentLink → Orchestration.
-- **An old chat fails to resume** — run `agent-link auto`, keep its legacy provider and original account, then reload that chat.
-- **Plugin controls stop after reload** — reopen the AgentLink surface to load the new bundle.
+**The panel says 9router is not running.** Press Start, or run `9router` in a terminal to see why it will not.
 
-## Security
+**Accounts and quotas are empty.** The panel needs the dashboard password to reach 9router's management API. Save it under Setup.
 
-Plugin backend code is trusted daemon code. It reads account identity and provider-owned usage state, never OAuth token material. During sign-in it holds only the live provider process and forwards the short-lived response without writing it to disk. It does not archive chats, spawn continuation agents, or switch an in-flight native process.
+**An account is parked and stays parked.** 9router clears an account's error state only after a successful request from that account — but a parked account is excluded from selection, so it never gets one. Fix the cause, then press Clear in **Accounts**.
+
+**A model 400s with a version message.** 9router sends its own hardcoded Claude Code version, not yours. A model gated behind a newer client fails until 9router bumps it.
+
+**Nothing appears in the picker after Sync.** Check `paseo plugin logs agent-link`, then reload Paseo. Sync writes `additionalModels` on the native providers and refreshes them; it never restarts the daemon.
 
 ## License
 

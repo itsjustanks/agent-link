@@ -169,6 +169,15 @@ export function parseOauthPaste(input: string): { code: string; state: string | 
       return null;
     }
   }
+  // Claude's approval page shows the code as `code#state`, and people paste it
+  // whole. Splitting it here is the difference between a sign-in that works and
+  // one that fails with an opaque state mismatch.
+  const hash = trimmed.indexOf("#");
+  if (hash > 0) {
+    const code = trimmed.slice(0, hash);
+    const state = trimmed.slice(hash + 1);
+    return { code, state: state || null };
+  }
   return { code: trimmed, state: null };
 }
 
