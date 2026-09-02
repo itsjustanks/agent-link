@@ -1,365 +1,203 @@
 import { defineRpc } from "@getpaseo/plugin/server";
 import { z } from "zod";
 
-export const SlotSchema = z.object({
-  provider: z.enum(["claude", "codex"]),
-  email: z.string(),
-  dir: z.string(),
-  source: z.enum(["agent-link", "external"]),
-  loggedIn: z.boolean(),
-  actualEmail: z.string(),
-  wrongAccount: z.boolean(),
-  wiredProviderId: z.string().nullable(),
-  cooldownUntil: z.number(), // epoch seconds; 0 = available
-  launches: z.number(), // agents this account has been handed by the router
-  lastUsed: z.number(), // epoch seconds; 0 = never
-  preference: z.enum(["preferred", "standard", "reserve"]),
-  nearing: z.boolean(), // healthy enough to serve, but new work drains elsewhere
-  creditNote: z.string(), // "" when fine, else e.g. "out of credits"
-  blocked: z.boolean(), // active hold/cooldown — routing skips it
-  parkReason: z.string(), // why it is parked, "" when not parked
-  outputStyle: z.string(), // active output style, "" when unset
-  settingsDrift: z.array(z.string()), // preference keys that differ from the primary
-  modelHolds: z.array(z.string()), // model slugs this account cannot currently serve
-});
-export type Slot = z.infer<typeof SlotSchema>;
+// Every RPC lives under `agent-link.router.*`. Secrets never cross this
+// boundary: the API key is reported as `present` + `last4`, the password never.
 
-export const AutoRouterSchema = z.object({
-  provider: z.enum(["claude", "codex"]),
-  launcherPath: z.string(),
-  launcherExists: z.boolean(),
-  wiredProviderId: z.string().nullable(),
-});
-export type AutoRouter = z.infer<typeof AutoRouterSchema>;
-
-export const RouteEventSchema = z.object({
-  at: z.number(),
-  provider: z.enum(["claude", "codex"]),
-  email: z.string(),
-  decision: z.string(),
-  group: z.enum(["preferred", "standard", "reserve", "fallback"]),
-  agentId: z.string(),
-  cwd: z.string(),
-  model: z.string(),
-});
-export type RouteEvent = z.infer<typeof RouteEventSchema>;
-
-export const scan = defineRpc({
-  name: "agent-link.scan",
-  input: z.object({}),
-  output: z.object({
-    slots: z.array(SlotSchema),
-    primaryAccounts: z.object({ claude: z.string(), codex: z.string() }),
-    primaryCreditNote: z.string(),
-    primaries: z.array(
-      z.object({
-        provider: z.enum(["claude", "codex"]),
-        email: z.string(),
-        launches: z.number(),
-        cooldownUntil: z.number(),
-        blocked: z.boolean(),
-        parkReason: z.string(),
-        preference: z.enum(["preferred", "standard", "reserve"]),
-        nearing: z.boolean(),
-        modelHolds: z.array(z.string()),
-        duplicated: z.boolean(), // an account slot already holds this account
-      }),
-    ),
-    nextUp: z.array(
-      z.object({ provider: z.enum(["claude", "codex"]), email: z.string(), poolKey: z.string() }),
-    ),
-    recentRoutes: z.array(RouteEventSchema),
-    autoRouters: z.array(AutoRouterSchema),
-    agentAuthInstalled: z.boolean(),
-  }),
-});
-
-export const RouterTargetModeSchema = z.enum(["inherit", "plan", "auto", "full-access"]);
-
-export const RouterTargetSchema = z.object({
-  /** Logical Paseo provider. Claude/Codex account choice is kept separate. */
-  provider: z.string().regex(/^[a-z][a-z0-9-]*$/),
-  model: z.string().min(1).max(160),
-  /** auto, primary, a saved pool key, or provider for single-account providers. */
-  account: z.string().min(1).max(320).default("provider"),
-  /** Concrete provider ID AgentRouter passes to Paseo after account resolution. */
-  resolvedProvider: z.string().regex(/^[a-z][a-z0-9-]*$/).optional(),
-  /** Inherit the chat mode or use this target's explicit normalized mode. */
-  mode: RouterTargetModeSchema.default("inherit"),
-  available: z.boolean().nullable().optional(),
-});
-
-export const RouterAccountOptionSchema = z.object({
-  provider: z.enum(["claude", "codex"]),
-  id: z.string(),
+export const QuotaSchema = z.object({
   label: z.string(),
-  description: z.string(),
-  available: z.boolean(),
-  resolvedProvider: z.string(),
+  used: z.number(),
+  total: z.number(),
+  remaining: z.number(),
+  remainingPercentage: z.number(),
+  resetAt: z.string().nullable(),
+  unlimited: z.boolean(),
 });
 
-export const RouterTargetGroupSchema = z.object({
-  name: z.string().min(1).max(40).regex(/^[a-z][a-z0-9-]*$/),
-  purpose: z.string().min(1).max(200),
-  skills: z.array(z.string().trim().min(1).max(320)).max(24).default([]),
-  instructions: z.string().max(6_000).default(""),
-  selector: z.literal("in_order").default("in_order"),
-  targets: z.array(RouterTargetSchema).min(1).max(12),
+export const UsageSchema = z.object({
+  plan: z.string().nullable(),
+  limitReached: z.boolean(),
+  quotas: z.array(QuotaSchema),
 });
 
-export const RouterProviderStatusSchema = z.object({
+export const ConnectionSchema = z.object({
+  id: z.string(),
+  provider: z.string(),
+  authType: z.string().nullable(),
+  name: z.string(),
+  email: z.string().nullable(),
+  priority: z.number(),
+  isActive: z.boolean(),
+  testStatus: z.string().nullable(),
+  expiresAt: z.string().nullable(),
+  usage: UsageSchema.nullable(),
+});
+
+export const CustomModelSchema = z.object({
+  providerAlias: z.string(),
+  id: z.string(),
+  type: z.string(),
+  name: z.string().nullable(),
+});
+
+export const AliasSchema = z.object({ alias: z.string(), model: z.string() });
+
+/**
+ * 9router rewrites the CLIs' own config so every launch of that binary — by
+ * Paseo or anyone else — goes through the router. This is the state of that
+ * rewrite, read back from 9router rather than guessed.
+ */
+export const CliHijackSchema = z.object({
+  cli: z.enum(["claude", "codex"]),
   installed: z.boolean(),
-  configured: z.boolean(),
-  loaded: z.boolean(),
-  launcherPath: z.string(),
-  rulesPath: z.string(),
-  baseProvider: z.string(),
-  baseModel: z.string(),
-  controllerProvider: z.enum(["claude-auto", "claude"]),
-  controllerAccount: z.string(),
-  controllerModel: z.string(),
-  controllerAccountOptions: z.array(RouterAccountOptionSchema),
-  controllerModels: z.array(z.object({ id: z.string(), label: z.string() })),
-  providerOptions: z.array(
-    z.object({
-      id: z.string(),
-      label: z.string(),
-      available: z.boolean(),
-    }),
-  ),
-  accountOptions: z.array(RouterAccountOptionSchema),
-  targetGroups: z.array(RouterTargetGroupSchema),
-  userRules: z.string(),
-  orchestration: z.object({
-    systemPromptInstalled: z.boolean(),
-    skills: z.array(z.object({ id: z.string(), installed: z.boolean() })),
-  }),
-  message: z.string(),
+  routed: z.boolean(),
+  configPath: z.string().nullable(),
+  baseUrl: z.string().nullable(),
+  defaultModels: z.array(z.object({ key: z.string(), value: z.string() })),
 });
-export type RouterProviderStatus = z.infer<typeof RouterProviderStatusSchema>;
+
+export const RouterStatusSchema = z.object({
+  binary: z.object({ path: z.string().nullable(), version: z.string().nullable() }),
+  running: z.boolean(),
+  url: z.string(),
+  dashboardUrl: z.string(),
+  settingsPath: z.string(),
+  version: z.object({ current: z.string(), latest: z.string(), hasUpdate: z.boolean() }).nullable(),
+  auth: z.object({ configured: z.boolean(), ok: z.boolean(), error: z.string().nullable() }),
+  apiKey: z.object({ present: z.boolean(), last4: z.string().nullable() }),
+  connections: z.array(ConnectionSchema),
+  models: z.object({ count: z.number(), ids: z.array(z.string()), custom: z.array(CustomModelSchema) }),
+  aliases: z.array(AliasSchema),
+  combos: z.array(z.object({ name: z.string(), models: z.array(z.string()) })),
+  hijack: z.array(CliHijackSchema),
+  paseo: z.object({
+    // Model ids currently listed on Paseo's native providers.
+    listedModels: z.object({ claude: z.array(z.string()), codex: z.array(z.string()) }),
+    modelsInSync: z.boolean(),
+    // Dead entries this plugin used to write and now removes.
+    staleProviders: z.array(z.string()),
+    staleShims: z.array(z.string()),
+  }),
+});
+
+export type RouterStatus = z.infer<typeof RouterStatusSchema>;
+export type Connection = z.infer<typeof ConnectionSchema>;
+export type CustomModel = z.infer<typeof CustomModelSchema>;
+export type CliHijack = z.infer<typeof CliHijackSchema>;
 
 export const routerStatus = defineRpc({
-  name: "agent-link.router-status",
+  name: "agent-link.router.status",
   input: z.object({}),
-  output: RouterProviderStatusSchema,
+  output: RouterStatusSchema,
 });
 
-export const routerConfigure = defineRpc({
-  name: "agent-link.router-configure",
-  input: z.object({
-    controllerAccount: z.string().min(1).max(320),
-    controllerModel: z.string().min(1).max(160),
-    targetGroups: z.array(RouterTargetGroupSchema).min(1).max(12),
-    userRules: z.string().max(12_000),
-  }),
-  output: RouterProviderStatusSchema,
+export const routerStart = defineRpc({
+  name: "agent-link.router.start",
+  input: z.object({}),
+  output: z.object({ ok: z.boolean(), running: z.boolean(), message: z.string() }),
 });
 
-export const routerModels = defineRpc({
-  name: "agent-link.router-models",
-  input: z.object({ provider: z.string().regex(/^[a-z][a-z0-9-]*$/) }),
+export const routerSettingsSave = defineRpc({
+  name: "agent-link.router.settings.save",
+  input: z.object({ url: z.string().optional(), password: z.string().optional() }),
   output: z.object({
-    provider: z.string(),
-    models: z.array(z.object({ id: z.string(), label: z.string(), description: z.string() })),
+    ok: z.boolean(),
+    message: z.string(),
+    apiKey: z.object({ present: z.boolean(), last4: z.string().nullable() }),
+  }),
+});
+
+/**
+ * Turn the CLI hijack on or off. This rewrites `~/.claude/settings.json` or
+ * `~/.codex/config.toml`, so it changes every launch of that binary on the
+ * machine — not only the ones Paseo starts.
+ */
+export const routerRouteCli = defineRpc({
+  name: "agent-link.router.route-cli",
+  input: z.object({ cli: z.enum(["claude", "codex"]), routed: z.boolean() }),
+  output: z.object({ ok: z.boolean(), message: z.string() }),
+});
+
+/** List 9router's models on Paseo's native claude/codex providers. */
+export const routerSyncModels = defineRpc({
+  name: "agent-link.router.sync-models",
+  input: z.object({}),
+  output: z.object({
+    ok: z.boolean(),
+    claude: z.number(),
+    codex: z.number(),
+    removedProviders: z.array(z.string()),
+    removedShims: z.array(z.string()),
     message: z.string(),
   }),
 });
 
-export const wireAuto = defineRpc({
-  name: "agent-link.wire-auto",
-  input: z.object({ provider: z.enum(["claude", "codex"]) }),
-  output: z.object({ ok: z.boolean(), providerId: z.string().nullable(), message: z.string() }),
-});
+export const OauthProviderSchema = z.enum(["claude", "codex"]);
 
-export const addAccount = defineRpc({
-  name: "agent-link.add-account",
-  input: z.object({ provider: z.enum(["claude", "codex"]), email: z.string().min(3) }),
-  output: z.object({ ok: z.boolean(), message: z.string(), started: z.boolean() }),
-});
-
-export const removeAccount = defineRpc({
-  name: "agent-link.remove-account",
-  input: z.object({ provider: z.enum(["claude", "codex"]), email: z.string().min(1) }),
-  output: z.object({ ok: z.boolean(), message: z.string() }),
-});
-
-export const setPreference = defineRpc({
-  name: "agent-link.set-preference",
-  input: z.object({
-    provider: z.enum(["claude", "codex"]),
-    email: z.string().min(1),
-    preference: z.enum(["preferred", "standard", "reserve"]),
+export const routerConnectStart = defineRpc({
+  name: "agent-link.router.connect.start",
+  input: z.object({ provider: OauthProviderSchema }),
+  output: z.object({
+    provider: OauthProviderSchema,
+    mode: z.enum(["paste-code", "poll"]),
+    authUrl: z.string(),
+    state: z.string(),
+    codeVerifier: z.string().nullable(),
+    redirectUri: z.string(),
   }),
-  output: z.object({ ok: z.boolean(), message: z.string() }),
 });
 
-export const setCooldown = defineRpc({
-  name: "agent-link.set-cooldown",
-  input: z.object({ provider: z.enum(["claude", "codex"]), email: z.string(), minutes: z.number() }),
-  output: z.object({ ok: z.boolean(), message: z.string() }),
-});
-
-export const wireProvider = defineRpc({
-  name: "agent-link.wire-provider",
-  input: z.object({
-    provider: z.enum(["claude", "codex"]),
-    email: z.string(),
-    dir: z.string(),
+export const routerConnectPoll = defineRpc({
+  name: "agent-link.router.connect.poll",
+  input: z.object({ provider: OauthProviderSchema, state: z.string() }),
+  output: z.object({
+    status: z.enum(["pending", "done", "error", "unknown"]),
+    error: z.string().nullable(),
   }),
-  output: z.object({ providerId: z.string() }),
 });
 
-export const diagnoseProvider = defineRpc({
-  name: "agent-link.diagnose-provider",
-  input: z.object({ providerId: z.string() }),
-  output: z.object({ summary: z.string() }),
+export const routerConnectComplete = defineRpc({
+  name: "agent-link.router.connect.complete",
+  input: z.object({
+    provider: OauthProviderSchema,
+    code: z.string(),
+    state: z.string(),
+    codeVerifier: z.string(),
+    redirectUri: z.string(),
+  }),
+  output: z.object({ ok: z.boolean(), error: z.string().nullable() }),
 });
 
-export const AccountUsageSchema = z.object({
-  provider: z.enum(["claude", "codex"]),
-  email: z.string(),
-  accountId: z.string(),
-  poolKey: z.string(),
-  isPrimary: z.boolean(),
-  sessions: z.number(),
-  inputTokens: z.number(),
-  outputTokens: z.number(),
-  cacheReadTokens: z.number(),
-  reasoningTokens: z.number(),
-  contextWindow: z.number(),
-  lastActive: z.number(), // epoch seconds, 0 = none in window
-  models: z.array(z.string()),
-  cacheCreationTokens: z.number(),
-  limitHits: z.number(), // times this account was refused for a limit
-  limitLast: z.number(), // epoch seconds of the most recent refusal
-  daily: z.array(z.number()), // output tokens per day, oldest first
-  topProject: z.string(),
-  /** Live window usage captured from the account's own telemetry (statusline / rollouts). */
-  quota: z
-    .object({
-      at: z.number(), // epoch seconds the snapshot was taken
-      model: z.string(),
-      windows: z.array(z.object({ label: z.string(), pct: z.number(), resetsAt: z.number().nullable() })),
-    })
-    .nullable(),
-  /** Non-expiring park reason (spend limit / held by hand), null when not held. */
-  held: z.string().nullable(),
-});
-export type AccountUsage = z.infer<typeof AccountUsageSchema>;
-
-export const accountUsage = defineRpc({
-  name: "agent-link.account-usage",
-  input: z.object({ days: z.number() }),
-  output: z.object({ accounts: z.array(AccountUsageSchema) }),
+export const routerConnectionRemove = defineRpc({
+  name: "agent-link.router.connection.remove",
+  input: z.object({ id: z.string() }),
+  output: z.object({ ok: z.boolean(), message: z.string() }),
 });
 
-export const CapacityWindowSchema = z.object({
-  label: z.string(),
-  kind: z.enum(["session", "weekly", "other"]),
-  durationMinutes: z.number().nullable(),
-  usedPct: z.number(),
-  resetsAt: z.number().nullable(),
+export const routerModelExpose = defineRpc({
+  name: "agent-link.router.model.expose",
+  input: z.object({ providerAlias: z.string(), id: z.string(), name: z.string().optional() }),
+  output: z.object({ ok: z.boolean(), message: z.string() }),
 });
 
-export const CapacityAccountSchema = z.object({
-  provider: z.enum(["claude", "codex"]),
-  email: z.string(),
-  accountId: z.string(),
-  isPrimary: z.boolean(),
-  poolKey: z.string(),
-  state: z.enum(["current", "nearing", "stale", "missing"]),
-  detail: z.string(),
-  at: z.number(),
-  plan: z.string(),
-  model: z.string(),
-  source: z.string(),
-  credits: z
-    .object({
-      hasCredits: z.boolean(),
-      unlimited: z.boolean(),
-      balance: z.string(),
-    })
-    .nullable(),
-  extraUsage: z
-    .object({
-      at: z.number(),
-      accountEnabled: z.boolean().nullable(),
-      enabled: z.boolean().nullable(),
-      used: z.number().nullable(),
-      limit: z.number().nullable(),
-      balance: z.number().nullable(),
-      currency: z.string(),
-      reason: z.string(),
-      spendLimitReached: z.boolean(),
-      userDisabled: z.boolean().nullable(),
-      everEnabled: z.boolean().nullable(),
-      canToggle: z.boolean().nullable(),
-    })
-    .nullable(),
-  windows: z.array(CapacityWindowSchema),
-});
-export type CapacityAccount = z.infer<typeof CapacityAccountSchema>;
-
-export const accountCapacity = defineRpc({
-  name: "agent-link.account-capacity",
-  input: z.object({}),
-  output: z.object({ accounts: z.array(CapacityAccountSchema) }),
+export const routerModelUnexpose = defineRpc({
+  name: "agent-link.router.model.unexpose",
+  input: z.object({ providerAlias: z.string(), id: z.string(), type: z.string().optional() }),
+  output: z.object({ ok: z.boolean(), message: z.string() }),
 });
 
 /**
- * An explicit, paid provider turn. This is deliberately separate from the
- * cheap heartbeat so opening the panel can never consume quota.
+ * Map a bare model name onto a 9router model, so a request that names
+ * `claude-opus-5` reaches the `cc/` account pool instead of 404ing.
  */
-export const probeAccounts = defineRpc({
-  name: "agent-link.probe-accounts",
-  input: z.object({
-    provider: z.enum(["claude", "codex"]),
-    model: z.string().max(160),
-    parkFailures: z.boolean(),
-  }),
-  output: z.object({ ok: z.boolean(), message: z.string(), log: z.string() }),
+export const routerAliasSet = defineRpc({
+  name: "agent-link.router.alias.set",
+  input: z.object({ alias: z.string(), model: z.string() }),
+  output: z.object({ ok: z.boolean(), message: z.string() }),
 });
 
-export const providerHealth = defineRpc({
-  name: "agent-link.provider-health",
-  input: z.object({}),
-  output: z.object({
-    providers: z.array(
-      z.object({
-        id: z.string(),
-        label: z.string(),
-        ok: z.boolean(),
-        summary: z.string(),
-      }),
-    ),
-  }),
-});
-
-export const ProviderHeartbeatSchema = z.object({
-  /** The provider family shown as one tab; account-pinned aliases roll up here. */
-  id: z.string(),
-  label: z.string(),
-  available: z.boolean(),
-  kind: z.enum(["pooled", "single"]),
-  quotaTelemetry: z.boolean(),
-  autoProviderId: z.string().nullable(),
-  aliases: z.array(z.string()),
-  /** Exact interactive login command when AgentLink knows this CLI. */
-  authCommand: z.string(),
-  summary: z.string(),
-});
-export type ProviderHeartbeat = z.infer<typeof ProviderHeartbeatSchema>;
-
-/**
- * Cheap liveness signal: daemon RPC + provider registry only. It deliberately
- * never starts a provider process or model turn; providerHealth remains the
- * explicit deep check.
- */
-export const providerHeartbeat = defineRpc({
-  name: "agent-link.provider-heartbeat",
-  input: z.object({}),
-  output: z.object({
-    checkedAt: z.number(),
-    providers: z.array(ProviderHeartbeatSchema),
-  }),
+export const routerAliasRemove = defineRpc({
+  name: "agent-link.router.alias.remove",
+  input: z.object({ alias: z.string() }),
+  output: z.object({ ok: z.boolean(), message: z.string() }),
 });

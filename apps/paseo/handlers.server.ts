@@ -1,1800 +1,504 @@
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
-import { execFileSync, spawn } from "node:child_process";
-import { copyFileSync, cpSync, createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, delimiter, dirname, join } from "node:path";
-import { createInterface } from "node:readline";
+import { join } from "node:path";
+import type { CliHijack, Connection, CustomModel, RouterStatus } from "./contracts.shared";
 import {
-  accountIdentity,
-  claudeCachedQuotaFromConfig,
-  groupAccountQuotaBindings,
-  mergePoolQuotas,
-  normalizeAccountEmail,
-  poolQuotaFromRaw,
-  type PoolQuota,
-} from "./account-capacity.logic";
+  DEAD_PROVIDER_IDS,
+  cliForModel,
+  isLegacyShim,
+  modelLabel,
+  normalizeUsage,
+  sameModelSet,
+} from "./router.logic";
 import {
-  accountCoveredByManagedBinding,
-  compareRouteCandidates,
-  dedupeRouteCandidates,
-  type AccountRouteCandidate,
-} from "./account-routing.logic";
-import type { RouteEvent, Slot } from "./contracts.shared";
-import { onStart } from "./lifecycle.shared";
+  ROOT,
+  RouterClient,
+  SETTINGS_PATH,
+  findBinary,
+  listStaleShims,
+  readSettings,
+  removeShim,
+  startRouter,
+  writeSettings,
+} from "./router.server";
 
 const HOME = homedir();
-// Home dir: prefer whichever location actually holds accounts. Picking a
-// merely-existing empty dir made the panel look at the wrong place and report
-// working accounts as missing and the auto-router as unwired.
-function hasAccounts(root: string): boolean {
-  for (const provider of ["claude", "codex"]) {
-    try {
-      if (readdirSync(join(root, "accounts", provider)).length > 0) return true;
-    } catch {
-      // missing dir is simply "no accounts here"
-    }
-  }
-  return false;
-}
 
-export const AGENT_LINK_HOME_DIR = (() => {
-  const explicit = process.env.AGENT_LINK_HOME ?? process.env.AGENT_AUTH_HOME;
-  if (explicit) return explicit;
-  const link = join(HOME, ".agent-link");
-  const auth = join(HOME, ".agent-auth");
-  if (hasAccounts(link)) return link;
-  if (hasAccounts(auth)) return auth;
-  return existsSync(link) ? link : auth;
-})();
-
-export const AGENT_LINK_ROOT = join(AGENT_LINK_HOME_DIR, "accounts");
-const PASEO_CONFIG_PATH = join(HOME, ".paseo", "config.json");
-// Hand-rolled slot layouts some setups use outside agent-link (read-only here).
-export const EXTERNAL_ROOTS: Array<{ provider: "claude" | "codex"; root: string }> = [
-  { provider: "claude", root: join(HOME, ".claude-accounts") },
-  { provider: "codex", root: join(HOME, ".codex-accounts") },
-];
-
-// ---------------------------------------------------------------- fs helpers
-
-function listDirs(root: string): string[] {
-  try {
-    return readdirSync(root, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => join(root, entry.name));
-  } catch {
-    return [];
-  }
-}
-
-export function readJson(path: string): Record<string, unknown> | null {
-  try {
-    return JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-  } catch {
-    return null;
-  }
-}
-
-const BACKUP_KEEP = 20;
-
-export function backupFile(path: string): void {
-  if (!existsSync(path)) return;
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  copyFileSync(path, `${path}.bak-agent-link-${stamp}`);
-  // Keep the most recent few so config dirs do not fill with backups. The count
-  // is per file and generous on purpose: applying one server to seven
-  // destinations is a single user action that writes seven files, and a tighter
-  // cap would push the pre-change copy out within two such presses.
-  try {
-    const dir = dirname(path);
-    const prefix = `${basename(path)}.bak-agent-link-`;
-    const old = readdirSync(dir)
-      .filter((entry) => entry.startsWith(prefix))
-      .sort() // ISO timestamps sort chronologically
-      .slice(0, -BACKUP_KEEP);
-    for (const entry of old) rmSync(join(dir, entry), { force: true });
-  } catch {
-    // Pruning is best-effort; never block a write on it.
-  }
-}
+type ProviderEntry = { additionalModels?: Array<{ id?: unknown; label?: unknown }> } & Record<string, unknown>;
+type ProviderOverrides = Record<string, ProviderEntry | undefined>;
 
 /**
- * Replace a file's contents in one step, keeping the permissions it already
- * had. These files hold bearer tokens, so a fresh one is created private, and
- * an existing 0600 config is never widened by being edited here.
+ * The daemon returns config flattened — providers live at `config.providers`
+ * even though a patch is written as `{agents:{providers}}`. Reading only the
+ * nested path silently yields {}, which makes every provider look unconfigured.
  */
-export function writeTextAtomic(path: string, text: string): void {
-  const mode = existsSync(path) ? statSync(path).mode & 0o777 : 0o600;
-  const tmp = `${path}.tmp-agent-link`;
-  writeFileSync(tmp, text, { mode });
-  renameSync(tmp, path);
-}
-
-export function writeJsonAtomic(path: string, value: unknown): void {
-  writeTextAtomic(path, `${JSON.stringify(value, null, 2)}\n`);
-}
-
-// ---------------------------------------------------------------- accounts / slots
-
-// Only the account email is ever read from credential-adjacent files — no token
-// material leaves the handler.
-export function claudeAccountEmail(configDir: string): string {
-  const config = readJson(configDir === HOME ? join(HOME, ".claude.json") : join(configDir, ".claude.json"));
-  const account = config?.oauthAccount as { emailAddress?: string } | undefined;
-  return account?.emailAddress ?? "";
-}
-
-export function codexAccountEmail(codexHome: string): string {
-  const auth = readJson(join(codexHome, "auth.json"));
-  const idToken = (auth?.tokens as { id_token?: string } | undefined)?.id_token;
-  if (!idToken) return "";
-  try {
-    const payload = JSON.parse(Buffer.from(idToken.split(".")[1] ?? "", "base64url").toString());
-    return typeof payload.email === "string" ? payload.email : "";
-  } catch {
-    return "";
-  }
-}
-
-// Claude Code does NOT drop a credentials file inside CLAUDE_CONFIG_DIR on
-// macOS — the tokens go to the OS keychain, keyed per config dir. Verified:
-// three config dirs report three different `claude auth status` accounts at the
-// same time. So identity in .claude.json, not a credentials file, is what says
-// "this slot is logged in". Codex does keep auth.json inside CODEX_HOME.
-function slotLoggedIn(provider: "claude" | "codex", dir: string, accountEmail: string): boolean {
-  if (provider === "claude") return accountEmail !== "";
-  return existsSync(join(dir, "auth.json"));
-}
-
-// Claude records why extra usage is unavailable in its own config — a
-// token-free signal that an account has hit a spend limit.
-function creditNote(provider: "claude" | "codex", dir: string): string {
-  if (provider !== "claude") return "";
-  const config = readJson(dir === HOME ? join(HOME, ".claude.json") : join(dir, ".claude.json"));
-  if (!config) return "";
-  const reason = config.cachedExtraUsageDisabledReason;
-  if (typeof reason !== "string" || reason === "") return "";
-  if (reason === "out_of_credits") return "extra usage exhausted (may still serve some models)";
-  if (reason.startsWith("org_level_disabled")) return "extra usage disabled for this org (may refuse premium models)";
-  return `extra usage unavailable (${reason})`;
-}
-
-export function envVarFor(provider: "claude" | "codex"): string {
-  return provider === "claude" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME";
-}
-
-export function accountConfigDir(
-  provider: "claude" | "codex",
-  source: "primary" | "agent-link" | "external",
-  email: string,
-): string | null {
-  if (source === "primary") return provider === "claude" ? HOME : join(HOME, ".codex");
-  if (!/^[^\s/\\]+@[^\s/\\]+$/.test(email)) return null;
-  if (source === "agent-link") return join(AGENT_LINK_ROOT, provider, email);
-  const root = EXTERNAL_ROOTS.find((entry) => entry.provider === provider)?.root;
-  if (!root) return null;
-  const dir = join(root, email);
-  return existsSync(dir) ? dir : null;
-}
-
-function collectSlots(): Array<Omit<Slot, "wiredProviderId" | "cooldownUntil" | "launches" | "lastUsed" | "preference" | "nearing" | "creditNote" | "blocked" | "parkReason" | "outputStyle" | "settingsDrift" | "modelHolds">> {
-  const slots: Array<Omit<Slot, "wiredProviderId" | "cooldownUntil" | "launches" | "lastUsed" | "preference" | "nearing" | "creditNote" | "blocked" | "parkReason" | "outputStyle" | "settingsDrift" | "modelHolds">> = [];
-  const seen = new Set<string>();
-  const add = (provider: "claude" | "codex", dir: string, source: "agent-link" | "external") => {
-    if (seen.has(dir)) return;
-    seen.add(dir);
-    const email = basename(dir);
-    const actualEmail = provider === "claude" ? claudeAccountEmail(dir) : codexAccountEmail(dir);
-    const loggedIn = slotLoggedIn(provider, dir, actualEmail);
-    slots.push({
-      provider,
-      email,
-      dir,
-      source,
-      loggedIn,
-      actualEmail,
-      wrongAccount:
-        loggedIn && actualEmail !== "" && normalizeAccountEmail(actualEmail) !== normalizeAccountEmail(email),
-    });
-  };
-  for (const provider of ["claude", "codex"] as const) {
-    for (const dir of listDirs(join(AGENT_LINK_ROOT, provider))) add(provider, dir, "agent-link");
-  }
-  for (const { provider, root } of EXTERNAL_ROOTS) {
-    for (const dir of listDirs(root)) add(provider, dir, "external");
-  }
-  return slots;
-}
-
-type ProviderOverrides = Record<
-  string,
-  {
-    extends?: string;
-    env?: Record<string, string>;
-    enabled?: boolean;
-    label?: string;
-    description?: string;
-    command?: string[];
-    models?: Array<{ id: string; label?: string; description?: string; isDefault?: boolean }>;
-  } | undefined
->;
-
-// The daemon returns config FLATTENED — providers live at config.providers,
-// even though a patch is written as { agents: { providers } }. Reading the
-// nested path silently yielded {} , so every provider looked unconfigured:
-// wired accounts showed as unwired and the auto-router always offered "Wire".
 async function providerOverrides(paseo: PluginHandlerContext["paseo"]): Promise<ProviderOverrides> {
   const { config } = await paseo.config.get();
   const shape = config as { providers?: ProviderOverrides; agents?: { providers?: ProviderOverrides } };
-  return (shape.providers ?? shape.agents?.providers ?? {}) as ProviderOverrides;
+  return shape.providers ?? shape.agents?.providers ?? {};
 }
 
-async function refreshProviders(paseo: PluginHandlerContext["paseo"], providers: string[]): Promise<boolean> {
-  if (providers.length === 0) return true;
+function listedModels(overrides: ProviderOverrides, provider: string): string[] {
+  const entry = overrides[provider];
+  if (!entry || !Array.isArray(entry.additionalModels)) return [];
+  return entry.additionalModels.map((model) => model?.id).filter((id): id is string => typeof id === "string");
+}
+
+async function refreshProviders(paseo: PluginHandlerContext["paseo"], providers: string[]): Promise<void> {
+  if (providers.length === 0) return;
   try {
     await paseo.providers.refresh({ providers: [...new Set(providers)] } as never);
     await paseo.providers.waitForReady({ timeoutMs: 20_000 } as never);
-    return true;
   } catch {
-    // The persisted config is still valid. A later catalog refresh or Paseo
-    // reload will pick it up; never restart the daemon and kill live agents.
-    return false;
+    // The persisted config is still valid; a later Paseo reload picks it up.
+    // Never restart the daemon here — that would kill live agents.
   }
 }
 
-function providerIdForDir(overrides: ProviderOverrides, provider: "claude" | "codex", dir: string): string | null {
-  const envVar = envVarFor(provider);
-  for (const [id, override] of Object.entries(overrides)) {
-    if (override?.env?.[envVar] === dir) return id;
-  }
-  return null;
+// --------------------------------------------------------------- CLI hijack
+
+type ClaudeSettingsResponse = {
+  installed?: boolean;
+  has9Router?: boolean;
+  settingsPath?: string;
+  settings?: { env?: Record<string, unknown> };
+};
+
+type CodexSettingsResponse = { installed?: boolean; has9Router?: boolean; configPath?: string; config?: string };
+
+async function readHijack(client: RouterClient): Promise<CliHijack[]> {
+  const claude = await client.api<ClaudeSettingsResponse>("cli-tools/claude-settings");
+  const codex = await client.api<CodexSettingsResponse>("cli-tools/codex-settings");
+  const env = claude?.settings?.env ?? {};
+  const defaults = Object.entries(env)
+    .filter(([key, value]) => key.startsWith("ANTHROPIC_DEFAULT_") && typeof value === "string")
+    .map(([key, value]) => ({ key, value: String(value) }));
+  const baseUrl = typeof env.ANTHROPIC_BASE_URL === "string" ? env.ANTHROPIC_BASE_URL : null;
+  const codexBase = (codex?.config ?? "").match(/base_url\s*=\s*"([^"]+)"/)?.[1] ?? null;
+  return [
+    {
+      cli: "claude",
+      installed: claude?.installed === true,
+      routed: claude?.has9Router === true,
+      configPath: claude?.settingsPath ?? join(HOME, ".claude", "settings.json"),
+      baseUrl,
+      defaultModels: defaults,
+    },
+    {
+      cli: "codex",
+      installed: codex?.installed === true,
+      routed: codex?.has9Router === true,
+      configPath: codex?.configPath ?? join(HOME, ".codex", "config.toml"),
+      baseUrl: codexBase,
+      defaultModels: [],
+    },
+  ];
 }
 
-function slugForEmail(provider: string, email: string): string {
-  return `${provider}-${email.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")}`;
-}
+// ------------------------------------------------------------------- status
 
-// A GUI-launched daemon inherits a minimal PATH, not the user's login PATH, so
-// tools installed in /opt/homebrew/bin, ~/.local/bin etc. look "missing".
-// Resolve the login shell's PATH once per process.
-let cachedSearchPath: string[] | null = null;
+export async function handleRouterStatus(_input: unknown, { paseo }: PluginHandlerContext): Promise<RouterStatus> {
+  const settings = readSettings();
+  const client = new RouterClient(settings);
+  const binaryPath = findBinary("9router");
+  const running = await client.health();
 
-export function searchPath(): string[] {
-  if (cachedSearchPath === null) {
-    let raw = process.env.PATH ?? "";
-    try {
-      const shell = process.env.SHELL || "/bin/sh";
-      const out = execFileSync(shell, ["-lc", 'printf %s "$PATH"'], { encoding: "utf8", timeout: 5000 });
-      if (out.trim()) raw = out.trim();
-    } catch {
-      // Fall back to the inherited PATH.
-    }
-    const extras = [join(HOME, ".local", "bin"), "/opt/homebrew/bin", "/usr/local/bin"];
-    cachedSearchPath = [...new Set(raw.split(delimiter).concat(extras).filter(Boolean))];
-  }
-  return cachedSearchPath;
-}
-
-// A slow shell rc can take seconds, so fill the cache once the plugin is up
-// rather than leaving the first RPC that needs a PATH lookup to stall on it.
-onStart(searchPath);
-
-function agentLinkInstalled(): boolean {
-  return searchPath().some((dir) => existsSync(join(dir, "agent-link")) || existsSync(join(dir, "agent-auth")));
-}
-
-
-function poolsDir(): string {
-  return join(AGENT_LINK_HOME_DIR, "state", "pools");
-}
-
-function poolNumber(kind: "count" | "last", provider: string, email: string): number {
-  try {
-    const raw = readFileSync(join(poolsDir(), `${kind}-${provider}-${email}`), "utf8").trim();
-    const value = Number.parseInt(raw, 10);
-    return Number.isFinite(value) ? value : 0;
-  } catch {
-    return 0;
-  }
-}
-
-type RoutePreference = "preferred" | "standard" | "reserve";
-
-function routePreference(provider: string, key: string): RoutePreference {
-  for (const [file, value] of [
-    [`prefer-${provider}-first`, "preferred"],
-    [`prefer-${provider}-last`, "reserve"],
-  ] as const) {
-    try {
-      if (readFileSync(join(AGENT_LINK_HOME_DIR, "state", file), "utf8").split(/\r?\n/).includes(key)) return value;
-    } catch {
-      // Missing preference file means the standard group.
-    }
-  }
-  return "standard";
-}
-
-function nearingLimit(provider: string, key: string): boolean {
-  try {
-    const markedAt = Number.parseInt(readFileSync(join(poolsDir(), `nearing-${provider}-${key}`), "utf8").trim(), 10);
-    return Number.isFinite(markedAt) && Date.now() / 1000 - markedAt <= 90 * 60;
-  } catch {
-    return false;
-  }
-}
-
-function heldReason(provider: string, key: string): string {
-  try {
-    return readFileSync(join(poolsDir(), `hold-${provider}-${key}`), "utf8").trim();
-  } catch {
-    return "";
-  }
-}
-
-function activelyParked(provider: string, key: string): boolean {
-  return heldReason(provider, key) !== "" || cooldownUntil(provider, key) > 0;
-}
-
-// Authentication can be repaired outside AgentLink. Re-check only accounts
-// carrying an authentication hold; a successful local CLI status is enough to
-// release that stale hold without spending a model request.
-function releaseRecoveredClaudeAuth(key: string, configDir: string | null): void {
-  if (!/authenticat|not logged|login required|unauthori[sz]ed|revoked|expired token/i.test(heldReason("claude", key))) return;
-  const binary = searchPath().map((directory) => join(directory, "claude")).find(existsSync);
-  if (!binary) return;
-  const env = { ...process.env };
-  if (configDir) env.CLAUDE_CONFIG_DIR = configDir;
-  else delete env.CLAUDE_CONFIG_DIR;
-  try {
-    const output = execFileSync(binary, ["auth", "status", "--json"], { encoding: "utf8", timeout: 5000, env });
-    const status = JSON.parse(output) as { loggedIn?: boolean };
-    if (status.loggedIn !== true) return;
-    rmSync(join(poolsDir(), `hold-claude-${key}`), { force: true });
-    rmSync(join(poolsDir(), `reason-claude-${key}`), { force: true });
-  } catch {
-    // Keep the account held when status is unavailable or malformed.
-  }
-}
-
-function recentRouteEvents(): RouteEvent[] {
-  try {
-    return readFileSync(join(poolsDir(), "routes.log"), "utf8")
-      .trim()
-      .split(/\r?\n/)
-      .slice(-20)
-      .reverse()
-      .flatMap((line) => {
-        const [rawAt, provider, email, decision, group, agentId = "", cwd = "", model = ""] = line.split("\t");
-        const at = Number.parseInt(rawAt ?? "", 10);
-        if (!Number.isFinite(at) || (provider !== "claude" && provider !== "codex") || !email) return [];
-        if (group !== "preferred" && group !== "standard" && group !== "reserve" && group !== "fallback") return [];
-        return [{ at, provider, email, decision: decision || "routed", group, agentId, cwd, model }];
-      });
-  } catch {
-    return [];
-  }
-}
-
-export async function handleProbeAccounts({
-  provider,
-  model,
-  parkFailures,
-}: {
-  provider: "claude" | "codex";
-  model: string;
-  parkFailures: boolean;
-}) {
-  if (provider !== "claude") {
-    return { ok: false, message: "Codex already reports its usage limits. A separate account test is not available.", log: "" };
-  }
-  const binary = searchPath()
-    .flatMap((directory) => [join(directory, "agent-link"), join(directory, "agent-auth")])
-    .find(existsSync);
-  if (!binary) return { ok: false, message: "Install the AgentLink command-line tool before testing account limits.", log: "" };
-
-  const args = ["probe", provider];
-  const trimmedModel = model.trim();
-  if (trimmedModel || parkFailures) args.push(trimmedModel);
-  if (parkFailures) args.push("--park");
-
-  return await new Promise<{ ok: boolean; message: string; log: string }>((done) => {
-    const child = spawn(binary, args, {
-      stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, AGENT_LINK_HOME: AGENT_LINK_HOME_DIR },
-    });
-    let output = "";
-    let settled = false;
-    const finish = (result: { ok: boolean; message: string; log: string }) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      done(result);
-    };
-    const onChunk = (chunk: Buffer) => {
-      output = `${output}${chunk.toString()}`.slice(-64 * 1024);
-    };
-    child.stdout?.on("data", onChunk);
-    child.stderr?.on("data", onChunk);
-    child.once("error", (error) => finish({ ok: false, message: error.message, log: output.trim() }));
-    child.once("exit", (code) => {
-      const log = output.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "").trim();
-      const refused = /CANNOT SERVE/i.test(log);
-      finish({
-        ok: code === 0,
-        message: refused
-          ? "Test complete. Refusing sign-ins remain blocked; passing sign-ins are available again."
-          : "Test complete. Every sign-in served the model.",
-        log,
-      });
-    });
-    const timer = setTimeout(() => {
-      child.kill("SIGTERM");
-      finish({ ok: false, message: "Account-limit test timed out after 3 minutes.", log: output.trim() });
-    }, 180_000);
-  });
-}
-
-// Which preferences differ from the primary — an account out of step behaves
-// differently for no visible reason. The caller reads the primary settings once
-// and passes them in, so a scan does not re-read the same file per slot.
-const SYNC_SETTINGS_KEYS = ["outputStyle", "includeCoAuthoredBy", "env", "permissions", "model"];
-
-function settingsDrift(provider: "claude" | "codex", dir: string, base: Record<string, unknown>): { style: string; drift: string[] } {
-  if (provider !== "claude") return { style: "", drift: [] };
-  const own = readJson(join(dir, "settings.json")) ?? {};
-  const drift = SYNC_SETTINGS_KEYS.filter(
-    (key) => key in base && JSON.stringify(own[key]) !== JSON.stringify(base[key]),
-  );
-  return { style: typeof own.outputStyle === "string" ? own.outputStyle : "", drift };
-}
-
-function parkReason(provider: string, email: string): string {
-  try {
-    return readFileSync(join(poolsDir(), `reason-${provider}-${email}`), "utf8").trim();
-  } catch {
-    return "";
-  }
-}
-
-function modelHolds(provider: string, email: string): string[] {
-  const prefix = `holdmodel-${provider}-${email}-`;
-  try {
-    return readdirSync(poolsDir())
-      .filter((name) => name.startsWith(prefix))
-      .map((name) => name.slice(prefix.length))
-      .filter(Boolean)
-      .sort();
-  } catch {
-    return [];
-  }
-}
-
-function cooldownUntil(provider: string, email: string): number {
-  try {
-    const raw = readFileSync(join(poolsDir(), `cooldown-${provider}-${email}`), "utf8").trim();
-    const until = Number.parseInt(raw, 10);
-    return Number.isFinite(until) && until * 1000 > Date.now() ? until : 0;
-  } catch {
-    return 0;
-  }
-}
-
-function autoLauncherPath(provider: "claude" | "codex"): string {
-  return join(AGENT_LINK_HOME_DIR, "bin", `${provider}-auto`);
-}
-
-// A provider is the auto-router for `provider` when its command points at that
-// provider's launcher.
-function autoWiredId(overrides: ProviderOverrides, provider: "claude" | "codex"): string | null {
-  // Match by launcher filename, not full path: an install whose home differs
-  // (~/.agent-auth vs ~/.agent-link) is still the same wired router, and the
-  // exact-path compare made a wired provider look unwired.
-  const suffix = `/${provider}-auto`;
-  for (const [id, override] of Object.entries(overrides)) {
-    const command = (override as { command?: string[] } | undefined)?.command;
-    if (command?.some((part) => part.endsWith(suffix))) return id;
-  }
-  return null;
-}
-
-export async function handleScan(_input: Record<string, never>, { paseo }: PluginHandlerContext) {
   const overrides = await providerOverrides(paseo);
-  // Everything the sections below share is read once here, not once per section.
-  const baseSettings = readJson(join(HOME, ".claude", "settings.json")) ?? {};
-  const primaryEmails = { claude: claudeAccountEmail(HOME), codex: codexAccountEmail(join(HOME, ".codex")) };
-  const collectedSlots = collectSlots();
-  releaseRecoveredClaudeAuth("primary", null);
-  for (const slot of collectedSlots) {
-    if (slot.provider === "claude") releaseRecoveredClaudeAuth(slot.email, slot.dir);
+  const paseoClaude = listedModels(overrides, "claude");
+  const paseoCodex = listedModels(overrides, "codex");
+  const staleProviders = DEAD_PROVIDER_IDS.filter((id) => overrides[id] !== undefined);
+  const staleShims = listStaleShims(isLegacyShim);
+
+  const empty: RouterStatus = {
+    binary: { path: binaryPath, version: null },
+    running,
+    url: settings.url,
+    dashboardUrl: `${settings.url}/dashboard`,
+    settingsPath: SETTINGS_PATH,
+    version: null,
+    auth: { configured: client.hasPassword, ok: false, error: running ? client.authError : "9router is not running." },
+    apiKey: { present: settings.apiKey !== null, last4: client.keyLast4 },
+    connections: [],
+    models: { count: 0, ids: [], custom: [] },
+    aliases: [],
+    combos: [],
+    hijack: [],
+    paseo: {
+      listedModels: { claude: paseoClaude, codex: paseoCodex },
+      modelsInSync: false,
+      staleProviders,
+      staleShims,
+    },
+  };
+  if (!running) return empty;
+
+  const ids = await client.models();
+  const providers = await client.api<{ connections?: Array<Record<string, unknown>> }>("providers");
+  const connections: Connection[] = [];
+  for (const raw of providers?.connections ?? []) {
+    const id = typeof raw.id === "string" ? raw.id : null;
+    if (!id) continue;
+    // Usage is one call per connection; they are independent so run them together.
+    connections.push({
+      id,
+      provider: typeof raw.provider === "string" ? raw.provider : "unknown",
+      authType: typeof raw.authType === "string" ? raw.authType : null,
+      name: typeof raw.name === "string" ? raw.name : id,
+      email: typeof raw.email === "string" ? raw.email : null,
+      priority: typeof raw.priority === "number" ? raw.priority : 0,
+      isActive: raw.isActive !== false,
+      testStatus: typeof raw.testStatus === "string" ? raw.testStatus : null,
+      expiresAt: typeof raw.expiresAt === "string" ? raw.expiresAt : null,
+      usage: null,
+    });
   }
-  const primaryCooldowns = { claude: cooldownUntil("claude", "primary"), codex: cooldownUntil("codex", "primary") };
-  // "Out of credits" is not reliable — a flagged account can still serve some
-  // models — so parking (set by `agent-link probe --park`, or by hand) is what
-  // actually blocks routing.
-  const primaryParked = { claude: activelyParked("claude", "primary"), codex: activelyParked("codex", "primary") };
-  const slots = collectedSlots.map((slot) => {
-    const drift = settingsDrift(slot.provider, slot.dir, baseSettings);
-    const parked = parkReason(slot.provider, slot.email) || heldReason(slot.provider, slot.email);
-    const until = cooldownUntil(slot.provider, slot.email);
-    return {
-      ...slot,
-      wiredProviderId: providerIdForDir(overrides, slot.provider, slot.dir),
-      cooldownUntil: until,
-      launches: poolNumber("count", slot.provider, slot.email),
-      preference: routePreference(slot.provider, slot.email),
-      nearing: nearingLimit(slot.provider, slot.email),
-      creditNote: creditNote(slot.provider, slot.dir),
-      blocked: heldReason(slot.provider, slot.email) !== "" || until > 0,
-      parkReason: parked,
-      outputStyle: drift.style,
-      settingsDrift: drift.drift,
-      modelHolds: modelHolds(slot.provider, slot.email),
-      lastUsed: poolNumber("last", slot.provider, slot.email),
-    };
+  const usages = await Promise.all(connections.map((entry) => client.api<unknown>(`usage/${entry.id}`)));
+  usages.forEach((usage, index) => {
+    const target = connections[index];
+    if (target) target.usage = normalizeUsage(usage);
   });
-  const routingSlots = slots.filter((slot) => slot.source === "agent-link");
-  const autoRouters = (["claude", "codex"] as const).map((provider) => ({
-    provider,
-    launcherPath: autoLauncherPath(provider),
-    launcherExists: existsSync(autoLauncherPath(provider)),
-    wiredProviderId: autoWiredId(overrides, provider),
+
+  const version = await client.api<{ currentVersion?: string; latestVersion?: string; hasUpdate?: boolean }>("version");
+  const customRaw = await client.api<{ models?: Array<Record<string, unknown>> }>("models/custom");
+  const custom: CustomModel[] = (customRaw?.models ?? []).map((entry) => ({
+    providerAlias: String(entry.providerAlias ?? ""),
+    id: String(entry.id ?? ""),
+    type: String(entry.type ?? "llm"),
+    name: typeof entry.name === "string" ? entry.name : null,
   }));
+  const aliasRaw = await client.api<{ aliases?: Record<string, unknown> }>("models/alias");
+  const aliases = Object.entries(aliasRaw?.aliases ?? {})
+    .filter(([, model]) => typeof model === "string")
+    .map(([alias, model]) => ({ alias, model: String(model) }));
+  const comboRaw = await client.api<{ combos?: Array<Record<string, unknown>> }>("combos");
+  const combos = (comboRaw?.combos ?? []).map((entry) => ({
+    name: String(entry.name ?? ""),
+    models: Array.isArray(entry.models) ? entry.models.map((model) => String(model)) : [],
+  }));
+
+  const wantClaude = ids.filter((id) => cliForModel(id) === "claude");
+  const wantCodex = ids.filter((id) => cliForModel(id) === "codex");
+
   return {
-    slots,
-    primaryAccounts: primaryEmails,
-    primaryCreditNote: creditNote("claude", HOME),
-    primaries: (["claude", "codex"] as const).map((provider) => {
-      const email = primaryEmails[provider];
-      return {
-        provider,
-        email,
-        launches: poolNumber("count", provider, "primary"),
-        cooldownUntil: primaryCooldowns[provider],
-        blocked: primaryParked[provider],
-        parkReason: parkReason(provider, "primary") || heldReason(provider, "primary"),
-        preference: routePreference(provider, "primary"),
-        nearing: nearingLimit(provider, "primary"),
-        modelHolds: modelHolds(provider, "primary"),
-        duplicated: routingSlots.some(
-          (slot) =>
-            slot.provider === provider &&
-            slot.actualEmail !== "" &&
-            normalizeAccountEmail(slot.actualEmail) === normalizeAccountEmail(email),
-        ),
-      };
-    }),
-    nextUp: (["claude", "codex"] as const).map((provider) => {
-      const primaryEmail = primaryEmails[provider];
-      const accountBindings: AccountRouteCandidate[] = [];
-      const primaryCovered = accountCoveredByManagedBinding(
-        provider,
-        primaryEmail,
-        routingSlots
-          .filter((slot) => slot.actualEmail !== "")
-          .map((slot) => ({ provider: slot.provider, email: slot.actualEmail })),
-      );
-      if (primaryEmail && !primaryCovered && !primaryParked[provider] && primaryCooldowns[provider] === 0) {
-        accountBindings.push({
-          email: primaryEmail,
-          poolKey: "primary",
-          last: poolNumber("last", provider, "primary"),
-          preference: routePreference(provider, "primary"),
-          nearing: nearingLimit(provider, "primary"),
-        });
-      }
-      for (const slot of routingSlots) {
-        if (slot.provider !== provider || !slot.loggedIn || slot.wrongAccount || slot.blocked || slot.cooldownUntil > 0) continue;
-        accountBindings.push({
-          email: slot.actualEmail || slot.email,
-          poolKey: slot.email,
-          last: slot.lastUsed,
-          preference: slot.preference,
-          nearing: slot.nearing,
-        });
-      }
-      const candidates = dedupeRouteCandidates(provider, accountBindings);
-      const healthy = candidates.filter((candidate) => !candidate.nearing);
-      const eligible = healthy.length > 0 ? healthy : candidates;
-      eligible.sort(compareRouteCandidates);
-      return { provider, email: eligible[0]?.email ?? "", poolKey: eligible[0]?.poolKey ?? "" };
-    }),
-    recentRoutes: recentRouteEvents(),
-    autoRouters,
-    agentAuthInstalled: agentLinkInstalled(),
+    ...empty,
+    binary: { path: binaryPath, version: version?.currentVersion ?? null },
+    version: version?.currentVersion
+      ? {
+          current: version.currentVersion,
+          latest: version.latestVersion ?? version.currentVersion,
+          hasUpdate: version.hasUpdate === true,
+        }
+      : null,
+    auth: { configured: client.hasPassword, ok: providers !== null, error: providers === null ? client.authError : null },
+    connections,
+    models: { count: ids.length, ids, custom },
+    aliases,
+    combos,
+    hijack: await readHijack(client),
+    paseo: {
+      listedModels: { claude: paseoClaude, codex: paseoCodex },
+      modelsInSync:
+        ids.length > 0 && sameModelSet(paseoClaude, wantClaude) && sameModelSet(paseoCodex, wantCodex),
+      staleProviders,
+      staleShims,
+    },
   };
 }
 
-export async function handleWireAuto({ provider }: { provider: "claude" | "codex" }, { paseo }: PluginHandlerContext) {
-  const launcher = autoLauncherPath(provider);
-  if (!existsSync(launcher)) {
+// ----------------------------------------------------------------- lifecycle
+
+export async function handleRouterStart() {
+  const settings = readSettings();
+  const result = await startRouter(settings.url);
+  return { ok: result.ok, running: result.ok, message: result.message };
+}
+
+export async function handleRouterSettingsSave({ url, password }: { url?: string; password?: string }) {
+  const next = writeSettings({
+    ...(url ? { url: url.replace(/\/+$/, "") } : {}),
+    ...(password ? { password } : {}),
+  });
+  const client = new RouterClient(next);
+  if (!(await client.health())) {
     return {
       ok: false,
-      providerId: null,
-      message: `Automatic account selection is not ready. Run 'agent-link auto' in a terminal.`,
+      message: `Saved, but 9router did not answer at ${next.url}.`,
+      apiKey: { present: next.apiKey !== null, last4: client.keyLast4 },
     };
   }
-  const overrides = await providerOverrides(paseo);
-  const providerId = autoWiredId(overrides, provider) ?? `${provider}-auto`;
-  await paseo.config.patch({
-    agents: {
-      providers: {
-        [providerId]: {
-          extends: provider,
-          label: `${provider === "claude" ? "Claude" : "Codex"} (Legacy AgentLink)`,
-          description: "Kept for native legacy sessions. Start new multi-account chats with AgentLink.",
-          command: [launcher],
-        },
-      },
-    },
-  } as never);
-  const refreshed = await refreshProviders(paseo, [providerId]);
+  const key = await client.ensureApiKey();
+  if (!key) {
+    return {
+      ok: false,
+      message: client.authError ?? "Could not read an API key — check the dashboard password.",
+      apiKey: { present: next.apiKey !== null, last4: client.keyLast4 },
+    };
+  }
+  const saved = writeSettings({ apiKey: key });
   return {
     ok: true,
-    providerId,
-    message: refreshed
-      ? `Installed legacy provider '${providerId}'. Use AgentLink for new chats.`
-      : `Installed '${providerId}'. Use Paseo reload if it does not appear yet.`,
+    message: `Connected to 9router at ${saved.url}.`,
+    apiKey: { present: true, last4: key.slice(-4) },
   };
 }
 
-const ROUTER_PROVIDER_ID = "agent-router";
-const ROUTER_VIRTUAL_MODEL = "agent-router-auto";
-type RouterController = "claude-auto" | "claude";
-type RouterMode = "inherit" | "plan" | "auto" | "full-access";
-type RouterTarget = {
-  provider: string;
-  model: string;
-  account: string;
-  resolvedProvider: string;
-  mode: RouterMode;
-};
-type RouterTargetInput = Omit<RouterTarget, "resolvedProvider"> & {
-  resolvedProvider?: string;
-  available?: boolean | null;
-};
-type RouterTargetGroup = {
-  name: string;
-  purpose: string;
-  skills: string[];
-  instructions: string;
-  selector: "in_order";
-  targets: RouterTarget[];
-};
-type RouterTargetGroupInput = Omit<RouterTargetGroup, "targets"> & { targets: RouterTargetInput[] };
-type RouterConfig = {
-  controllerProvider: RouterController;
-  controllerAccount: string;
-  controllerConfigDir: string;
-  controllerModel: string;
-  targetGroups: RouterTargetGroup[];
-};
-const autoTarget = (provider: "claude" | "codex", model: string): RouterTarget => ({
-  provider,
-  model,
-  account: "auto",
-  resolvedProvider: `${provider}-auto`,
-  mode: "inherit",
-});
-const providerTarget = (provider: string, model: string): RouterTarget => ({
-  provider,
-  model,
-  account: "provider",
-  resolvedProvider: provider,
-  mode: "inherit",
-});
-const ROUTER_TARGET_GROUPS: RouterTargetGroup[] = [
-  {
-    name: "fast",
-    purpose: "Explanations, summaries, formatting and tiny edits",
-    skills: [],
-    instructions: "",
-    selector: "in_order" as const,
-    targets: [
-      autoTarget("claude", "claude-haiku-4-5"),
-      autoTarget("codex", "gpt-5.6-luna"),
-      providerTarget("kimi", "kimi-code/kimi-for-coding-highspeed"),
-      providerTarget("grok", "grok-4.5"),
-    ],
-  },
-  {
-    name: "planning",
-    purpose: "Product and implementation plans",
-    skills: [],
-    instructions: "",
-    selector: "in_order" as const,
-    targets: [
-      autoTarget("claude", "claude-fable-5-1"),
-      autoTarget("codex", "gpt-5.6-terra"),
-      providerTarget("grok", "grok-4.6"),
-    ],
-  },
-  {
-    name: "judgment",
-    purpose: "Architecture, UI/UX, audit and final review",
-    skills: [],
-    instructions: "",
-    selector: "in_order" as const,
-    targets: [
-      autoTarget("claude", "claude-opus-5"),
-      providerTarget("grok", "grok-4.6"),
-      autoTarget("codex", "gpt-5.6-sol"),
-    ],
-  },
-  {
-    name: "build",
-    purpose: "Multi-file implementation, debugging, migrations and refactors",
-    skills: [],
-    instructions: "",
-    selector: "in_order" as const,
-    targets: [
-      autoTarget("codex", "gpt-5.6-sol"),
-      providerTarget("kimi", "kimi-code/k3"),
-      autoTarget("claude", "claude-opus-5"),
-    ],
-  },
-  {
-    name: "browser",
-    purpose: "Browser-driving verification",
-    skills: [],
-    instructions: "",
-    selector: "in_order" as const,
-    targets: [autoTarget("codex", "gpt-5.6-sol")],
-  },
-];
-const ROUTER_DEFAULT_CONFIG: RouterConfig = {
-  controllerProvider: "claude-auto",
-  controllerAccount: "auto",
-  controllerConfigDir: "",
-  controllerModel: "claude-fable-5-1",
-  targetGroups: ROUTER_TARGET_GROUPS,
-};
+// -------------------------------------------------------------- CLI routing
 
-function routerConfigPath(): string {
-  return join(AGENT_LINK_HOME_DIR, "router", "config.json");
-}
+export async function handleRouterRouteCli({ cli, routed }: { cli: "claude" | "codex"; routed: boolean }) {
+  const settings = readSettings();
+  const client = new RouterClient(settings);
+  if (!(await client.health())) return { ok: false, message: "9router is not running." };
 
-function routerRulesPath(): string {
-  return join(AGENT_LINK_HOME_DIR, "router", "rules.md");
-}
-
-function currentRouterConfig(): RouterConfig {
-  const raw = readJson(routerConfigPath());
-  if (!raw) return ROUTER_DEFAULT_CONFIG;
-  const controllerProvider = raw.controllerProvider === "claude" ? "claude" : "claude-auto";
-  const controllerAccount = typeof raw.controllerAccount === "string" && raw.controllerAccount
-    ? raw.controllerAccount
-    : controllerProvider === "claude-auto" ? "auto" : "primary";
-  const controllerConfigDir = typeof raw.controllerConfigDir === "string" ? raw.controllerConfigDir : "";
-  const controllerModel = typeof raw.controllerModel === "string" && raw.controllerModel ? raw.controllerModel : ROUTER_DEFAULT_CONFIG.controllerModel;
-  const groups = Array.isArray(raw.targetGroups) ? raw.targetGroups : [];
-  const targetGroups = groups.flatMap((entry): RouterTargetGroup[] => {
-    if (!entry || typeof entry !== "object") return [];
-    const group = entry as Record<string, unknown>;
-    if (typeof group.name !== "string" || typeof group.purpose !== "string" || !Array.isArray(group.targets)) return [];
-    const targets = group.targets.flatMap((item) => {
-      if (!item || typeof item !== "object") return [];
-      const target = item as Record<string, unknown>;
-      if (typeof target.provider !== "string" || typeof target.model !== "string") return [];
-      const legacyProvider = target.provider;
-      const migratedProvider = legacyProvider === "claude-auto"
-        ? "claude"
-        : legacyProvider === "codex-auto"
-          ? "codex"
-          : legacyProvider;
-      const account = typeof target.account === "string" && target.account
-        ? target.account
-        : legacyProvider.endsWith("-auto")
-          ? "auto"
-          : legacyProvider === "claude" || legacyProvider === "codex"
-            ? "primary"
-            : "provider";
-      const resolvedProvider = typeof target.resolvedProvider === "string" && target.resolvedProvider
-        ? target.resolvedProvider
-        : legacyProvider;
-      const mode: RouterMode = ["inherit", "plan", "auto", "full-access"].includes(String(target.mode))
-        ? target.mode as RouterMode
-        : "inherit";
-      return [{ provider: migratedProvider, model: target.model, account, resolvedProvider, mode }];
-    });
-    const skills = Array.isArray(group.skills)
-      ? [...new Set(group.skills.filter((entry): entry is string => typeof entry === "string").map((entry) => entry.trim()).filter(Boolean))].slice(0, 24)
-      : [];
-    const instructions = typeof group.instructions === "string" ? group.instructions.slice(0, 6_000) : "";
-    return targets.length > 0 ? [{ name: group.name, purpose: group.purpose, skills, instructions, selector: "in_order", targets }] : [];
-  });
-  return {
-    controllerProvider,
-    controllerAccount,
-    controllerConfigDir,
-    controllerModel,
-    targetGroups: targetGroups.length > 0 ? targetGroups : ROUTER_TARGET_GROUPS,
-  };
-}
-
-function currentRouterRules(): string {
-  try {
-    return readFileSync(routerRulesPath(), "utf8");
-  } catch {
-    return "";
+  const path = `cli-tools/${cli}-settings`;
+  if (!routed) {
+    const result = await client.api<{ success?: boolean }>(path, { method: "DELETE" });
+    if (result === null) return { ok: false, message: client.authError ?? `Could not restore ${cli}.` };
+    // 9router's reset list misses ANTHROPIC_DEFAULT_FABLE_MODEL, so a restored
+    // Claude would still point one model slot at a `cc/` id that no longer
+    // resolves. Clear the leftover ourselves.
+    if (cli === "claude") await clearOrphanClaudeDefaults();
+    return { ok: true, message: `${cli === "claude" ? "Claude Code" : "Codex"} restored to its direct connection.` };
   }
+
+  const key = await client.ensureApiKey();
+  if (!key) return { ok: false, message: client.authError ?? "No API key available." };
+
+  if (cli === "claude") {
+    const ids = await client.models();
+    const pick = (needle: string) => ids.find((id) => id.startsWith("cc/") && id.includes(needle)) ?? null;
+    const env: Record<string, string> = {
+      ANTHROPIC_BASE_URL: settings.url,
+      ANTHROPIC_AUTH_TOKEN: key,
+    };
+    for (const [slot, needle] of [
+      ["ANTHROPIC_DEFAULT_OPUS_MODEL", "opus"],
+      ["ANTHROPIC_DEFAULT_SONNET_MODEL", "sonnet"],
+      ["ANTHROPIC_DEFAULT_HAIKU_MODEL", "haiku"],
+    ] as const) {
+      const model = pick(needle);
+      if (model) env[slot] = model;
+    }
+    const result = await client.apiJson<{ success?: boolean }>(path, "POST", { env });
+    if (result === null) return { ok: false, message: client.authError ?? "Could not update Claude Code settings." };
+    return { ok: true, message: "Claude Code now runs through 9router." };
+  }
+
+  const result = await client.apiJson<{ success?: boolean }>(path, "POST", {
+    baseUrl: `${settings.url}/v1`,
+    apiKey: key,
+  });
+  if (result === null) return { ok: false, message: client.authError ?? "Could not update Codex settings." };
+  return { ok: true, message: "Codex now runs through 9router." };
 }
 
-type RouterAccountOption = {
+/**
+ * Remove `ANTHROPIC_DEFAULT_*_MODEL` entries still pointing at 9router ids
+ * after a restore. Reads and rewrites only that env block; an unreadable
+ * settings.json is left untouched rather than replaced.
+ */
+async function clearOrphanClaudeDefaults(): Promise<void> {
+  const path = join(HOME, ".claude", "settings.json");
+  if (!existsSync(path)) return;
+  const { readFileSync, writeFileSync, renameSync, statSync } = await import("node:fs");
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+  } catch {
+    return;
+  }
+  const env = parsed.env;
+  if (!env || typeof env !== "object") return;
+  const record = env as Record<string, unknown>;
+  let changed = false;
+  for (const [key, value] of Object.entries(record)) {
+    if (!key.startsWith("ANTHROPIC_DEFAULT_")) continue;
+    if (typeof value === "string" && /^(cc|cx)\//.test(value)) {
+      delete record[key];
+      changed = true;
+    }
+  }
+  if (!changed) return;
+  const mode = statSync(path).mode & 0o777;
+  const tmp = `${path}.tmp-agent-link`;
+  writeFileSync(tmp, `${JSON.stringify(parsed, null, 2)}\n`, { mode });
+  renameSync(tmp, path);
+}
+
+// ------------------------------------------------------------ Paseo wiring
+
+export async function handleRouterSyncModels(_input: unknown, { paseo }: PluginHandlerContext) {
+  const client = new RouterClient();
+  if (!(await client.health())) {
+    return { ok: false, claude: 0, codex: 0, removedProviders: [], removedShims: [], message: "9router is not running." };
+  }
+  const ids = await client.models();
+  if (ids.length === 0) {
+    return {
+      ok: false,
+      claude: 0,
+      codex: 0,
+      removedProviders: [],
+      removedShims: [],
+      message: "9router reported no models. Connect an account first.",
+    };
+  }
+
+  const forClaude = ids.filter((id) => cliForModel(id) === "claude").map((id) => ({ id, label: modelLabel(id) }));
+  const forCodex = ids.filter((id) => cliForModel(id) === "codex").map((id) => ({ id, label: modelLabel(id) }));
+
+  const overrides = await providerOverrides(paseo);
+  const removedProviders = DEAD_PROVIDER_IDS.filter((id) => overrides[id] !== undefined);
+  const patch: Record<string, unknown> = {
+    claude: { additionalModels: forClaude },
+    codex: { additionalModels: forCodex },
+  };
+  // Paseo removes a provider when its entry is patched to null.
+  for (const id of removedProviders) patch[id] = null;
+  await paseo.config.patch({ agents: { providers: patch } } as never);
+  await refreshProviders(paseo, ["claude", "codex"]);
+
+  const removedShims = listStaleShims(isLegacyShim);
+  for (const name of removedShims) removeShim(name);
+
+  const notes = [`Listed ${forClaude.length} Claude and ${forCodex.length} Codex models in Paseo.`];
+  if (removedProviders.length > 0) notes.push(`Removed ${removedProviders.join(", ")}.`);
+  if (removedShims.length > 0) notes.push(`Retired ${removedShims.length} old shim(s).`);
+  return { ok: true, claude: forClaude.length, codex: forCodex.length, removedProviders, removedShims, message: notes.join(" ") };
+}
+
+// ------------------------------------------------------------------- OAuth
+
+type AuthorizeResponse = {
+  authUrl?: string;
+  state?: string;
+  codeVerifier?: string;
+  redirectUri?: string;
+  fixedPort?: number;
+};
+
+export async function handleRouterConnectStart({ provider }: { provider: "claude" | "codex" }) {
+  const client = new RouterClient();
+  const query = provider === "codex" ? "?redirect_uri=http://localhost:1455/auth/callback" : "";
+  const auth = await client.api<AuthorizeResponse>(`oauth/${provider}/authorize${query}`);
+  if (!auth?.authUrl || !auth.state) throw new Error(client.authError ?? `Could not start the ${provider} sign-in.`);
+
+  if (provider === "codex") {
+    const port = auth.fixedPort ?? 1455;
+    const params = new URLSearchParams({
+      app_port: String(port),
+      state: auth.state,
+      code_verifier: auth.codeVerifier ?? "",
+      redirect_uri: auth.redirectUri ?? `http://localhost:${port}/auth/callback`,
+    });
+    // 9router runs the loopback listener itself, so the browser redirect is
+    // captured without this plugin opening a port.
+    await client.api(`oauth/codex/start-proxy?${params.toString()}`);
+  }
+
+  return {
+    provider,
+    mode: provider === "codex" ? ("poll" as const) : ("paste-code" as const),
+    authUrl: auth.authUrl,
+    state: auth.state,
+    codeVerifier: auth.codeVerifier ?? null,
+    redirectUri: auth.redirectUri ?? "",
+  };
+}
+
+export async function handleRouterConnectPoll({ provider, state }: { provider: "claude" | "codex"; state: string }) {
+  const client = new RouterClient();
+  const result = await client.api<{ status?: string; error?: string }>(
+    `oauth/${provider}/poll-status?state=${encodeURIComponent(state)}`,
+  );
+  const status = result?.status;
+  if (status === "done") return { status: "done" as const, error: null };
+  if (status === "error") return { status: "error" as const, error: result?.error ?? "Sign-in failed." };
+  if (status === "pending") return { status: "pending" as const, error: null };
+  return { status: "unknown" as const, error: result === null ? client.authError : null };
+}
+
+export async function handleRouterConnectComplete(input: {
   provider: "claude" | "codex";
+  code: string;
+  state: string;
+  codeVerifier: string;
+  redirectUri: string;
+}) {
+  const client = new RouterClient();
+  const result = await client.apiJson<{ success?: boolean; error?: string }>(
+    `oauth/${input.provider}/exchange`,
+    "POST",
+    {
+      code: input.code,
+      state: input.state,
+      codeVerifier: input.codeVerifier,
+      redirectUri: input.redirectUri,
+    },
+  );
+  if (result?.success) return { ok: true, error: null };
+  return { ok: false, error: result?.error ?? client.authError ?? "Sign-in failed." };
+}
+
+export async function handleRouterConnectionRemove({ id }: { id: string }) {
+  const client = new RouterClient();
+  const result = await client.api<{ success?: boolean }>(`providers/${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (result === null) return { ok: false, message: client.authError ?? "Could not remove that account." };
+  return { ok: true, message: "Account removed from 9router." };
+}
+
+// ------------------------------------------------------------------ models
+
+export async function handleRouterModelExpose({
+  providerAlias,
+  id,
+  name,
+}: {
+  providerAlias: string;
   id: string;
-  label: string;
-  description: string;
-  available: boolean;
-  resolvedProvider: string;
-};
-
-function routerAccountOptions(overrides: ProviderOverrides, availability: Map<string, boolean>): RouterAccountOption[] {
-  const slots = collectSlots();
-  const options: RouterAccountOption[] = [];
-  for (const provider of ["claude", "codex"] as const) {
-    const providerReady = availability.get(provider) !== false;
-    const primaryDir = provider === "claude" ? HOME : join(HOME, ".codex");
-    const primaryEmail = provider === "claude" ? claudeAccountEmail(HOME) : codexAccountEmail(primaryDir);
-    const familySlots = slots.filter((slot) => slot.provider === provider);
-    const primaryAvailable = providerReady && Boolean(primaryEmail) && !activelyParked(provider, "primary") && cooldownUntil(provider, "primary") === 0;
-    const slotAvailable = (slot: (typeof familySlots)[number]) =>
-      providerReady && slot.loggedIn && !slot.wrongAccount && !activelyParked(provider, slot.email) && cooldownUntil(provider, slot.email) === 0;
-    const anyAvailable = primaryAvailable || familySlots.some(slotAvailable);
-    options.push({
-      provider,
-      id: "auto",
-      label: "Automatic healthy account",
-      description: anyAvailable
-        ? "Chooses by health, priority and least recent use"
-        : "No healthy account is currently available",
-      available: anyAvailable,
-      resolvedProvider: provider,
-    });
-    options.push({
-      provider,
-      id: "primary",
-      label: primaryEmail ? `${primaryEmail} · primary` : "Primary sign-in",
-      description: primaryAvailable ? "Available now" : primaryEmail ? "Cooling down or blocked" : "Not signed in",
-      available: primaryAvailable,
-      resolvedProvider: provider,
-    });
-    for (const slot of familySlots) {
-      const available = slotAvailable(slot);
-      options.push({
-        provider,
-        id: slot.email,
-        label: slot.actualEmail || slot.email,
-        description: slot.wrongAccount
-          ? `Folder is signed in as ${slot.actualEmail}`
-          : !slot.loggedIn
-            ? "Sign-in needed"
-            : available
-              ? "Available now · fixed to this account"
-              : parkReason(provider, slot.email) || heldReason(provider, slot.email) || "Cooling down or blocked",
-        available,
-        resolvedProvider: providerIdForDir(overrides, provider, slot.dir) ?? slugForEmail(provider, slot.email),
-      });
-    }
-  }
-  return options;
-}
-
-function logicalProviderOptions(
-  availability: Map<string, boolean>,
-  labels: Map<string, string>,
-  accounts: RouterAccountOption[],
-) {
-  const hidden = new Set(accounts.flatMap((entry) => entry.resolvedProvider === entry.provider ? [] : [entry.resolvedProvider]));
-  const options = [...availability.entries()]
-    .filter(([id]) => id !== "agent-link" && id !== ROUTER_PROVIDER_ID && !hidden.has(id) && id !== "claude-auto" && id !== "codex-auto")
-    .map(([id, available]) => ({ id, label: labels.get(id) ?? id, available }));
-  for (const provider of ["claude", "codex"] as const) {
-    const family = accounts.filter((entry) => entry.provider === provider);
-    const available = family.some((entry) => entry.available);
-    const existing = options.find((entry) => entry.id === provider);
-    if (existing) {
-      existing.available = available || existing.available;
-      existing.label = provider === "claude" ? "Claude Code" : "Codex";
-    } else {
-      options.push({ id: provider, label: provider === "claude" ? "Claude Code" : "Codex", available });
-    }
-  }
-  const rank = (id: string) => id === "claude" ? 0 : id === "codex" ? 1 : 2;
-  return options.sort((a, b) => rank(a.id) - rank(b.id) || Number(b.available) - Number(a.available) || a.label.localeCompare(b.label));
-}
-
-async function routerProviderStatus(paseo: PluginHandlerContext["paseo"], message = "") {
-  const launcherPath = join(AGENT_LINK_HOME_DIR, "bin", "agent-link-acp");
-  const rulesPath = routerRulesPath();
-  const config = currentRouterConfig();
-  const overrides = await providerOverrides(paseo);
-  let loaded = false;
-  const availability = new Map<string, boolean>();
-  const providerLabels = new Map<string, string>();
-  let controllerModels: Array<{ id: string; label: string }> = [];
-  try {
-    const available = await paseo.providers.listAvailable();
-    for (const entry of available.providers as Array<{ provider: string; label?: string; available: boolean }>) {
-      availability.set(entry.provider, entry.available);
-      providerLabels.set(entry.provider, entry.label ?? providerLabel(entry.provider, overrides));
-    }
-    loaded = availability.get("agent-link") === true;
-    const modelResult = (await paseo.providers.listModels("claude" as never)) as unknown as {
-      models?: Array<{ id?: string; label?: string; name?: string; model?: string }>;
-    };
-    controllerModels = (modelResult.models ?? []).flatMap((model) =>
-      typeof model.id === "string" ? [{ id: model.id, label: model.label ?? model.name ?? model.model ?? model.id }] : [],
-    );
-  } catch {
-    // Configured remains useful when an older daemon cannot report availability.
-  }
-  const accountOptions = routerAccountOptions(overrides, availability);
-  const installed = existsSync(launcherPath);
-  const configured = Boolean(overrides["agent-link"]);
-  const paseoConfig = readJson(PASEO_CONFIG_PATH);
-  const daemon = paseoConfig?.daemon as { appendSystemPrompt?: string } | undefined;
-  const orchestrationSkills = ["paseo", "paseo-handoff", "paseo-advisor", "paseo-committee"].map((id) => ({
+  name?: string;
+}) {
+  const client = new RouterClient();
+  const result = await client.apiJson<{ success?: boolean; error?: string }>("models/custom", "POST", {
+    providerAlias,
     id,
-    installed: existsSync(join(HOME, ".agents", "skills", id, "SKILL.md")),
-  }));
-  return {
-    installed,
-    configured,
-    loaded,
-    launcherPath,
-    rulesPath,
-    baseProvider: "AgentLink",
-    baseModel: ROUTER_VIRTUAL_MODEL,
-    controllerProvider: config.controllerProvider,
-    controllerAccount: config.controllerAccount,
-    controllerModel: config.controllerModel,
-    controllerAccountOptions: accountOptions.filter((entry) => entry.provider === "claude"),
-    controllerModels,
-    providerOptions: logicalProviderOptions(availability, providerLabels, accountOptions),
-    accountOptions,
-    targetGroups: config.targetGroups.map((group) => ({
-      ...group,
-      targets: group.targets.map((target) => ({
-        ...target,
-        available: availability.has(target.provider) ? availability.get(target.provider) ?? false : null,
-      })),
-    })),
-    userRules: currentRouterRules(),
-    orchestration: {
-      systemPromptInstalled: (daemon?.appendSystemPrompt ?? "").includes("<!-- agent-link:paseo-contract:start -->"),
-      skills: orchestrationSkills,
-    },
-    message:
-      message ||
-      (loaded
-        ? "AgentRouter is ready as AgentLink's Automatic model."
-        : configured
-          ? "AgentLink is saved. Refresh providers if its Automatic model does not appear yet."
-          : installed
-            ? "The AgentLink runtime is ready. Add AgentLink to Paseo's provider list."
-            : "AgentLink is not installed."),
-  };
-}
-
-export async function handleRouterStatus(_input: Record<string, never>, { paseo }: PluginHandlerContext) {
-  return routerProviderStatus(paseo);
-}
-
-export async function handleRouterConfigure(
-  input: {
-    controllerAccount: string;
-    controllerModel: string;
-    targetGroups: RouterTargetGroupInput[];
-    userRules: string;
-  },
-  context: PluginHandlerContext,
-) {
-  if (new Set(input.targetGroups.map((group) => group.name)).size !== input.targetGroups.length) {
-    return routerProviderStatus(context.paseo, "Every work type needs a different name.");
-  }
-  const slots = collectSlots();
-  const resolveTarget = (target: RouterTargetInput): RouterTarget => {
-    if (target.provider !== "claude" && target.provider !== "codex") {
-      return { ...target, account: "provider", resolvedProvider: target.provider };
-    }
-    const provider = target.provider;
-    if (target.account === "auto") {
-      return { ...target, resolvedProvider: provider };
-    }
-    if (target.account === "primary") {
-      const email = provider === "claude" ? claudeAccountEmail(HOME) : codexAccountEmail(join(HOME, ".codex"));
-      if (!email || activelyParked(provider, "primary") || cooldownUntil(provider, "primary") > 0) {
-        throw new Error(`${provider} primary account is not available. Choose Automatic or another healthy account.`);
-      }
-      return { ...target, resolvedProvider: provider };
-    }
-    const slot = slots.find((entry) => entry.provider === provider && entry.email === target.account);
-    if (!slot) throw new Error(`${provider} account '${target.account}' was not found.`);
-    if (!slot.loggedIn || slot.wrongAccount || activelyParked(provider, slot.email) || cooldownUntil(provider, slot.email) > 0) {
-      throw new Error(`${slot.actualEmail || slot.email} is not available. Choose Automatic or another healthy account.`);
-    }
-    return { ...target, resolvedProvider: provider };
-  };
-  let resolvedGroups: RouterTargetGroup[];
-  try {
-    resolvedGroups = input.targetGroups.map((group) => ({
-      ...group,
-      targets: group.targets.map(resolveTarget),
-    }));
-  } catch (error) {
-    return routerProviderStatus(context.paseo, error instanceof Error ? error.message : String(error));
-  }
-  // Retain these fields for backward-compatible config parsing. AgentRouter now
-  // classifies locally, so it never spends a separate request-reader turn.
-  const controllerProvider: RouterController = input.controllerAccount === "auto" ? "claude-auto" : "claude";
-  const controllerConfigDir = input.controllerAccount === "auto" || input.controllerAccount === "primary"
-    ? ""
-    : slots.find((entry) => entry.provider === "claude" && entry.email === input.controllerAccount)?.dir ?? "";
-  mkdirSync(join(AGENT_LINK_HOME_DIR, "router"), { recursive: true });
-  backupFile(routerConfigPath());
-  backupFile(routerRulesPath());
-  writeJsonAtomic(routerConfigPath(), {
-    controllerProvider,
-    controllerAccount: input.controllerAccount,
-    controllerConfigDir,
-    controllerModel: input.controllerModel,
-    targetGroups: resolvedGroups.map((group) => ({ ...group, selector: undefined })),
+    type: "llm",
+    ...(name ? { name } : {}),
   });
-  writeTextAtomic(routerRulesPath(), input.userRules.endsWith("\n") ? input.userRules : `${input.userRules}\n`);
-  const status = await routerProviderStatus(context.paseo);
-  return { ...status, message: "AgentRouter choices saved for AgentLink's Automatic model." };
+  if (result?.success) return { ok: true, message: `Exposed ${providerAlias}/${id}.` };
+  return { ok: false, message: result?.error ?? client.authError ?? "Could not expose that model." };
 }
 
-export async function handleRouterModels({ provider }: { provider: string }, { paseo }: PluginHandlerContext) {
-  try {
-    const result = (await paseo.providers.listModels(provider as never)) as unknown as {
-      models?: Array<{ id?: string; label?: string; name?: string; model?: string; description?: string }>;
-    };
-    const models = (result.models ?? []).flatMap((model) => typeof model.id === "string" ? [{
-      id: model.id,
-      label: model.label ?? model.name ?? model.model ?? model.id,
-      description: model.description ?? "",
-    }] : []);
-    return {
-      provider,
-      models,
-      message: models.length > 0 ? `${models.length} models reported by Paseo.` : "This provider did not report a model catalog; a custom model ID is still allowed.",
-    };
-  } catch (error) {
-    return {
-      provider,
-      models: [],
-      message: `Model catalog unavailable: ${error instanceof Error ? error.message.split("\n")[0] : String(error)}`,
-    };
-  }
-}
-
-// Create the isolated slot. auth.server owns the guided browser/device flow so
-// the provider process can stay live while the panel completes authentication.
-export function ensureManagedAccountSlot(provider: "claude" | "codex", email: string): string {
-  if (!/^[^\s/\\]+@[^\s/\\]+$/.test(email)) {
-    throw new Error("that does not look like an account email");
-  }
-  const dir = join(AGENT_LINK_ROOT, provider, email);
-  mkdirSync(dir, { recursive: true });
-  if (provider === "claude") {
-    for (const file of ["CLAUDE.md", "settings.json"]) {
-      const source = join(HOME, ".claude", file);
-      const target = join(dir, file);
-      if (existsSync(source) && !existsSync(target)) copyFileSync(source, target);
-    }
-    const stylesSource = join(HOME, ".claude", "output-styles");
-    const stylesTarget = join(dir, "output-styles");
-    if (existsSync(stylesSource) && !existsSync(stylesTarget)) cpSync(stylesSource, stylesTarget, { recursive: true });
-  } else {
-    // Codex slots must keep credentials inside CODEX_HOME.
-    const target = join(dir, "config.toml");
-    let text = existsSync(target)
-      ? readFileSync(target, "utf8")
-      : existsSync(join(HOME, ".codex", "config.toml"))
-        ? readFileSync(join(HOME, ".codex", "config.toml"), "utf8")
-        : "";
-    const pin = 'cli_auth_credentials_store = "file"';
-    text = /^\s*cli_auth_credentials_store\s*=/m.test(text)
-      ? text.replace(/^\s*cli_auth_credentials_store\s*=.*$/m, pin)
-      : `${pin}\n${text}`;
-    writeTextAtomic(target, text);
-  }
-  return dir;
-}
-
-export async function handleAddAccount({ provider, email }: { provider: "claude" | "codex"; email: string }) {
-  try {
-    ensureManagedAccountSlot(provider, email);
-  } catch (error) {
-    return { ok: false, started: false, message: error instanceof Error ? error.message : String(error) };
-  }
-
-  return {
-    ok: true,
-    started: false,
-    message: "Sign-in slot created. Use Sign in from the Accounts panel to authenticate it.",
-  };
-}
-
-function updateLineSet(path: string, key: string, present: boolean): void {
-  let values: string[] = [];
-  try {
-    values = readFileSync(path, "utf8").split(/\r?\n/).filter(Boolean);
-  } catch {
-    // A missing file is an empty set.
-  }
-  const next = values.filter((value) => value !== key);
-  if (present) next.push(key);
-  if (next.length === 0) rmSync(path, { force: true });
-  else writeTextAtomic(path, `${next.join("\n")}\n`);
-}
-
-export async function handleSetPreference({
-  provider,
-  email,
-  preference,
+export async function handleRouterModelUnexpose({
+  providerAlias,
+  id,
+  type,
 }: {
-  provider: "claude" | "codex";
-  email: string;
-  preference: "preferred" | "standard" | "reserve";
+  providerAlias: string;
+  id: string;
+  type?: string;
 }) {
-  if (
-    email !== "primary" &&
-    !collectSlots().some((slot) => slot.source === "agent-link" && slot.provider === provider && slot.email === email)
-  ) {
-    return { ok: false, message: `No ${provider} sign-in named '${email}' was found.` };
-  }
-  const state = join(AGENT_LINK_HOME_DIR, "state");
-  try {
-    mkdirSync(state, { recursive: true });
-    updateLineSet(join(state, `prefer-${provider}-first`), email, preference === "preferred");
-    updateLineSet(join(state, `prefer-${provider}-last`), email, preference === "reserve");
-    const label = preference === "preferred" ? "priority" : preference === "reserve" ? "reserve" : "default";
-    return { ok: true, message: `${provider} · ${email} now has ${label} priority for AgentRouter turns.` };
-  } catch (error) {
-    return { ok: false, message: error instanceof Error ? error.message : String(error) };
-  }
+  const client = new RouterClient();
+  const params = new URLSearchParams({ providerAlias, id, type: type ?? "llm" });
+  const result = await client.api<{ success?: boolean }>(`models/custom?${params.toString()}`, { method: "DELETE" });
+  if (result === null) return { ok: false, message: client.authError ?? "Could not remove that model." };
+  return { ok: true, message: `Removed ${providerAlias}/${id}.` };
 }
 
-export async function handleRemoveAccount(
-  { provider, email }: { provider: "claude" | "codex"; email: string },
-  { paseo }: PluginHandlerContext,
-) {
-  if (!/^[^/\\]+$/.test(email) || email === "." || email === "..") {
-    return { ok: false, message: "That sign-in name is invalid." };
-  }
-  const dir = join(AGENT_LINK_ROOT, provider, email);
-  const slot = collectSlots().find(
-    (candidate) => candidate.source === "agent-link" && candidate.provider === provider && candidate.email === email && candidate.dir === dir,
-  );
-  if (!slot) return { ok: false, message: `No managed ${provider} sign-in named '${email}' was found.` };
-
-  const pinned = providerIdForDir(await providerOverrides(paseo), provider, dir);
-  if (pinned) {
-    return { ok: false, message: `Remove the fixed-account Paseo provider '${pinned}' before removing this sign-in.` };
-  }
-
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const archiveRoot = join(AGENT_LINK_HOME_DIR, "removed");
-  const archived = join(archiveRoot, `${provider}-${email}-${stamp}`);
-  try {
-    mkdirSync(archiveRoot, { recursive: true });
-    renameSync(dir, archived);
-
-    const state = join(AGENT_LINK_HOME_DIR, "state");
-    updateLineSet(join(state, `order-${provider}`), email, false);
-    updateLineSet(join(state, `prefer-${provider}-first`), email, false);
-    updateLineSet(join(state, `prefer-${provider}-last`), email, false);
-    try {
-      if (readFileSync(join(state, `route-${provider}`), "utf8").trim() === email) {
-        writeTextAtomic(join(state, `route-${provider}`), "primary\n");
-      }
-    } catch {
-      // No fixed route pointed at this slot.
-    }
-    for (const name of [
-      `count-${provider}-${email}`,
-      `last-${provider}-${email}`,
-      `cooldown-${provider}-${email}`,
-      `reason-${provider}-${email}`,
-      `hold-${provider}-${email}`,
-      `holdcheck-${provider}-${email}`,
-      `nearing-${provider}-${email}`,
-      `quota-${provider}-${email}.json`,
-      `.quota-check-${provider}-${email}`,
-    ]) {
-      rmSync(join(poolsDir(), name), { force: true });
-    }
-
-    let shims = "";
-    const cli = searchPath().map((entry) => join(entry, "agent-link")).find((candidate) => existsSync(candidate));
-    if (cli) {
-      try {
-        execFileSync(cli, ["shims"], {
-          stdio: "ignore",
-          timeout: 10_000,
-          env: { ...process.env, AGENT_LINK_HOME: AGENT_LINK_HOME_DIR },
-        });
-      } catch {
-        shims = " Numbered launchers need a refresh: agent-link shims.";
-      }
-    }
-    return { ok: true, message: `${email} removed from AgentLink and archived at ${archived}.${shims}` };
-  } catch (error) {
-    return { ok: false, message: error instanceof Error ? error.message : String(error) };
-  }
+export async function handleRouterAliasSet({ alias, model }: { alias: string; model: string }) {
+  const client = new RouterClient();
+  const result = await client.apiJson<{ success?: boolean; error?: string }>("models/alias", "PUT", { alias, model });
+  if (result?.success) return { ok: true, message: `${alias} now routes to ${model}.` };
+  return { ok: false, message: result?.error ?? client.authError ?? "Could not save that alias." };
 }
 
-export async function handleSetCooldown({
-  provider,
-  email,
-  minutes,
-}: {
-  provider: "claude" | "codex";
-  email: string;
-  minutes: number;
-}) {
-  const file = join(poolsDir(), `cooldown-${provider}-${email}`);
-  try {
-    if (minutes <= 0) {
-      rmSync(file, { force: true });
-      rmSync(join(poolsDir(), `hold-${provider}-${email}`), { force: true });
-      rmSync(join(poolsDir(), `reason-${provider}-${email}`), { force: true });
-      return { ok: true, message: `${email} is available in AgentLink again.` };
-    }
-    mkdirSync(poolsDir(), { recursive: true });
-    writeFileSync(file, String(Math.floor(Date.now() / 1000) + minutes * 60));
-    return { ok: true, message: `${email} will be skipped for ${minutes} minutes.` };
-  } catch (error) {
-    return { ok: false, message: error instanceof Error ? error.message : String(error) };
-  }
-}
-
-export async function handleWireProvider(
-  { provider, email, dir }: { provider: "claude" | "codex"; email: string; dir: string },
-  { paseo }: PluginHandlerContext,
-) {
-  const providerId = slugForEmail(provider, email);
-  await paseo.config.patch({
-    agents: {
-      providers: {
-        [providerId]: {
-          extends: provider,
-          label: `${provider === "claude" ? "Claude" : "Codex"} · ${email}`,
-          description: `${provider} pinned to ${email} (wired by agent-agent-link)`,
-          env: { [envVarFor(provider)]: dir },
-        },
-      },
-    },
-  } as never);
-  await refreshProviders(paseo, [providerId]);
-  return { providerId };
-}
-
-// Diagnostic payloads are provider-shaped and may echo env values back. Mask
-// anything token-like before it reaches the UI.
-function redactSecrets(text: string): string {
-  return text
-    .replace(/("(?:[^"]*(?:token|secret|key|password|auth|credential)[^"]*)"\s*:\s*")([^"]{4,})(")/gi, "$1•••$3")
-    .replace(/\b(sk-|pk-|ghp_|gho_|xox[abprs]-)[A-Za-z0-9_-]{8,}/g, "$1•••")
-    .replace(/\bBearer\s+[A-Za-z0-9._-]{8,}/gi, "Bearer •••");
-}
-
-export async function handleDiagnoseProvider({ providerId }: { providerId: string }, { paseo }: PluginHandlerContext) {
-  try {
-    const result = await paseo.providers.diagnostic(providerId as never);
-    return { summary: redactSecrets(JSON.stringify(result, null, 2)).slice(0, 2000) };
-  } catch (error) {
-    return { summary: `diagnostic failed: ${error instanceof Error ? error.message : String(error)}` };
-  }
-}
-
-// Real per-account activity, read from each account's own transcripts. Quota
-// windows are handled separately below; this answers what each account did.
-async function usageForClaudeDir(dir: string, sinceMs: number, days: number) {
-  const totals = {
-    sessions: 0,
-    inputTokens: 0,
-    outputTokens: 0,
-    cacheReadTokens: 0,
-    cacheCreationTokens: 0,
-    reasoningTokens: 0,
-    contextWindow: 0,
-    lastActive: 0,
-    limitHits: 0,
-    limitLast: 0,
-    models: new Set<string>(),
-    daily: new Array<number>(days).fill(0),
-    topProject: "",
-  };
-  const perProject = new Map<string, number>();
-  const projects = join(dir, "projects");
-  let projectDirs: string[] = [];
-  try {
-    projectDirs = readdirSync(projects).map((entry) => join(projects, entry));
-  } catch {
-    return totals;
-  }
-  const dayOf = (ms: number) => {
-    const index = days - 1 - Math.floor((Date.now() - ms) / 86_400_000);
-    return index >= 0 && index < days ? index : -1;
-  };
-  for (const projectDir of projectDirs) {
-    let files: string[] = [];
-    try {
-      files = readdirSync(projectDir).filter((name) => name.endsWith(".jsonl"));
-    } catch {
-      continue;
-    }
-    for (const name of files) {
-      const file = join(projectDir, name);
-      let mtime = 0;
-      let size = 0;
-      try {
-        const info = statSync(file);
-        mtime = info.mtimeMs;
-        size = info.size;
-      } catch {
-        continue;
-      }
-      if (mtime < sinceMs || size > 25_000_000) continue;
-      totals.sessions += 1;
-      totals.lastActive = Math.max(totals.lastActive, Math.floor(mtime / 1000));
-      const label = basename(projectDir).split("--").pop() ?? basename(projectDir);
-      perProject.set(label, (perProject.get(label) ?? 0) + 1);
-      // Stream rather than slurp: a transcript can run to tens of MB, and one
-      // readFileSync of that both spikes memory and blocks the event loop.
-      try {
-        const lines = createInterface({ input: createReadStream(file, { encoding: "utf8" }), crlfDelay: Infinity });
-        for await (const line of lines) {
-          if (!line) continue;
-          // Cheap string test before paying for a JSON parse. A limit only
-          // counts on the record Claude stamps for an API error — a chat that
-          // merely mentions limits is not a refusal.
-          const hasUsage = line.indexOf('"usage"') !== -1;
-          const hasLimit =
-            line.indexOf('"isApiErrorMessage":true') !== -1 &&
-            /spend limit|usage limit|limit reached/i.test(line);
-          if (!hasUsage && !hasLimit) continue;
-          let entry: { message?: { usage?: Record<string, number>; model?: string }; timestamp?: string };
-          try {
-            entry = JSON.parse(line);
-          } catch {
-            continue;
-          }
-          const stamp = entry.timestamp ? Date.parse(entry.timestamp) : mtime;
-          if (hasLimit) {
-            totals.limitHits += 1;
-            totals.limitLast = Math.max(totals.limitLast, Math.floor((Number.isFinite(stamp) ? stamp : mtime) / 1000));
-          }
-          const usage = entry.message?.usage;
-          if (!usage) continue;
-          const out = Number(usage.output_tokens ?? 0);
-          totals.inputTokens += Number(usage.input_tokens ?? 0);
-          totals.outputTokens += out;
-          totals.cacheReadTokens += Number(usage.cache_read_input_tokens ?? 0);
-          totals.cacheCreationTokens += Number(usage.cache_creation_input_tokens ?? 0);
-          totals.reasoningTokens += Number(usage.reasoning_output_tokens ?? 0);
-          const bucket = dayOf(Number.isFinite(stamp) ? stamp : mtime);
-          if (bucket >= 0) totals.daily[bucket] += out;
-          const model = entry.message?.model;
-          if (model && model !== "<synthetic>") totals.models.add(model);
-        }
-      } catch {
-        continue;
-      }
-    }
-  }
-  totals.topProject = [...perProject.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "";
-  return totals;
-}
-
-/**
- * Codex stores one rollout JSONL per session. Its token-count events are
- * cumulative, so only the last total in each file is counted; summing every
- * event would multiply usage by the number of turns in the conversation.
- */
-async function usageForCodexDir(dir: string, sinceMs: number, days: number) {
-  const totals = {
-    sessions: 0,
-    inputTokens: 0,
-    outputTokens: 0,
-    cacheReadTokens: 0,
-    cacheCreationTokens: 0,
-    reasoningTokens: 0,
-    contextWindow: 0,
-    lastActive: 0,
-    limitHits: 0,
-    limitLast: 0,
-    models: new Set<string>(),
-    daily: new Array<number>(days).fill(0),
-    topProject: "",
-  };
-  const perProject = new Map<string, number>();
-  const files = listDirs(join(dir, "sessions"))
-    .flatMap((year) => listDirs(year))
-    .flatMap((month) => listDirs(month))
-    .flatMap((day) => {
-      try {
-        return readdirSync(day)
-          .filter((name) => name.endsWith(".jsonl"))
-          .map((name) => join(day, name));
-      } catch {
-        return [];
-      }
-    });
-  const dayOf = (ms: number) => {
-    const index = days - 1 - Math.floor((Date.now() - ms) / 86_400_000);
-    return index >= 0 && index < days ? index : -1;
-  };
-  for (const file of files) {
-    let mtime = 0;
-    let size = 0;
-    try {
-      const info = statSync(file);
-      mtime = info.mtimeMs;
-      size = info.size;
-    } catch {
-      continue;
-    }
-    if (mtime < sinceMs) continue;
-    let floor = 0;
-    try {
-      floor = Number(readFileSync(`${file}.al-moved`, "utf8").trim()) || 0;
-    } catch {
-      // A native session starts at byte zero.
-    }
-    if (size <= floor) continue;
-    totals.sessions += 1;
-    totals.lastActive = Math.max(totals.lastActive, Math.floor(mtime / 1000));
-    let cwd = "";
-    let model = "";
-    let reached = false;
-    let latest = {
-      input_tokens: 0,
-      cached_input_tokens: 0,
-      cache_write_input_tokens: 0,
-      output_tokens: 0,
-      reasoning_output_tokens: 0,
-    };
-    try {
-      // Session metadata is at the head; read only that small prefix for the
-      // project name when the cumulative-usage tail will not include it.
-      if (floor === 0 && size > 512_000) {
-        const head = createInterface({
-          input: createReadStream(file, { encoding: "utf8", start: 0, end: Math.min(size - 1, 64_000) }),
-          crlfDelay: Infinity,
-        });
-        for await (const line of head) {
-          if (!line.includes('"session_meta"')) continue;
-          try {
-            const entry = JSON.parse(line) as { type?: string; payload?: { cwd?: string } };
-            if (entry.type === "session_meta" && entry.payload?.cwd) cwd = entry.payload.cwd;
-          } catch {
-            // Keep looking until the metadata line parses.
-          }
-          if (cwd) break;
-        }
-      }
-      // Codex token counts are cumulative. The final 512 KB gives the latest
-      // total without rereading gigabytes of conversations for a dashboard.
-      const start = Math.max(floor, size - 512_000);
-      const lines = createInterface({ input: createReadStream(file, { encoding: "utf8", start }), crlfDelay: Infinity });
-      for await (const line of lines) {
-        if (!line || (!line.includes('"session_meta"') && !line.includes('"turn_context"') && !line.includes('"token_count"'))) {
-          continue;
-        }
-        let entry: {
-          type?: string;
-          payload?: {
-            type?: string;
-            cwd?: string;
-            model?: string;
-            info?: {
-              total_token_usage?: Partial<typeof latest>;
-              model_context_window?: number;
-            };
-            rate_limits?: { rate_limit_reached_type?: unknown };
-          };
-        };
-        try {
-          entry = JSON.parse(line);
-        } catch {
-          continue;
-        }
-        if (entry.type === "session_meta" && entry.payload?.cwd) cwd = entry.payload.cwd;
-        if (entry.type === "turn_context" && entry.payload?.model) model = entry.payload.model;
-        if (entry.type !== "event_msg" || entry.payload?.type !== "token_count") continue;
-        const usage = entry.payload.info?.total_token_usage;
-        if (usage) latest = { ...latest, ...usage };
-        totals.contextWindow = Math.max(totals.contextWindow, Number(entry.payload.info?.model_context_window ?? 0));
-        if (entry.payload.rate_limits?.rate_limit_reached_type) reached = true;
-      }
-    } catch {
-      continue;
-    }
-    totals.inputTokens += Number(latest.input_tokens ?? 0);
-    totals.outputTokens += Number(latest.output_tokens ?? 0);
-    totals.cacheReadTokens += Number(latest.cached_input_tokens ?? 0);
-    totals.cacheCreationTokens += Number(latest.cache_write_input_tokens ?? 0);
-    totals.reasoningTokens += Number(latest.reasoning_output_tokens ?? 0);
-    const bucket = dayOf(mtime);
-    if (bucket >= 0) totals.daily[bucket] += Number(latest.output_tokens ?? 0);
-    if (model) totals.models.add(model);
-    if (reached) {
-      totals.limitHits += 1;
-      totals.limitLast = Math.max(totals.limitLast, Math.floor(mtime / 1000));
-    }
-    const project = cwd ? basename(cwd) : "";
-    if (project) perProject.set(project, (perProject.get(project) ?? 0) + 1);
-  }
-  totals.topProject = [...perProject.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "";
-  return totals;
-}
-
-/**
- * Claude's interactive /usage view caches the same account limits in
- * .claude.json. Paseo runs Claude in non-interactive mode, so its statusline
- * never executes; this token-free cache is the only exact fallback available
- * without reaching into OAuth credentials or scraping a private API.
- */
-function readClaudeCachedQuota(configDir: string): PoolQuota | null {
-  const primaryDir = join(HOME, ".claude");
-  const path = configDir === HOME || configDir === primaryDir ? join(HOME, ".claude.json") : join(configDir, ".claude.json");
-  return claudeCachedQuotaFromConfig(readJson(path));
-}
-
-function readPoolQuota(provider: string, key: string, configDir?: string): PoolQuota | null {
-  const stored = poolQuotaFromRaw(provider, readJson(join(poolsDir(), `quota-${provider}-${key}.json`)));
-  if (provider !== "claude" || !configDir) return stored;
-  return mergePoolQuotas(stored, readClaudeCachedQuota(configDir));
-}
-
-function readHeld(provider: string, key: string): string | null {
-  try {
-    return readFileSync(join(poolsDir(), `hold-${provider}-${key}`), "utf8").trim() || "held";
-  } catch {
-    return null;
-  }
-}
-
-export async function handleAccountCapacity() {
-  const bindings: Array<{
-    provider: "claude" | "codex";
-    email: string;
-    poolKey: string;
-    isPrimary: boolean;
-    dir: string;
-    quota: PoolQuota | null;
-  }> = [];
-  const add = (provider: "claude" | "codex", email: string, poolKey: string, isPrimary: boolean, dir: string) => {
-    bindings.push({ provider, email, poolKey, isPrimary, dir, quota: readPoolQuota(provider, poolKey, dir) });
-  };
-  const primaryClaude = claudeAccountEmail(HOME);
-  const primaryCodexDir = join(HOME, ".codex");
-  const primaryCodex = codexAccountEmail(primaryCodexDir);
-  if (primaryClaude) add("claude", primaryClaude, "primary", true, HOME);
-  if (primaryCodex) add("codex", primaryCodex, "primary", true, primaryCodexDir);
-  for (const slot of collectSlots()) {
-    if (!slot.loggedIn || slot.wrongAccount) continue;
-    add(slot.provider, slot.actualEmail || slot.email, slot.email, false, slot.dir);
-  }
-
-  const accounts = groupAccountQuotaBindings(bindings).map(({ accountId, bindings: accountBindings, representative, quota }) => {
-    const { provider, email, poolKey } = representative;
-    const isPrimary = accountBindings.some((binding) => binding.isPrimary);
-    const maxUsed = Math.max(0, ...(quota?.windows.map((entry) => entry.pct) ?? []));
-    const missing = !quota || quota.windows.length === 0;
-    const stale = !missing && (quota.at <= 0 || Date.now() / 1_000 - quota.at > 45 * 60);
-    const state = missing ? "missing" : stale ? "stale" : maxUsed >= 85 ? "nearing" : "current";
-    const detail = stale
-      ? "The last plan-limit report is over 45 minutes old."
-      : missing
-        ? provider === "claude"
-          ? isPrimary
-            ? "Claude has not reported plan-limit windows for this account. Run /usage in Claude Code, then refresh."
-            : `Claude has not reported plan-limit windows for this account. Open it with \`agent-link run claude ${poolKey} claude\`, run /usage, then refresh.`
-          : "Codex has not reported plan-limit windows for this account yet."
-        : "";
-    return {
-      provider,
-      email,
-      accountId,
-      isPrimary,
-      poolKey,
-      state: state as "current" | "nearing" | "stale" | "missing",
-      detail,
-      at: quota?.at ?? 0,
-      plan: quota?.plan ?? "",
-      model: quota?.model ?? "",
-      source: quota?.source ?? "",
-      credits: quota?.credits ?? null,
-      extraUsage: quota?.extraUsage ?? null,
-      windows: (quota?.windows ?? []).map((entry) => ({
-        label: entry.label,
-        kind: entry.kind,
-        durationMinutes: entry.durationMinutes,
-        usedPct: entry.pct,
-        resetsAt: entry.resetsAt,
-      })),
-    };
+export async function handleRouterAliasRemove({ alias }: { alias: string }) {
+  const client = new RouterClient();
+  const result = await client.api<{ success?: boolean }>(`models/alias?alias=${encodeURIComponent(alias)}`, {
+    method: "DELETE",
   });
-  return { accounts };
+  if (result === null) return { ok: false, message: client.authError ?? "Could not remove that alias." };
+  return { ok: true, message: `Removed the ${alias} alias.` };
 }
 
-export async function handleAccountUsage({ days }: { days: number }) {
-  const window = Math.max(1, Math.min(30, days));
-  const sinceMs = Date.now() - window * 86_400_000;
-  const shape = async (provider: "claude" | "codex", email: string, dir: string, poolKey: string, isPrimary: boolean) => {
-    const t = provider === "claude" ? await usageForClaudeDir(dir, sinceMs, window) : await usageForCodexDir(dir, sinceMs, window);
-    return {
-      provider,
-      email,
-      accountId: accountIdentity(provider, email),
-      poolKey,
-      isPrimary,
-      sessions: t.sessions,
-      inputTokens: t.inputTokens,
-      outputTokens: t.outputTokens,
-      cacheReadTokens: t.cacheReadTokens,
-      cacheCreationTokens: t.cacheCreationTokens,
-      reasoningTokens: t.reasoningTokens,
-      contextWindow: t.contextWindow,
-      lastActive: t.lastActive,
-      limitHits: t.limitHits,
-      limitLast: t.limitLast,
-      daily: t.daily,
-      topProject: t.topProject,
-      models: [...t.models].sort(),
-      quota: readPoolQuota(provider, poolKey, dir),
-      held: readHeld(provider, poolKey),
-    };
-  };
-  const pending: Array<{ provider: "claude" | "codex"; email: string; dir: string; poolKey: string; isPrimary: boolean }> = [];
-  const primaryClaude = claudeAccountEmail(HOME);
-  const primaryCodexDir = join(HOME, ".codex");
-  const primaryCodex = codexAccountEmail(primaryCodexDir);
-  if (primaryClaude) pending.push({ provider: "claude", email: primaryClaude, dir: join(HOME, ".claude"), poolKey: "primary", isPrimary: true });
-  if (primaryCodex) pending.push({ provider: "codex", email: primaryCodex, dir: primaryCodexDir, poolKey: "primary", isPrimary: true });
-  for (const slot of collectSlots()) {
-    if (!slot.loggedIn || slot.wrongAccount) continue;
-    pending.push({ provider: slot.provider, email: slot.actualEmail || slot.email, dir: slot.dir, poolKey: slot.email, isPrimary: false });
-  }
-  // Transcript scans are deliberately sequential: Activity is on-demand and
-  // can take a little longer, while parallel multi-account reads recreate the
-  // memory and disk-pressure problem this plugin is meant to prevent.
-  const accounts = [];
-  for (const account of pending) {
-    accounts.push(await shape(account.provider, account.email, account.dir, account.poolKey, account.isPrimary));
-  }
-  return { accounts };
-}
-
-export async function handleProviderHealth(_input: Record<string, never>, { paseo }: PluginHandlerContext) {
-  const overrides = await providerOverrides(paseo);
-  const ids = new Set<string>(["claude", "codex", "kimi", "grok"]);
-  for (const [id, override] of Object.entries(overrides)) {
-    if (override?.enabled === false) ids.delete(id);
-    else ids.add(id);
-  }
-  for (const skip of ["cursor", "devin", "copilot", "opencode", "pi"]) {
-    if (overrides[skip]?.enabled === false) ids.delete(skip);
-  }
-  // Only providers the daemon actually has. Probing one that was never set up
-  // reports its absence ("ACP not enabled") on a red badge — noise, not health,
-  // for a CLI the user simply does not use.
-  try {
-    const known = new Set((await paseo.providers.listAvailable()).providers.map((entry: { provider: string }) => entry.provider));
-    for (const id of [...ids]) if (!known.has(id)) ids.delete(id);
-  } catch {
-    // A daemon without this RPC keeps the unfiltered list.
-  }
-  const providers = await Promise.all(
-    [...ids].map(async (id) => {
-      try {
-        const result = await paseo.providers.diagnostic(id as never);
-        const text = JSON.stringify(result);
-        const ok = !/"error"|not logged|login required|unauthorized|failed/i.test(text);
-        const models = /"models"\s*:\s*\[/.test(text) ? (text.match(/"id"\s*:/g)?.length ?? 0) : 0;
-        const summary = ok ? `ok${models ? ` · ~${models} models` : ""}` : redactSecrets(text).slice(0, 160);
-        return { id, label: overrides[id]?.label ?? id, ok, summary };
-      } catch (error) {
-        return {
-          id,
-          label: overrides[id]?.label ?? id,
-          ok: false,
-          summary: `diagnostic failed: ${error instanceof Error ? error.message : String(error)}`.slice(0, 160),
-        };
-      }
-    }),
-  );
-  providers.sort((a, b) => a.id.localeCompare(b.id));
-  return { providers };
-}
-
-function providerFamily(id: string, overrides: ProviderOverrides): string {
-  let current = id;
-  const seen = new Set<string>();
-  while (!seen.has(current)) {
-    seen.add(current);
-    const parent = overrides[current]?.extends;
-    if (!parent || parent === "acp") return current;
-    if (parent === "claude" || parent === "codex") return parent;
-    if (!overrides[parent]) return current;
-    current = parent;
-  }
-  return id;
-}
-
-function providerLabel(id: string, overrides: ProviderOverrides): string {
-  if (id === "claude") return "Claude";
-  if (id === "codex") return "Codex";
-  const configured = overrides[id]?.label;
-  if (configured) return configured;
-  return id
-    .split(/[-_]+/)
-    .filter(Boolean)
-    .map((part) => part[0]!.toUpperCase() + part.slice(1))
-    .join(" ");
-}
-
-function providerAuthCommand(id: string): string {
-  if (id === "kimi") return "kimi login";
-  if (id === "grok") return "grok login";
-  return "";
-}
-
-export async function handleProviderHeartbeat(_input: Record<string, never>, { paseo }: PluginHandlerContext) {
-  // listAvailable is a registry lookup, not a diagnostic. That distinction is
-  // why this can poll without opening ACP sessions or consuming model quota.
-  const available = await paseo.providers.listAvailable();
-  const overrides = await providerOverrides(paseo);
-  const availableIds = new Set<string>();
-  const grouped = new Map<string, Set<string>>();
-  const add = (id: string) => {
-    const family = providerFamily(id, overrides);
-    const ids = grouped.get(family) ?? new Set<string>();
-    ids.add(id);
-    grouped.set(family, ids);
-  };
-  for (const entry of available.providers as Array<{ provider: string }>) {
-    const id = entry.provider;
-    if (overrides[id]?.enabled === false) continue;
-    availableIds.add(id);
-    add(id);
-  }
-  // Keep configured additions visible even when their CLI is currently
-  // missing. Vanishing a broken provider is precisely the wrong status UI.
-  for (const [id, override] of Object.entries(overrides)) {
-    if (override?.enabled === false) continue;
-    add(id);
-  }
-  const providers = [...grouped.entries()].map(([id, ids]) => {
-    const pooled = id === "claude" || id === "codex";
-    const aliases = [...ids].filter((candidate) => candidate !== id).sort();
-    const familyAvailable = [...ids].some((candidate) => availableIds.has(candidate));
-    const autoProviderId = pooled ? autoWiredId(overrides, id) : null;
-    const routeLoaded = Boolean(autoProviderId && availableIds.has(autoProviderId));
-    return {
-      id,
-      label: providerLabel(id, overrides),
-      available: familyAvailable,
-      kind: pooled ? ("pooled" as const) : ("single" as const),
-      quotaTelemetry: pooled,
-      autoProviderId,
-      aliases,
-      authCommand: providerAuthCommand(id),
-      summary: !familyAvailable
-        ? "Paseo cannot find this provider. Check its command location, then reload Paseo"
-        : pooled
-          ? routeLoaded
-            ? "Provider and automatic account selection are ready"
-            : "Provider is ready, but automatic account selection is not installed"
-          : "Provider is ready. Use Check setup to confirm its login and models",
-    };
-  });
-  const rank = (id: string) => (id === "claude" ? 0 : id === "codex" ? 1 : 2);
-  providers.sort((a, b) => rank(a.id) - rank(b.id) || a.label.localeCompare(b.label));
-  return { checkedAt: Math.floor(Date.now() / 1000), providers };
-}
+export { ROOT };

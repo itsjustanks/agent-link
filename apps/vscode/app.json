@@ -1,8 +1,0 @@
-{
-  "id": "vscode",
-  "title": "VS Code / Cursor",
-  "summary": "Rotating accounts in VS Code or Cursor",
-  "requires": "code",
-  "kind": "docs-only",
-  "doc": "README.md"
-}

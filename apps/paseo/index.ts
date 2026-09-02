@@ -1,113 +1,63 @@
 import type { PluginContext } from "@getpaseo/plugin";
-import { AgentSyncSurface } from "./agents.client";
-import { accountLoginCancel, accountLoginSessions, accountLoginStart, accountLoginSubmit } from "./auth.shared";
 import {
-  handleAccountLoginCancel,
-  handleAccountLoginSessions,
-  handleAccountLoginStart,
-  handleAccountLoginSubmit,
-} from "./auth.server";
-import { cliInstall, cliStatus, cliUpdateApply, cliUpdateCheck } from "./cli.shared";
-import { handleCliInstall, handleCliStatus, handleCliUpdateApply, handleCliUpdateCheck } from "./cli.server";
-import {
-  diagnoseProvider,
-  providerHealth,
-  providerHeartbeat,
-  routerConfigure,
-  routerModels,
+  routerAliasRemove,
+  routerAliasSet,
+  routerConnectComplete,
+  routerConnectPoll,
+  routerConnectStart,
+  routerConnectionRemove,
+  routerModelExpose,
+  routerModelUnexpose,
+  routerRouteCli,
+  routerSettingsSave,
+  routerStart,
   routerStatus,
-  accountUsage,
-  accountCapacity,
-  probeAccounts,
-  addAccount,
-  removeAccount,
-  scan,
-  setCooldown,
-  setPreference,
-  wireAuto,
-  wireProvider,
+  routerSyncModels,
 } from "./contracts.shared";
 import {
-  handleDiagnoseProvider,
-  handleProviderHealth,
-  handleProviderHeartbeat,
-  handleRouterConfigure,
-  handleRouterModels,
+  handleRouterAliasRemove,
+  handleRouterAliasSet,
+  handleRouterConnectComplete,
+  handleRouterConnectPoll,
+  handleRouterConnectStart,
+  handleRouterConnectionRemove,
+  handleRouterModelExpose,
+  handleRouterModelUnexpose,
+  handleRouterRouteCli,
+  handleRouterSettingsSave,
+  handleRouterStart,
   handleRouterStatus,
-  handleAccountUsage,
-  handleAccountCapacity,
-  handleProbeAccounts,
-  handleAddAccount,
-  handleRemoveAccount,
-  handleScan,
-  handleSetCooldown,
-  handleSetPreference,
-  handleWireAuto,
-  handleWireProvider,
+  handleRouterSyncModels,
 } from "./handlers.server";
-import { runShutdown, runStart } from "./lifecycle.shared";
-import { resourceSetEnabled, resourceStatus } from "./resources.shared";
-import { handleResourceSetEnabled, handleResourceStatus } from "./resources.server";
-import { toolchainConfigure, toolchainRemove, toolchainRun, toolchainSetEnabled, toolchainStatus } from "./toolchain.shared";
-import {
-  handleToolchainConfigure,
-  handleToolchainRemove,
-  handleToolchainRun,
-  handleToolchainSetEnabled,
-  handleToolchainStatus,
-} from "./toolchain.server";
+import { AgentLinkSurface } from "./surface.client";
 
-// Register only contracts reachable from the current AgentLink surface.
-// Retired routing and continuation contracts are intentionally not active.
 export default function contribute(plugin: PluginContext) {
-  plugin.handle(accountLoginSessions, handleAccountLoginSessions);
-  plugin.handle(accountLoginStart, handleAccountLoginStart);
-  plugin.handle(accountLoginSubmit, handleAccountLoginSubmit);
-  plugin.handle(accountLoginCancel, handleAccountLoginCancel);
-  plugin.handle(scan, handleScan);
-  plugin.handle(wireProvider, handleWireProvider);
-  plugin.handle(wireAuto, handleWireAuto);
-  plugin.handle(setCooldown, handleSetCooldown);
-  plugin.handle(addAccount, handleAddAccount);
-  plugin.handle(removeAccount, handleRemoveAccount);
-  plugin.handle(setPreference, handleSetPreference);
-  plugin.handle(accountUsage, handleAccountUsage);
-  plugin.handle(accountCapacity, handleAccountCapacity);
-  plugin.handle(probeAccounts, handleProbeAccounts);
-  plugin.handle(diagnoseProvider, handleDiagnoseProvider);
-  plugin.handle(providerHealth, handleProviderHealth);
-  plugin.handle(providerHeartbeat, handleProviderHeartbeat);
   plugin.handle(routerStatus, handleRouterStatus);
-  plugin.handle(routerConfigure, handleRouterConfigure);
-  plugin.handle(routerModels, handleRouterModels);
-  plugin.handle(cliStatus, handleCliStatus);
-  plugin.handle(cliInstall, handleCliInstall);
-  plugin.handle(cliUpdateCheck, handleCliUpdateCheck);
-  plugin.handle(cliUpdateApply, handleCliUpdateApply);
-  plugin.handle(resourceStatus, handleResourceStatus);
-  plugin.handle(resourceSetEnabled, handleResourceSetEnabled);
-  plugin.handle(toolchainStatus, handleToolchainStatus);
-  plugin.handle(toolchainConfigure, handleToolchainConfigure);
-  plugin.handle(toolchainRemove, handleToolchainRemove);
-  plugin.handle(toolchainRun, handleToolchainRun);
-  plugin.handle(toolchainSetEnabled, handleToolchainSetEnabled);
+  plugin.handle(routerStart, handleRouterStart);
+  plugin.handle(routerSettingsSave, handleRouterSettingsSave);
+  plugin.handle(routerRouteCli, handleRouterRouteCli);
+  plugin.handle(routerSyncModels, handleRouterSyncModels);
+  plugin.handle(routerConnectStart, handleRouterConnectStart);
+  plugin.handle(routerConnectPoll, handleRouterConnectPoll);
+  plugin.handle(routerConnectComplete, handleRouterConnectComplete);
+  plugin.handle(routerConnectionRemove, handleRouterConnectionRemove);
+  plugin.handle(routerModelExpose, handleRouterModelExpose);
+  plugin.handle(routerModelUnexpose, handleRouterModelUnexpose);
+  plugin.handle(routerAliasSet, handleRouterAliasSet);
+  plugin.handle(routerAliasRemove, handleRouterAliasRemove);
 
-  plugin.addSurface("agent-sync", AgentSyncSurface);
-  plugin.addSidebarItem({ id: "agent-sync", title: "AgentLink", icon: "Users", surface: "agent-sync" });
+  plugin.addSurface("agent-link", AgentLinkSurface);
+  plugin.addSidebarItem({ id: "agent-link", title: "AgentLink", icon: "Users", surface: "agent-link" });
   plugin.addCommandCenterItem({
-    id: "open-agent-sync",
-    title: "Open AgentLink (accounts, orchestration & provider health)",
+    id: "open-agent-link",
+    title: "Open AgentLink (9router accounts, quotas & models)",
     icon: "Users",
-    keywords: ["accounts", "providers", "auth", "health", "agent-link"],
+    keywords: ["9router", "accounts", "quota", "models", "router", "agent-link"],
     context: "global",
     onSelect({ openSurface }) {
-      openSurface("agent-sync");
+      openSurface("agent-link");
     },
   });
-  // Server modules register their own start/shutdown work at import time, so
-  // this entry never names a *.server binding outside a `plugin.handle(...)`
-  // statement — see lifecycle.shared.ts for why that rule exists. Both calls are
-  // no-ops in the client bundle.
-  runStart();
-  return runShutdown;
+
+  return () => {};
 }
