@@ -17,6 +17,13 @@ import {
   routerStart,
   routerStatus,
   routerSyncModels,
+  routerUsageStats,
+  routerHolds,
+  routerClearHold,
+  routerTestModel,
+  routerTuning,
+  routerTuningSet,
+  routerLogs,
 } from "./contracts.shared";
 import { formatReset, groupModelIds, parseOauthPaste, providerLabel, quotaTone } from "./router.logic";
 
@@ -200,6 +207,109 @@ function QuotaBar({ theme, quota }: { theme: Theme; quota: RouterStatus["connect
 
 // ------------------------------------------------------------------ surface
 
+const TABS = [
+  { id: "setup", label: "Setup" },
+  { id: "accounts", label: "Accounts" },
+  { id: "models", label: "Models" },
+  { id: "tuning", label: "Tuning" },
+  { id: "usage", label: "Usage" },
+  { id: "logs", label: "Logs" },
+] as const;
+type TabId = (typeof TABS)[number]["id"];
+
+/** 9router's first-run password. Prefilled so setup is one press, not a lookup. */
+const DEFAULT_PASSWORD = "123456";
+
+function Tabs({ theme, active, onSelect, badge }: { theme: Theme; active: TabId; onSelect: (id: TabId) => void; badge: Partial<Record<TabId, string>> }) {
+  return (
+    <View style={{ flexDirection: "row", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
+      {TABS.map((tab) => {
+        const selected = tab.id === active;
+        return (
+          <Pressable
+            key={tab.id}
+            onPress={() => onSelect(tab.id)}
+            style={{
+              paddingHorizontal: 12,
+              paddingVertical: 6,
+              borderRadius: 999,
+              backgroundColor: selected ? theme.colors.accent : theme.colors.surface1,
+              borderColor: theme.colors.border,
+              borderWidth: selected ? 0 : 1,
+              flexDirection: "row",
+              alignItems: "center",
+              gap: 6,
+            }}
+          >
+            <Text
+              style={{
+                color: selected ? theme.colors.accentForeground : theme.colors.foregroundMuted,
+                fontSize: 13,
+                fontWeight: "600",
+              }}
+            >
+              {tab.label}
+            </Text>
+            {badge[tab.id] ? (
+              <View style={{ backgroundColor: selected ? theme.colors.accentForeground : theme.colors.surface2, borderRadius: 999, paddingHorizontal: 6 }}>
+                <Text style={{ color: selected ? theme.colors.accent : theme.colors.foregroundMuted, fontSize: 10, fontWeight: "700" }}>
+                  {badge[tab.id]}
+                </Text>
+              </View>
+            ) : null}
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+}
+
+function Toggle({
+  theme,
+  label,
+  hint,
+  on,
+  busy,
+  disabled,
+  onToggle,
+}: {
+  theme: Theme;
+  label: string;
+  hint?: string;
+  on: boolean;
+  busy?: boolean;
+  disabled?: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <View style={{ gap: 3 }}>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+        <Text style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "600", flex: 1 }}>{label}</Text>
+        <Chip theme={theme} label={on ? "on" : "off"} tone={on ? "success" : "neutral"} />
+        <Button theme={theme} label={on ? "Turn off" : "Turn on"} busy={busy} disabled={disabled} onPress={onToggle} />
+      </View>
+      {hint ? <Note theme={theme}>{hint}</Note> : null}
+    </View>
+  );
+}
+
+function Row({ theme, label, value, tone }: { theme: Theme; label: string; value: string; tone?: "success" | "warning" | "danger" }) {
+  const color =
+    tone === "success"
+      ? theme.colors.statusSuccess
+      : tone === "warning"
+        ? theme.colors.statusWarning
+        : tone === "danger"
+          ? theme.colors.statusDanger
+          : theme.colors.foreground;
+  return (
+    <View style={{ flexDirection: "row", justifyContent: "space-between", gap: 12 }}>
+      <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>{label}</Text>
+      <Text style={{ color, fontSize: 12, fontWeight: "600", flexShrink: 1, textAlign: "right" }}>{value}</Text>
+    </View>
+  );
+}
+
 export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
   const queryClient = useQueryClient();
   const callStatus = useRpc(routerStatus);
@@ -214,17 +324,28 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
   const callExpose = useRpc(routerModelExpose);
   const callAliasSet = useRpc(routerAliasSet);
   const callAliasRemove = useRpc(routerAliasRemove);
+  const callUsageStats = useRpc(routerUsageStats);
+  const callHolds = useRpc(routerHolds);
+  const callClearHold = useRpc(routerClearHold);
+  const callTestModel = useRpc(routerTestModel);
+  const callTuning = useRpc(routerTuning);
+  const callTuningSet = useRpc(routerTuningSet);
+  const callLogs = useRpc(routerLogs);
 
   const status = useQuery({
     queryKey: ["agent-link", "router-status"],
     queryFn: () => callStatus({}),
     refetchInterval: 15_000,
   });
+  const data = status.data;
+  const live = data?.running === true && data.auth.ok;
 
+  const [tab, setTab] = useState<TabId>("setup");
   const [message, setMessage] = useState<string>("");
-  const [showSettings, setShowSettings] = useState(false);
+  // 9router ships with this password; prefilling it means Save works immediately
+  // on a fresh install, and it is still editable for anyone who changed it.
   const [url, setUrl] = useState("");
-  const [password, setPassword] = useState("");
+  const [password, setPassword] = useState(DEFAULT_PASSWORD);
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const [signIn, setSignIn] = useState<{
     provider: "claude" | "codex";
@@ -240,26 +361,60 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
   const [exposeName, setExposeName] = useState("");
   const [aliasFrom, setAliasFrom] = useState("");
   const [aliasTo, setAliasTo] = useState("");
+  const [comboName, setComboName] = useState("");
+  const [testResult, setTestResult] = useState<{ model: string; ok: boolean; message: string } | null>(null);
 
-  const refresh = () => queryClient.invalidateQueries({ queryKey: ["agent-link", "router-status"] });
-  const run = <Input, Output extends { message?: string; ok?: boolean }>(fn: (input: Input) => Promise<Output>) =>
-    useMutation({
-      mutationFn: fn,
-      onSuccess: (result) => {
-        if (result?.message) setMessage(result.message);
-        refresh();
-      },
-      onError: (error: unknown) => setMessage(error instanceof Error ? error.message : String(error)),
-    });
+  const usage = useQuery({
+    queryKey: ["agent-link", "usage-stats"],
+    queryFn: () => callUsageStats({}),
+    enabled: live && tab === "usage",
+    refetchInterval: 30_000,
+  });
+  const tuning = useQuery({
+    queryKey: ["agent-link", "tuning"],
+    queryFn: () => callTuning({}),
+    enabled: live && tab === "tuning",
+  });
+  const logs = useQuery({
+    queryKey: ["agent-link", "logs"],
+    queryFn: () => callLogs({ limit: 200 }),
+    enabled: live && tab === "logs",
+    refetchInterval: tab === "logs" ? 4_000 : false,
+  });
+  const holds = useQuery({
+    queryKey: ["agent-link", "holds"],
+    queryFn: () => callHolds({}),
+    enabled: live,
+    refetchInterval: 30_000,
+  });
 
-  const startMutation = run(callStart);
-  const saveMutation = run(callSaveSettings);
-  const routeMutation = run(callRouteCli);
-  const syncMutation = run(callSyncModels);
-  const removeMutation = run(callRemoveConnection);
-  const exposeMutation = run(callExpose);
-  const aliasSetMutation = run(callAliasSet);
-  const aliasRemoveMutation = run(callAliasRemove);
+  const refresh = () => {
+    void queryClient.invalidateQueries({ queryKey: ["agent-link"] });
+  };
+  const feedback = {
+    onSuccess: (result: { message?: string }) => {
+      if (result?.message) setMessage(result.message);
+      refresh();
+    },
+    onError: (error: unknown) => setMessage(error instanceof Error ? error.message : String(error)),
+  };
+
+  const startMutation = useMutation({ mutationFn: callStart, ...feedback });
+  const saveMutation = useMutation({ mutationFn: callSaveSettings, ...feedback });
+  const routeMutation = useMutation({ mutationFn: callRouteCli, ...feedback });
+  const syncMutation = useMutation({ mutationFn: callSyncModels, ...feedback });
+  const removeMutation = useMutation({ mutationFn: callRemoveConnection, ...feedback });
+  const exposeMutation = useMutation({ mutationFn: callExpose, ...feedback });
+  const aliasSetMutation = useMutation({ mutationFn: callAliasSet, ...feedback });
+  const aliasRemoveMutation = useMutation({ mutationFn: callAliasRemove, ...feedback });
+  const clearHoldMutation = useMutation({ mutationFn: callClearHold, ...feedback });
+  const tuningMutation = useMutation({ mutationFn: callTuningSet, ...feedback });
+  const testMutation = useMutation({
+    mutationFn: callTestModel,
+    onSuccess: (result, input) => setTestResult({ model: input.model, ok: result.ok, message: result.message }),
+    onError: (error: unknown, input) =>
+      setTestResult({ model: input.model, ok: false, message: error instanceof Error ? error.message : String(error) }),
+  });
 
   const connectMutation = useMutation({
     mutationFn: (provider: "claude" | "codex") => callConnectStart({ provider }),
@@ -290,8 +445,7 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
       });
     },
     onSuccess: (result: { ok?: boolean; status?: string; error?: string | null }) => {
-      const done = result.ok === true || result.status === "done";
-      if (done) {
+      if (result.ok === true || result.status === "done") {
         setSignIn(null);
         setPasted("");
         setMessage("Account connected.");
@@ -305,11 +459,7 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
     onError: (error: unknown) => setMessage(error instanceof Error ? error.message : String(error)),
   });
 
-  const data = status.data;
-  const busy = status.isLoading && !data;
-  const gap = layout.compact ? 8 : 12;
-
-  if (busy) {
+  if (status.isLoading && !data) {
     return (
       <View style={{ flex: 1, backgroundColor: theme.colors.surface0, alignItems: "center", justifyContent: "center" }}>
         <ActivityIndicator color={theme.colors.accent} />
@@ -317,8 +467,22 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
     );
   }
 
-  const hijackFor = (cli: "claude" | "codex"): CliHijack | undefined => data?.hijack.find((entry) => entry.cli === cli);
+  const gap = layout.compact ? 8 : 12;
+  const hijackFor = (cli: "claude" | "codex") => data?.hijack.find((entry) => entry.cli === cli);
   const grouped = groupModelIds(data?.models.ids ?? []);
+  const holdCount = holds.data?.count ?? 0;
+
+  // The setup checklist doubles as the wizard: each step knows whether it is
+  // done, so a fresh install reads top-to-bottom and a working one is all ticks.
+  const steps = [
+    { done: Boolean(data?.binary.path), label: "9router installed" },
+    { done: Boolean(data?.running), label: "9router running" },
+    { done: Boolean(data?.auth.ok), label: "Dashboard password saved" },
+    { done: (data?.connections.length ?? 0) > 0, label: "At least one account connected" },
+    { done: data?.hijack.some((entry) => entry.routed) === true, label: "A CLI routed through 9router" },
+  ];
+  const remaining = steps.filter((step) => !step.done).length;
+
   const byProvider = new Map<string, Connection[]>();
   for (const connection of data?.connections ?? []) {
     const list = byProvider.get(connection.provider) ?? [];
@@ -326,348 +490,589 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
     byProvider.set(connection.provider, list);
   }
 
+  const openDashboard = () => {
+    const target = data?.dashboardUrl ?? "";
+    void Linking.openURL(target).catch(() => {
+      Clipboard.setString(target);
+      setMessage(`Copied ${target} — paste it into a Paseo browser tab (⌘⇧B).`);
+    });
+  };
+
   return (
     <ScrollView style={{ flex: 1, backgroundColor: theme.colors.surface0 }} contentContainerStyle={{ padding: gap + 4 }}>
-      <Text style={{ color: theme.colors.foreground, fontSize: 18, fontWeight: "700", marginBottom: 4 }}>9Router Agent Link</Text>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 4 }}>
+        <Text style={{ color: theme.colors.foreground, fontSize: 18, fontWeight: "700", flex: 1 }}>9Router</Text>
+        {data?.running ? <Chip theme={theme} label={`v${data.version?.current ?? "?"}`} /> : null}
+        <Chip theme={theme} label={data?.running ? "running" : "stopped"} tone={data?.running ? "success" : "warning"} />
+      </View>
       <Note theme={theme}>
-        Your accounts, quotas and fallback live in 9router. This panel sets it up and points Paseo's Claude and Codex
-        providers at it.
+        Accounts, quotas, rotation and fallback live in 9router. It rewrites each CLI's own config, so a routed binary
+        goes through it everywhere — Paseo's chats included.
       </Note>
-      {message ? (
-        <View style={{ marginTop: 10, padding: 10, borderRadius: 8, backgroundColor: theme.colors.surface2 }}>
-          <Text style={{ color: theme.colors.foreground, fontSize: 12 }}>{message}</Text>
-        </View>
-      ) : null}
 
       <View style={{ height: gap }} />
+      <Tabs
+        theme={theme}
+        active={tab}
+        onSelect={setTab}
+        badge={{
+          setup: remaining > 0 ? String(remaining) : undefined,
+          accounts: holdCount > 0 ? String(holdCount) : undefined,
+          models: data?.models.count ? String(data.models.count) : undefined,
+        }}
+      />
 
-      {/* 1 — 9router itself */}
-      <Card theme={theme}>
-        <Step theme={theme} index={1} title="9router" hint={data?.version ? `v${data.version.current}` : undefined} />
-        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
-          <Chip theme={theme} label={data?.binary.path ? "installed" : "not installed"} tone={data?.binary.path ? "success" : "danger"} />
-          <Chip theme={theme} label={data?.running ? "running" : "stopped"} tone={data?.running ? "success" : "warning"} />
-          {data?.auth.ok ? <Chip theme={theme} label="signed in" tone="success" /> : <Chip theme={theme} label="dashboard login needed" tone="warning" />}
-          {data?.apiKey.present ? <Chip theme={theme} label={`key ···${data.apiKey.last4 ?? ""}`} /> : <Chip theme={theme} label="no api key" tone="warning" />}
-          {data?.version?.hasUpdate ? <Chip theme={theme} label={`update ${data.version.latest}`} tone="warning" /> : null}
-        </View>
-        {!data?.binary.path ? (
-          <View style={{ gap: 6, padding: 10, borderRadius: 8, backgroundColor: theme.colors.surface2 }}>
-            <Text style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "600" }}>Install 9router first</Text>
-            <Note theme={theme}>
-              1. In a terminal, run:{"\n"}
-              {"   npm install -g 9router"}
-              {"\n"}2. Start it here with the button below (or run 9router yourself).
-              {"\n"}3. The dashboard opens at {data?.url ?? "http://localhost:20128"}/dashboard — its first-run
-              password is 123456. Change it there, then save the new one under Settings.
-            </Note>
-            <View style={{ flexDirection: "row", gap: 8 }}>
+      {message ? (
+        <Pressable onPress={() => setMessage("")}>
+          <View style={{ marginBottom: 12, padding: 10, borderRadius: 8, backgroundColor: theme.colors.surface2 }}>
+            <Text style={{ color: theme.colors.foreground, fontSize: 12 }}>{message}</Text>
+          </View>
+        </Pressable>
+      ) : null}
+
+      {/* ------------------------------------------------------------- SETUP */}
+      {tab === "setup" ? (
+        <>
+          <Card theme={theme}>
+            <Step theme={theme} index={1} title="Checklist" hint={remaining === 0 ? "all done" : `${remaining} left`} />
+            {steps.map((step) => (
+              <View key={step.label} style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                <Text style={{ color: step.done ? theme.colors.statusSuccess : theme.colors.foregroundMuted, fontSize: 13 }}>
+                  {step.done ? "●" : "○"}
+                </Text>
+                <Text style={{ color: step.done ? theme.colors.foreground : theme.colors.foregroundMuted, fontSize: 13 }}>
+                  {step.label}
+                </Text>
+              </View>
+            ))}
+          </Card>
+
+          {!data?.binary.path ? (
+            <Card theme={theme}>
+              <Step theme={theme} index={2} title="Install 9router" />
+              <Note theme={theme}>Run this in a terminal, then come back and press Start.</Note>
+              <View style={{ padding: 10, borderRadius: 8, backgroundColor: theme.colors.surface2 }}>
+                <Text style={{ color: theme.colors.foreground, fontSize: 12, fontFamily: "Menlo" }}>
+                  npm install -g 9router
+                </Text>
+              </View>
               <Button
                 theme={theme}
-                label="Copy install command"
+                label="Copy command"
                 onPress={() => {
                   Clipboard.setString("npm install -g 9router");
                   setMessage("Copied: npm install -g 9router");
                 }}
               />
-            </View>
-          </View>
-        ) : null}
-        {data?.binary.path && !data.running ? (
-          <Note theme={theme}>
-            Not running yet. Start it below, or run 9router in a terminal — it serves the dashboard and an
-            OpenAI-compatible API at {data.url}/v1.
-          </Note>
-        ) : null}
-        {data?.running && !data.auth.configured ? (
-          <Note theme={theme} tone="warning">
-            No dashboard password saved yet. 9router's first-run password is 123456 — put it in Settings so this panel
-            can read your accounts and quotas.
-          </Note>
-        ) : null}
-        {data?.auth.error ? <Note theme={theme} tone="warning">{data.auth.error}</Note> : null}
-        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-          {!data?.running ? (
-            <Button theme={theme} label="Start 9router" tone="primary" busy={startMutation.isPending} onPress={() => startMutation.mutate({})} />
+            </Card>
           ) : null}
-          <Button
-            theme={theme}
-            label="Open dashboard"
-            onPress={() => {
-              const target = data?.dashboardUrl ?? "";
-              // Plugin surfaces cannot open a Paseo browser tab — the SDK has no
-              // browser namespace — so hand the URL to the system browser and
-              // keep the clipboard as the fallback.
-              void Linking.openURL(target).catch(() => {
-                Clipboard.setString(target);
-                setMessage(`Copied ${target} — paste it into a Paseo browser tab (⌘⇧B).`);
-              });
-            }}
-          />
-          <Button
-            theme={theme}
-            label="Copy dashboard URL"
-            onPress={() => {
-              Clipboard.setString(data?.dashboardUrl ?? "");
-              setMessage("Dashboard URL copied. A Paseo browser tab is ⌘⇧B.");
-            }}
-          />
-          <Button theme={theme} label={showSettings ? "Hide settings" : "Settings"} onPress={() => setShowSettings((open) => !open)} />
-        </View>
-        {showSettings ? (
-          <View style={{ gap: 8 }}>
-            <Note theme={theme}>Saved at {data?.settingsPath}. The password is only used for 9router's own API.</Note>
+
+          <Card theme={theme}>
+            <Step theme={theme} index={data?.binary.path ? 2 : 3} title="Server" hint={data?.url} />
+            <View style={{ gap: 5 }}>
+              <Row theme={theme} label="Binary" value={data?.binary.path ?? "not installed"} tone={data?.binary.path ? "success" : "danger"} />
+              <Row theme={theme} label="Status" value={data?.running ? "running" : "stopped"} tone={data?.running ? "success" : "warning"} />
+              <Row theme={theme} label="API key" value={data?.apiKey.present ? `···${data.apiKey.last4 ?? ""}` : "none"} tone={data?.apiKey.present ? "success" : "warning"} />
+              {data?.version?.hasUpdate ? <Row theme={theme} label="Update" value={`${data.version.latest} available`} tone="warning" /> : null}
+            </View>
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+              {!data?.running ? (
+                <Button theme={theme} label="Start 9router" tone="primary" disabled={!data?.binary.path} busy={startMutation.isPending} onPress={() => startMutation.mutate({})} />
+              ) : null}
+              <Button theme={theme} label="Open dashboard" onPress={openDashboard} />
+              <Button
+                theme={theme}
+                label="Copy URL"
+                onPress={() => {
+                  Clipboard.setString(data?.dashboardUrl ?? "");
+                  setMessage("Dashboard URL copied. A Paseo browser tab is ⌘⇧B.");
+                }}
+              />
+            </View>
+          </Card>
+
+          <Card theme={theme}>
+            <Step theme={theme} index={data?.binary.path ? 3 : 4} title="Dashboard password" hint={data?.auth.ok ? "connected" : undefined} />
+            <Note theme={theme}>
+              This panel reads your accounts and quotas through 9router's own API, which wants the dashboard password.
+              A fresh install uses {DEFAULT_PASSWORD} — it is prefilled below. Change it in the dashboard and save the
+              new one here.
+            </Note>
+            {data?.auth.error ? <Note theme={theme} tone="warning">{data.auth.error}</Note> : null}
             <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
               <Field theme={theme} value={url} onChangeText={setUrl} placeholder={data?.url ?? "http://127.0.0.1:20128"} />
               <Field theme={theme} value={password} onChangeText={setPassword} placeholder="dashboard password" secure />
               <Button
                 theme={theme}
-                label="Save"
+                label={data?.auth.ok ? "Save" : "Connect"}
                 tone="primary"
                 busy={saveMutation.isPending}
-                onPress={() => {
-                  saveMutation.mutate({ ...(url ? { url } : {}), ...(password ? { password } : {}) });
-                  setPassword("");
-                }}
+                disabled={!data?.running}
+                onPress={() => saveMutation.mutate({ ...(url ? { url } : {}), ...(password ? { password } : {}) })}
               />
             </View>
-          </View>
-        ) : null}
-      </Card>
+            <Note theme={theme}>Stored at {data?.settingsPath} (mode 600). The key is never shown in full.</Note>
+          </Card>
 
-      {/* 2 — accounts */}
-      <Card theme={theme}>
-        <Step theme={theme} index={2} title="Accounts" hint={`${data?.connections.length ?? 0} connected`} />
-        {(data?.connections.length ?? 0) === 0 ? (
-          <Note theme={theme}>No accounts yet. Connect one below, or add any of 9router's other providers from the dashboard.</Note>
-        ) : null}
-        {[...byProvider.entries()].map(([provider, list]) => (
-          <View key={provider} style={{ gap: 8 }}>
-            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12, fontWeight: "700" }}>{providerLabel(provider)}</Text>
-            {list.map((connection) => (
-              <View
-                key={connection.id}
-                style={{
-                  borderColor: theme.colors.border,
-                  borderWidth: 1,
-                  borderRadius: 8,
-                  padding: 10,
-                  gap: 6,
-                  backgroundColor: theme.colors.surface0,
-                }}
-              >
-                <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                  <Text style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "600", flex: 1 }}>
-                    {connection.name}
-                  </Text>
-                  <Chip theme={theme} label={`priority ${connection.priority}`} />
-                  {connection.usage?.plan ? <Chip theme={theme} label={connection.usage.plan} /> : null}
-                  {connection.usage?.limitReached ? <Chip theme={theme} label="limit reached" tone="danger" /> : null}
-                  {connection.testStatus ? (
-                    <Chip theme={theme} label={connection.testStatus} tone={connection.testStatus === "active" ? "success" : "warning"} />
+          <Card theme={theme}>
+            <Step theme={theme} index={data?.binary.path ? 4 : 5} title="Route the CLIs" />
+            <Note theme={theme}>
+              Routing rewrites that CLI's own config, so every launch on this machine goes through 9router — not just
+              Paseo's. Paseo's stock Claude and Codex chats pick it up with no further wiring.
+            </Note>
+            {(["claude", "codex"] as const).map((cli) => {
+              const entry = hijackFor(cli);
+              const name = cli === "claude" ? "Claude Code" : "Codex";
+              return (
+                <View key={cli} style={{ gap: 4 }}>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <Text style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "600", flex: 1 }}>{name}</Text>
+                    {!entry?.installed ? (
+                      <Chip theme={theme} label="not installed" tone="warning" />
+                    ) : (
+                      <Chip theme={theme} label={entry.routed ? "through 9router" : "direct"} tone={entry.routed ? "success" : "neutral"} />
+                    )}
+                    <Button
+                      theme={theme}
+                      label={entry?.routed ? "Restore direct" : `Route ${name}`}
+                      tone={entry?.routed ? "default" : "primary"}
+                      disabled={!entry?.installed || !live}
+                      busy={routeMutation.isPending && routeMutation.variables?.cli === cli}
+                      onPress={() => routeMutation.mutate({ cli, routed: !entry?.routed })}
+                    />
+                  </View>
+                  {entry?.routed && entry.configPath ? <Note theme={theme}>Writes {entry.configPath}</Note> : null}
+                </View>
+              );
+            })}
+          </Card>
+
+          <Note theme={theme}>
+            Routing a subscription sign-in through a local proxy is outside Anthropic's and OpenAI's consumer terms.
+            That choice is yours to make.
+          </Note>
+        </>
+      ) : null}
+
+      {/* ---------------------------------------------------------- ACCOUNTS */}
+      {tab === "accounts" ? (
+        <>
+          {holdCount > 0 ? (
+            <Card theme={theme}>
+              <Step theme={theme} index={0} title="Parked accounts" hint={`${holdCount}`} />
+              <Note theme={theme}>
+                9router stops using an account after an error and keeps the hold until it expires. If you have fixed
+                the cause, clear it here rather than waiting.
+              </Note>
+              {(holds.data?.holds ?? []).map((hold, index) => (
+                <View key={`${hold.provider}-${hold.connectionName}-${index}`} style={{ gap: 4, padding: 8, borderRadius: 8, backgroundColor: theme.colors.surface2 }}>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                    <Text style={{ color: theme.colors.foreground, fontSize: 12, fontWeight: "600", flex: 1 }}>
+                      {providerLabel(hold.provider)} · {hold.connectionName}
+                    </Text>
+                    <Button
+                      theme={theme}
+                      label="Clear"
+                      busy={clearHoldMutation.isPending}
+                      onPress={() => clearHoldMutation.mutate({ provider: hold.provider, model: hold.model, connectionId: hold.connectionId })}
+                    />
+                  </View>
+                  {hold.lastError ? (
+                    <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }} numberOfLines={3}>
+                      {hold.lastError}
+                    </Text>
                   ) : null}
                 </View>
-                {(connection.usage?.quotas ?? []).map((quota) => (
-                  <QuotaBar key={quota.label} theme={theme} quota={quota} />
+              ))}
+            </Card>
+          ) : null}
+
+          <Card theme={theme}>
+            <Step theme={theme} index={0} title="Connected" hint={`${data?.connections.length ?? 0}`} />
+            {!live ? <Note theme={theme} tone="warning">Finish Setup first — accounts need the dashboard password.</Note> : null}
+            {live && (data?.connections.length ?? 0) === 0 ? (
+              <Note theme={theme}>No accounts yet. Connect one below, or add any other provider from the dashboard.</Note>
+            ) : null}
+            {[...byProvider.entries()].map(([provider, list]) => (
+              <View key={provider} style={{ gap: 8 }}>
+                <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12, fontWeight: "700" }}>
+                  {providerLabel(provider)} · {list.length}
+                </Text>
+                {list.map((connection) => (
+                  <View
+                    key={connection.id}
+                    style={{ borderColor: theme.colors.border, borderWidth: 1, borderRadius: 8, padding: 10, gap: 6, backgroundColor: theme.colors.surface0 }}
+                  >
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <Text style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "600", flex: 1 }}>{connection.name}</Text>
+                      <Chip theme={theme} label={`#${connection.priority}`} />
+                      {connection.usage?.plan ? <Chip theme={theme} label={connection.usage.plan} /> : null}
+                      {connection.usage?.limitReached ? <Chip theme={theme} label="limit reached" tone="danger" /> : null}
+                    </View>
+                    {(connection.usage?.quotas ?? []).map((quota) => (
+                      <QuotaBar key={quota.label} theme={theme} quota={quota} />
+                    ))}
+                    <View style={{ flexDirection: "row", gap: 8 }}>
+                      {confirmRemove === connection.id ? (
+                        <>
+                          <Button
+                            theme={theme}
+                            label="Really remove"
+                            tone="danger"
+                            busy={removeMutation.isPending}
+                            onPress={() => {
+                              removeMutation.mutate({ id: connection.id });
+                              setConfirmRemove(null);
+                            }}
+                          />
+                          <Button theme={theme} label="Cancel" onPress={() => setConfirmRemove(null)} />
+                        </>
+                      ) : (
+                        <Button theme={theme} label="Remove" onPress={() => setConfirmRemove(connection.id)} />
+                      )}
+                    </View>
+                  </View>
                 ))}
-                <View style={{ flexDirection: "row", gap: 8 }}>
-                  {confirmRemove === connection.id ? (
-                    <>
-                      <Button
-                        theme={theme}
-                        label="Really remove"
-                        tone="danger"
-                        busy={removeMutation.isPending}
-                        onPress={() => {
-                          removeMutation.mutate({ id: connection.id });
-                          setConfirmRemove(null);
-                        }}
-                      />
-                      <Button theme={theme} label="Cancel" onPress={() => setConfirmRemove(null)} />
-                    </>
-                  ) : (
-                    <Button theme={theme} label="Remove" onPress={() => setConfirmRemove(connection.id)} />
-                  )}
-                </View>
               </View>
             ))}
-          </View>
-        ))}
-        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-          <Button
-            theme={theme}
-            label="Connect Claude"
-            busy={connectMutation.isPending && connectMutation.variables === "claude"}
-            onPress={() => connectMutation.mutate("claude")}
-          />
-          <Button
-            theme={theme}
-            label="Connect Codex"
-            busy={connectMutation.isPending && connectMutation.variables === "codex"}
-            onPress={() => connectMutation.mutate("codex")}
-          />
-        </View>
-        {signIn ? (
-          <View style={{ gap: 8, padding: 10, borderRadius: 8, backgroundColor: theme.colors.surface2 }}>
-            <Text style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "600" }}>
-              Signing in to {signIn.provider === "claude" ? "Claude" : "Codex"}
-            </Text>
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+              <Button theme={theme} label="Connect Claude" disabled={!live} busy={connectMutation.isPending && connectMutation.variables === "claude"} onPress={() => connectMutation.mutate("claude")} />
+              <Button theme={theme} label="Connect Codex" disabled={!live} busy={connectMutation.isPending && connectMutation.variables === "codex"} onPress={() => connectMutation.mutate("codex")} />
+              <Button theme={theme} label="More in dashboard" onPress={openDashboard} />
+            </View>
+            {signIn ? (
+              <View style={{ gap: 8, padding: 10, borderRadius: 8, backgroundColor: theme.colors.surface2 }}>
+                <Text style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "600" }}>
+                  Signing in to {signIn.provider === "claude" ? "Claude" : "Codex"}
+                </Text>
+                <Note theme={theme}>
+                  {signIn.mode === "poll"
+                    ? "Finish the sign-in in your browser, then press Check."
+                    : "Approve in your browser, copy the code it shows, and paste it below."}
+                </Note>
+                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+                  <Button theme={theme} label="Copy link" onPress={() => Clipboard.setString(signIn.authUrl)} />
+                  {signIn.mode === "paste-code" ? (
+                    <Field theme={theme} value={pasted} onChangeText={setPasted} placeholder="paste code or callback URL" />
+                  ) : null}
+                  <Button theme={theme} label={signIn.mode === "poll" ? "Check" : "Finish"} tone="primary" busy={finishMutation.isPending} onPress={() => finishMutation.mutate()} />
+                  <Button theme={theme} label="Cancel" onPress={() => setSignIn(null)} />
+                </View>
+              </View>
+            ) : null}
+          </Card>
+        </>
+      ) : null}
+
+      {/* ------------------------------------------------------------ MODELS */}
+      {tab === "models" ? (
+        <>
+          <Card theme={theme}>
+            <Step theme={theme} index={0} title="In Paseo's picker" hint={data?.paseo.modelsInSync ? "in sync" : undefined} />
             <Note theme={theme}>
-              {signIn.mode === "poll"
-                ? "Finish the sign-in in your browser, then check for it here."
-                : "Approve in your browser, copy the code it shows, and paste it below."}
+              Claude (cc/) and Codex (cx/) models can be listed on Paseo's own providers. Other pools stay in 9router —
+              reach them with an alias or a combo instead of crowding the picker.
+            </Note>
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+              <Chip theme={theme} label={`${data?.paseo.listedModels.claude.length ?? 0} Claude`} tone={data?.paseo.listedModels.claude.length ? "success" : "neutral"} />
+              <Chip theme={theme} label={`${data?.paseo.listedModels.codex.length ?? 0} Codex`} tone={data?.paseo.listedModels.codex.length ? "success" : "neutral"} />
+              <Button theme={theme} label="Sync into Paseo" tone="primary" disabled={!data?.running} busy={syncMutation.isPending} onPress={() => syncMutation.mutate({})} />
+            </View>
+            {(data?.paseo.staleProviders.length ?? 0) > 0 ? (
+              <Note theme={theme} tone="warning">Old provider entries still present: {data?.paseo.staleProviders.join(", ")} — Sync removes them.</Note>
+            ) : null}
+          </Card>
+
+          <Card theme={theme}>
+            <Step theme={theme} index={0} title="Available" hint={`${data?.models.count ?? 0}`} />
+            {grouped.map((group) => (
+              <View key={group.prefix} style={{ gap: 4 }}>
+                <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12, fontWeight: "700" }}>
+                  {group.label} · {group.ids.length}
+                </Text>
+                {group.ids.slice(0, 8).map((id) => (
+                  <View key={id} style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                    <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11, flex: 1 }} numberOfLines={1}>
+                      {id}
+                    </Text>
+                    <Button
+                      theme={theme}
+                      label="Test"
+                      busy={testMutation.isPending && testMutation.variables?.model === id}
+                      onPress={() => testMutation.mutate({ model: id })}
+                    />
+                  </View>
+                ))}
+                {group.ids.length > 8 ? (
+                  <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>+{group.ids.length - 8} more in the dashboard</Text>
+                ) : null}
+              </View>
+            ))}
+            {testResult ? (
+              <View style={{ padding: 8, borderRadius: 8, backgroundColor: theme.colors.surface2, gap: 3 }}>
+                <Text style={{ color: testResult.ok ? theme.colors.statusSuccess : theme.colors.statusDanger, fontSize: 12, fontWeight: "600" }}>
+                  {testResult.ok ? "✓" : "✗"} {testResult.model}
+                </Text>
+                <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>{testResult.message}</Text>
+              </View>
+            ) : null}
+          </Card>
+
+          <Card theme={theme}>
+            <Step theme={theme} index={0} title="Expose a model" />
+            <Note theme={theme}>
+              9router ships a fixed catalogue, so a model it does not know yet is invisible until you add it — this is
+              how cc/claude-fable-5-1 got here.
             </Note>
             <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-              <Button theme={theme} label="Copy sign-in link" onPress={() => Clipboard.setString(signIn.authUrl)} />
-              {signIn.mode === "paste-code" ? (
-                <Field theme={theme} value={pasted} onChangeText={setPasted} placeholder="paste code or callback URL" />
-              ) : null}
+              <Field theme={theme} value={exposeAlias} onChangeText={setExposeAlias} placeholder="cc" />
+              <Field theme={theme} value={exposeId} onChangeText={setExposeId} placeholder="claude-fable-5-1" />
+              <Field theme={theme} value={exposeName} onChangeText={setExposeName} placeholder="Claude Fable 5.1" />
               <Button
                 theme={theme}
-                label={signIn.mode === "poll" ? "Check" : "Finish"}
-                tone="primary"
-                busy={finishMutation.isPending}
-                onPress={() => finishMutation.mutate()}
+                label="Expose"
+                busy={exposeMutation.isPending}
+                disabled={!live || !exposeAlias || !exposeId}
+                onPress={() => {
+                  exposeMutation.mutate({ providerAlias: exposeAlias, id: exposeId, ...(exposeName ? { name: exposeName } : {}) });
+                  setExposeId("");
+                  setExposeName("");
+                }}
               />
-              <Button theme={theme} label="Cancel" onPress={() => setSignIn(null)} />
             </View>
-          </View>
-        ) : null}
-      </Card>
+            {(data?.models.custom.length ?? 0) > 0 ? (
+              <Note theme={theme}>Custom: {data?.models.custom.map((model) => `${model.providerAlias}/${model.id}`).join(", ")}</Note>
+            ) : null}
+          </Card>
 
-      {/* 3 — the hijack */}
-      <Card theme={theme}>
-        <Step theme={theme} index={3} title="Route the CLIs through 9router" />
-        <Note theme={theme}>
-          9router rewrites each CLI's own config, so every launch of that binary goes through it — including the ones
-          Paseo starts, and every terminal on this machine.
-        </Note>
-        {(["claude", "codex"] as const).map((cli) => {
-          const entry = hijackFor(cli);
-          const name = cli === "claude" ? "Claude Code" : "Codex";
-          return (
-            <View key={cli} style={{ gap: 6 }}>
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                <Text style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "600", flex: 1 }}>{name}</Text>
-                {!entry?.installed ? (
-                  <Chip theme={theme} label="not installed" tone="warning" />
-                ) : (
-                  <Chip theme={theme} label={entry.routed ? "through 9router" : "direct"} tone={entry.routed ? "success" : "neutral"} />
-                )}
-                <Button
+          <Card theme={theme}>
+            <Step theme={theme} index={0} title="Aliases" />
+            <Note theme={theme}>
+              Map a plain model name onto a 9router model. With one of these, Paseo's stock picker entries route
+              through 9router without listing anything.
+            </Note>
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+              <Field theme={theme} value={aliasFrom} onChangeText={setAliasFrom} placeholder="claude-opus-5" />
+              <Field theme={theme} value={aliasTo} onChangeText={setAliasTo} placeholder="cc/claude-opus-5" />
+              <Button
+                theme={theme}
+                label="Add"
+                busy={aliasSetMutation.isPending}
+                disabled={!live || !aliasFrom || !aliasTo}
+                onPress={() => {
+                  aliasSetMutation.mutate({ alias: aliasFrom, model: aliasTo });
+                  setAliasFrom("");
+                  setAliasTo("");
+                }}
+              />
+            </View>
+            {(data?.aliases ?? []).map((alias) => (
+              <View key={alias.alias} style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11, flex: 1 }} numberOfLines={1}>
+                  {alias.alias} → {alias.model}
+                </Text>
+                <Button theme={theme} label="Remove" onPress={() => aliasRemoveMutation.mutate({ alias: alias.alias })} />
+              </View>
+            ))}
+          </Card>
+
+          <Card theme={theme}>
+            <Step theme={theme} index={0} title="Combos" hint={`${data?.combos.length ?? 0}`} />
+            <Note theme={theme}>
+              A combo is an ordered fallback list that behaves like one model. Build one from the models listed in
+              Paseo and it survives an exhausted account without you choosing again.
+            </Note>
+            {(data?.combos ?? []).map((combo) => (
+              <Text key={combo.name} style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
+                {combo.name}: {combo.models.join(" → ")}
+              </Text>
+            ))}
+            <Note theme={theme}>Combos are built in the dashboard, where you can order and name them properly.</Note>
+            <Button theme={theme} label="Open dashboard" onPress={openDashboard} />
+          </Card>
+        </>
+      ) : null}
+
+
+      {/* ------------------------------------------------------------ TUNING */}
+      {tab === "tuning" ? (
+        <>
+          <Card theme={theme}>
+            <Step theme={theme} index={0} title="Token savers" />
+            <Note theme={theme}>
+              These rewrite what reaches the model, so they trade fidelity for tokens. 9router applies them to every
+              request it routes — including this chat, once a CLI is routed.
+            </Note>
+            {!live ? <Note theme={theme} tone="warning">Finish Setup first.</Note> : null}
+            {tuning.isLoading ? <ActivityIndicator color={theme.colors.accent} /> : null}
+            {tuning.data ? (
+              <View style={{ gap: 12 }}>
+                <Toggle
                   theme={theme}
-                  label={entry?.routed ? "Restore direct" : `Route ${name}`}
-                  tone={entry?.routed ? "default" : "primary"}
-                  disabled={!entry?.installed || !data?.running}
-                  busy={routeMutation.isPending && routeMutation.variables?.cli === cli}
-                  onPress={() => routeMutation.mutate({ cli, routed: !entry?.routed })}
+                  label="RTK"
+                  hint="Compresses tool output (git diff, grep, build logs) before it is sent. Usually the cheapest win."
+                  on={tuning.data.rtkEnabled}
+                  busy={tuningMutation.isPending}
+                  disabled={!live}
+                  onToggle={() => tuningMutation.mutate({ rtkEnabled: !tuning.data.rtkEnabled })}
+                />
+                <Toggle
+                  theme={theme}
+                  label={`Caveman (${tuning.data.cavemanLevel})`}
+                  hint="Rewrites the system prompt in terse english. Saves a lot, and changes how the model writes."
+                  on={tuning.data.cavemanEnabled}
+                  busy={tuningMutation.isPending}
+                  disabled={!live}
+                  onToggle={() => tuningMutation.mutate({ cavemanEnabled: !tuning.data.cavemanEnabled })}
+                />
+                {tuning.data.cavemanEnabled ? (
+                  <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
+                    {["lite", "full"].map((level) => (
+                      <Button
+                        key={level}
+                        theme={theme}
+                        label={level}
+                        tone={tuning.data.cavemanLevel === level ? "primary" : "default"}
+                        disabled={!live}
+                        onPress={() => tuningMutation.mutate({ cavemanLevel: level })}
+                      />
+                    ))}
+                  </View>
+                ) : null}
+                <Toggle
+                  theme={theme}
+                  label={`Ponytail (${tuning.data.ponytailLevel})`}
+                  hint="Injects a YAGNI-first coding style so replies stay short."
+                  on={tuning.data.ponytailEnabled}
+                  busy={tuningMutation.isPending}
+                  disabled={!live}
+                  onToggle={() => tuningMutation.mutate({ ponytailEnabled: !tuning.data.ponytailEnabled })}
+                />
+                <Toggle
+                  theme={theme}
+                  label="Headroom"
+                  hint={`Context compression through a separate service at ${tuning.data.headroomUrl}. Needs that service running.`}
+                  on={tuning.data.headroomEnabled}
+                  busy={tuningMutation.isPending}
+                  disabled={!live}
+                  onToggle={() => tuningMutation.mutate({ headroomEnabled: !tuning.data.headroomEnabled })}
                 />
               </View>
-              {entry?.routed && entry.configPath ? <Note theme={theme}>Writes {entry.configPath}</Note> : null}
-            </View>
-          );
-        })}
-      </Card>
+            ) : null}
+          </Card>
 
-      {/* 4 — models in Paseo */}
-      <Card theme={theme}>
-        <Step theme={theme} index={4} title="Models in Paseo" hint={`${data?.models.count ?? 0} available`} />
-        <Note theme={theme}>
-          Lists 9router's Claude (cc/) and Codex (cx/) models on Paseo's own providers, so they appear in the model
-          picker of a normal chat. Models from other pools stay in 9router — reach them through a combo or an alias
-          rather than crowding the picker.
-        </Note>
-        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
-          <Chip
-            theme={theme}
-            label={data?.paseo.modelsInSync ? "listed in Paseo" : "not listed yet"}
-            tone={data?.paseo.modelsInSync ? "success" : "warning"}
-          />
-          {(data?.paseo.staleProviders.length ?? 0) > 0 ? (
-            <Chip theme={theme} label={`${data?.paseo.staleProviders.length} old provider(s)`} tone="warning" />
+          {tuning.data ? (
+            <Card theme={theme}>
+              <Step theme={theme} index={0} title="Routing" />
+              <Note theme={theme}>
+                How 9router picks among the accounts in a pool, and how a combo falls through its list.
+              </Note>
+              <View style={{ gap: 5 }}>
+                <Row theme={theme} label="Combo strategy" value={tuning.data.comboStrategy} />
+                <Row theme={theme} label="Sticky round-robin limit" value={String(tuning.data.stickyRoundRobinLimit)} />
+                <Row theme={theme} label="API key required on /v1" value={tuning.data.requireApiKey ? "yes" : "no"} tone={tuning.data.requireApiKey ? "success" : "warning"} />
+              </View>
+              <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
+                {["fallback", "roundrobin"].map((strategy) => (
+                  <Button
+                    key={strategy}
+                    theme={theme}
+                    label={strategy}
+                    tone={tuning.data.comboStrategy === strategy ? "primary" : "default"}
+                    disabled={!live}
+                    onPress={() => tuningMutation.mutate({ comboStrategy: strategy })}
+                  />
+                ))}
+              </View>
+              <Note theme={theme}>Per-provider strategies and capacity adapters live in the dashboard.</Note>
+              <Button theme={theme} label="Open dashboard" onPress={openDashboard} />
+            </Card>
           ) : null}
-          <Button
-            theme={theme}
-            label="Sync models into Paseo"
-            tone="primary"
-            disabled={!data?.running}
-            busy={syncMutation.isPending}
-            onPress={() => syncMutation.mutate({})}
-          />
-        </View>
-        {grouped.map((group) => (
-          <View key={group.prefix} style={{ gap: 3 }}>
-            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12, fontWeight: "700" }}>
-              {group.label} · {group.ids.length}
-            </Text>
-            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11, lineHeight: 16 }}>{group.ids.join("  ")}</Text>
-          </View>
-        ))}
-        {(data?.combos.length ?? 0) > 0 ? (
-          <Note theme={theme}>Combos: {data?.combos.map((combo) => combo.name).join(", ")}</Note>
-        ) : null}
+        </>
+      ) : null}
 
-        <View style={{ height: 4 }} />
-        <Text style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "600" }}>Expose a model</Text>
-        <Note theme={theme}>
-          9router ships a fixed catalogue. Add one it does not list yet — e.g. cc + claude-fable-5-1.
-        </Note>
-        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-          <Field theme={theme} value={exposeAlias} onChangeText={setExposeAlias} placeholder="cc" />
-          <Field theme={theme} value={exposeId} onChangeText={setExposeId} placeholder="claude-fable-5-1" />
-          <Field theme={theme} value={exposeName} onChangeText={setExposeName} placeholder="Claude Fable 5.1" />
-          <Button
-            theme={theme}
-            label="Expose"
-            busy={exposeMutation.isPending}
-            disabled={!exposeAlias || !exposeId}
-            onPress={() => {
-              exposeMutation.mutate({ providerAlias: exposeAlias, id: exposeId, ...(exposeName ? { name: exposeName } : {}) });
-              setExposeId("");
-              setExposeName("");
-            }}
-          />
-        </View>
-        {(data?.models.custom.length ?? 0) > 0 ? (
+      {/* -------------------------------------------------------------- LOGS */}
+      {tab === "logs" ? (
+        <Card theme={theme}>
+          <Step theme={theme} index={0} title="9router console" hint={logs.data ? `${logs.data.lines.length} lines` : undefined} />
           <Note theme={theme}>
-            Custom: {data?.models.custom.map((model) => `${model.providerAlias}/${model.id}`).join(", ")}
+            Live from 9router, newest last, refreshed every 4s. This is where a routing failure explains itself — the
+            account it chose, the upstream error, what RTK saved.
           </Note>
-        ) : null}
-
-        <View style={{ height: 4 }} />
-        <Text style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "600" }}>Aliases</Text>
-        <Note theme={theme}>
-          Map a plain model name onto a 9router model, so a tool asking for claude-opus-5 reaches the cc/ pool.
-        </Note>
-        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-          <Field theme={theme} value={aliasFrom} onChangeText={setAliasFrom} placeholder="claude-opus-5" />
-          <Field theme={theme} value={aliasTo} onChangeText={setAliasTo} placeholder="cc/claude-opus-5" />
-          <Button
-            theme={theme}
-            label="Add alias"
-            busy={aliasSetMutation.isPending}
-            disabled={!aliasFrom || !aliasTo}
-            onPress={() => {
-              aliasSetMutation.mutate({ alias: aliasFrom, model: aliasTo });
-              setAliasFrom("");
-              setAliasTo("");
-            }}
-          />
-        </View>
-        {(data?.aliases ?? []).map((alias) => (
-          <View key={alias.alias} style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-            <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11, flex: 1 }}>
-              {alias.alias} → {alias.model}
-            </Text>
-            <Button theme={theme} label="Remove" onPress={() => aliasRemoveMutation.mutate({ alias: alias.alias })} />
+          {!live ? <Note theme={theme} tone="warning">Finish Setup first.</Note> : null}
+          {logs.isLoading ? <ActivityIndicator color={theme.colors.accent} /> : null}
+          <View style={{ backgroundColor: theme.colors.surface0, borderColor: theme.colors.border, borderWidth: 1, borderRadius: 8, padding: 8, gap: 2 }}>
+            {(logs.data?.lines ?? []).slice(-120).map((line, index) => (
+              <Text
+                key={`${index}-${line.slice(0, 24)}`}
+                style={{
+                  color: /error|failed|✗|⚠/i.test(line)
+                    ? theme.colors.statusDanger
+                    : /DONE|✓/i.test(line)
+                      ? theme.colors.statusSuccess
+                      : theme.colors.foregroundMuted,
+                  fontSize: 10,
+                  fontFamily: "Menlo",
+                }}
+              >
+                {line}
+              </Text>
+            ))}
+            {(logs.data?.lines.length ?? 0) === 0 && !logs.isLoading ? (
+              <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>Nothing logged yet.</Text>
+            ) : null}
           </View>
-        ))}
-      </Card>
+          <View style={{ flexDirection: "row", gap: 8 }}>
+            <Button theme={theme} label="Refresh" busy={logs.isFetching} onPress={() => void logs.refetch()} />
+            <Button
+              theme={theme}
+              label="Copy"
+              onPress={() => {
+                Clipboard.setString((logs.data?.lines ?? []).join("\n"));
+                setMessage("Console copied.");
+              }}
+            />
+          </View>
+        </Card>
+      ) : null}
 
-      <Note theme={theme}>
-        Routing a subscription sign-in through a local proxy is outside Anthropic's and OpenAI's consumer terms. That
-        choice is yours to make.
-      </Note>
+      {/* ------------------------------------------------------------- USAGE */}
+      {tab === "usage" ? (
+        <>
+          <Card theme={theme}>
+            <Step theme={theme} index={0} title="Totals" hint="since install" />
+            {!live ? <Note theme={theme} tone="warning">Finish Setup first — usage needs the dashboard password.</Note> : null}
+            {usage.isLoading ? <ActivityIndicator color={theme.colors.accent} /> : null}
+            {usage.data ? (
+              <View style={{ gap: 5 }}>
+                <Row theme={theme} label="Requests" value={usage.data.totalRequests.toLocaleString()} />
+                <Row theme={theme} label="Cost (what these would have cost on API pricing)" value={`$${usage.data.totalCost.toFixed(2)}`} />
+                <Row theme={theme} label="Prompt tokens" value={usage.data.totalPromptTokens.toLocaleString()} />
+                <Row theme={theme} label="Cached tokens" value={usage.data.totalCachedTokens.toLocaleString()} />
+                <Row theme={theme} label="Completion tokens" value={usage.data.totalCompletionTokens.toLocaleString()} />
+              </View>
+            ) : null}
+          </Card>
+
+          {usage.data && usage.data.byProvider.length > 0 ? (
+            <Card theme={theme}>
+              <Step theme={theme} index={0} title="By provider" />
+              {usage.data.byProvider.map((entry) => (
+                <Row key={entry.provider} label={providerLabel(entry.provider)} theme={theme} value={`${entry.requests} req · $${entry.cost.toFixed(2)}`} />
+              ))}
+            </Card>
+          ) : null}
+
+          {usage.data && usage.data.byModel.length > 0 ? (
+            <Card theme={theme}>
+              <Step theme={theme} index={0} title="By model" hint="top 12" />
+              {usage.data.byModel.map((entry) => (
+                <Row key={entry.model} label={entry.model} theme={theme} value={`${entry.requests} req · $${entry.cost.toFixed(2)}`} />
+              ))}
+            </Card>
+          ) : null}
+        </>
+      ) : null}
     </ScrollView>
   );
 }

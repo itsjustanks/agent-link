@@ -502,3 +502,178 @@ export async function handleRouterAliasRemove({ alias }: { alias: string }) {
 }
 
 export { ROOT };
+
+// ------------------------------------------------------------------ round 2
+
+export async function handleRouterUsageStats() {
+  const client = new RouterClient();
+  const raw = await client.api<{
+    totalRequests?: number;
+    totalCost?: number;
+    totalPromptTokens?: number;
+    totalCompletionTokens?: number;
+    totalCachedTokens?: number;
+    byProvider?: Record<string, { requests?: number; cost?: number }>;
+    byModel?: Record<string, { requests?: number; cost?: number; lastUsed?: string }>;
+  }>("usage/stats");
+  const num = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : 0);
+  return {
+    totalRequests: num(raw?.totalRequests),
+    totalCost: num(raw?.totalCost),
+    totalPromptTokens: num(raw?.totalPromptTokens),
+    totalCompletionTokens: num(raw?.totalCompletionTokens),
+    totalCachedTokens: num(raw?.totalCachedTokens),
+    byProvider: Object.entries(raw?.byProvider ?? {})
+      .map(([provider, value]) => ({ provider, requests: num(value?.requests), cost: num(value?.cost) }))
+      .sort((a, b) => b.cost - a.cost),
+    byModel: Object.entries(raw?.byModel ?? {})
+      .map(([model, value]) => ({
+        model,
+        requests: num(value?.requests),
+        cost: num(value?.cost),
+        lastUsed: typeof value?.lastUsed === "string" ? value.lastUsed : null,
+      }))
+      .sort((a, b) => b.requests - a.requests)
+      .slice(0, 12),
+  };
+}
+
+/**
+ * Accounts 9router has parked. Worth surfacing: a hold survives the condition
+ * that caused it, so a fixed problem can still look broken until it is cleared.
+ */
+export async function handleRouterHolds() {
+  const client = new RouterClient();
+  const raw = await client.api<{ models?: Array<Record<string, unknown>>; unavailableCount?: number }>(
+    "models/availability",
+  );
+  const holds = (raw?.models ?? []).map((entry) => ({
+    connectionId: String(entry.connectionId ?? ""),
+    provider: String(entry.provider ?? ""),
+    model: String(entry.model ?? ""),
+    connectionName: String(entry.connectionName ?? entry.connectionId ?? ""),
+    status: String(entry.status ?? "unavailable"),
+    until: typeof entry.until === "string" ? entry.until : null,
+    lastError: String(entry.lastError ?? "").slice(0, 400),
+  }));
+  return { count: typeof raw?.unavailableCount === "number" ? raw.unavailableCount : holds.length, holds };
+}
+
+export async function handleRouterClearHold({
+  provider,
+  model,
+  connectionId,
+}: {
+  provider: string;
+  model: string;
+  connectionId?: string;
+}) {
+  const client = new RouterClient();
+  // Two different states look identical in the UI. A model lock is lifted by
+  // clearCooldown; a connection parked with testStatus "unavailable" has no
+  // lock to lift and is only revived by writing the connection itself.
+  const cleared = await client.apiJson<{ ok?: boolean; error?: string }>("models/availability", "POST", {
+    action: "clearCooldown",
+    provider,
+    model,
+  });
+  let revived = false;
+  if (connectionId) {
+    const result = await client.apiJson<{ success?: boolean }>(
+      `providers/${encodeURIComponent(connectionId)}`,
+      "PUT",
+      { testStatus: "active", lastError: null, lastErrorAt: null, backoffLevel: 0 },
+    );
+    revived = result !== null;
+  }
+  if (cleared?.ok || revived) return { ok: true, message: `Cleared the hold on ${provider}.` };
+  return { ok: false, message: cleared?.error ?? client.authError ?? "Could not clear that hold." };
+}
+
+export async function handleRouterComboCreate({ name, models }: { name: string; models: string[] }) {
+  const client = new RouterClient();
+  const result = await client.apiJson<{ success?: boolean; error?: string }>("combos", "POST", {
+    name,
+    models,
+    kind: "fallback",
+  });
+  if (result?.success !== false && result !== null) {
+    return { ok: true, message: `Combo "${name}" now falls back across ${models.length} models.` };
+  }
+  return { ok: false, message: result?.error ?? client.authError ?? "Could not create that combo." };
+}
+
+/**
+ * One tiny completion through the router, so "is this model reachable" is
+ * answered by the real path rather than by a catalogue entry.
+ */
+export async function handleRouterTestModel({ model }: { model: string }) {
+  const settings = readSettings();
+  if (!settings.apiKey) return { ok: false, message: "No API key saved yet.", latencyMs: 0 };
+  const started = Date.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 90_000);
+  try {
+    const response = await fetch(`${settings.url}/v1/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${settings.apiKey}` },
+      body: JSON.stringify({ model, max_tokens: 16, messages: [{ role: "user", content: "Reply with: ok" }] }),
+      signal: controller.signal,
+    });
+    const latencyMs = Date.now() - started;
+    const text = await response.text();
+    if (!response.ok) {
+      // 9router's own error text is the useful part — a version gate, an
+      // exhausted account, a missing credential. Pass it through unchanged.
+      const detail = text.slice(0, 300).replace(/\s+/g, " ").trim();
+      return { ok: false, message: detail || `HTTP ${response.status}`, latencyMs };
+    }
+    return { ok: true, message: `${model} answered in ${(latencyMs / 1000).toFixed(1)}s.`, latencyMs };
+  } catch (error) {
+    return {
+      ok: false,
+      message: error instanceof Error ? error.message : String(error),
+      latencyMs: Date.now() - started,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function handleRouterTuning() {
+  const client = new RouterClient();
+  const raw = await client.api<Record<string, unknown>>("settings");
+  const bool = (key: string, fallback = false) => (typeof raw?.[key] === "boolean" ? (raw[key] as boolean) : fallback);
+  const str = (key: string, fallback = "") => (typeof raw?.[key] === "string" ? (raw[key] as string) : fallback);
+  const num = (key: string, fallback = 0) => (typeof raw?.[key] === "number" ? (raw[key] as number) : fallback);
+  return {
+    rtkEnabled: bool("rtkEnabled"),
+    cavemanEnabled: bool("cavemanEnabled"),
+    cavemanLevel: str("cavemanLevel", "lite"),
+    ponytailEnabled: bool("ponytailEnabled"),
+    ponytailLevel: str("ponytailLevel", "full"),
+    headroomEnabled: bool("headroomEnabled"),
+    headroomUrl: str("headroomUrl"),
+    headroomCompressUserMessages: bool("headroomCompressUserMessages"),
+    comboStrategy: str("comboStrategy", "fallback"),
+    stickyRoundRobinLimit: num("stickyRoundRobinLimit", 3),
+    requireApiKey: bool("requireApiKey"),
+  };
+}
+
+export async function handleRouterTuningSet(input: Record<string, unknown>) {
+  const client = new RouterClient();
+  // Only the keys the caller actually set; PATCH merges into 9router's settings.
+  const patch = Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined));
+  if (Object.keys(patch).length === 0) return { ok: true, message: "Nothing to change." };
+  const result = await client.apiJson<{ success?: boolean; error?: string }>("settings", "PATCH", patch);
+  if (result === null) return { ok: false, message: client.authError ?? "Could not update 9router settings." };
+  return { ok: true, message: `Updated ${Object.keys(patch).join(", ")}.` };
+}
+
+export async function handleRouterLogs({ limit }: { limit?: number }) {
+  const client = new RouterClient();
+  const raw = await client.api<{ logs?: unknown[] }>(`translator/console-logs?limit=${limit ?? 200}`);
+  const lines = (raw?.logs ?? []).filter((line): line is string => typeof line === "string");
+  return { lines: lines.slice(-(limit ?? 200)) };
+}

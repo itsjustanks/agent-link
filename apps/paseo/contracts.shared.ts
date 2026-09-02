@@ -201,3 +201,102 @@ export const routerAliasRemove = defineRpc({
   input: z.object({ alias: z.string() }),
   output: z.object({ ok: z.boolean(), message: z.string() }),
 });
+
+// ------------------------------------------------------------------ round 2
+
+export const UsageStatsSchema = z.object({
+  totalRequests: z.number(),
+  totalCost: z.number(),
+  totalPromptTokens: z.number(),
+  totalCompletionTokens: z.number(),
+  totalCachedTokens: z.number(),
+  byProvider: z.array(z.object({ provider: z.string(), requests: z.number(), cost: z.number() })),
+  byModel: z.array(z.object({ model: z.string(), requests: z.number(), cost: z.number(), lastUsed: z.string().nullable() })),
+});
+
+/** An account 9router has parked for a model, with the error that parked it. */
+export const HoldSchema = z.object({
+  connectionId: z.string(),
+  provider: z.string(),
+  model: z.string(),
+  connectionName: z.string(),
+  status: z.string(),
+  until: z.string().nullable(),
+  lastError: z.string(),
+});
+
+export const routerUsageStats = defineRpc({
+  name: "agent-link.router.usage-stats",
+  input: z.object({}),
+  output: UsageStatsSchema,
+});
+
+export const routerHolds = defineRpc({
+  name: "agent-link.router.holds",
+  input: z.object({}),
+  output: z.object({ count: z.number(), holds: z.array(HoldSchema) }),
+});
+
+export const routerClearHold = defineRpc({
+  name: "agent-link.router.clear-hold",
+  // `connectionId` is what actually clears a connection parked with
+  // testStatus "unavailable"; clearCooldown alone only lifts model locks.
+  input: z.object({ provider: z.string(), model: z.string(), connectionId: z.string().optional() }),
+  output: z.object({ ok: z.boolean(), message: z.string() }),
+});
+
+export const routerComboCreate = defineRpc({
+  name: "agent-link.router.combo.create",
+  input: z.object({ name: z.string(), models: z.array(z.string()) }),
+  output: z.object({ ok: z.boolean(), message: z.string() }),
+});
+
+/** Reachability of a model id, so the panel can prove the path works. */
+export const routerTestModel = defineRpc({
+  name: "agent-link.router.test-model",
+  input: z.object({ model: z.string() }),
+  output: z.object({ ok: z.boolean(), message: z.string(), latencyMs: z.number() }),
+});
+
+/** 9router's token-saver and routing knobs, the ones worth a switch in Paseo. */
+export const TuningSchema = z.object({
+  rtkEnabled: z.boolean(),
+  cavemanEnabled: z.boolean(),
+  cavemanLevel: z.string(),
+  ponytailEnabled: z.boolean(),
+  ponytailLevel: z.string(),
+  headroomEnabled: z.boolean(),
+  headroomUrl: z.string(),
+  headroomCompressUserMessages: z.boolean(),
+  comboStrategy: z.string(),
+  stickyRoundRobinLimit: z.number(),
+  requireApiKey: z.boolean(),
+});
+
+export const routerTuning = defineRpc({
+  name: "agent-link.router.tuning",
+  input: z.object({}),
+  output: TuningSchema,
+});
+
+export const routerTuningSet = defineRpc({
+  name: "agent-link.router.tuning.set",
+  input: z.object({
+    rtkEnabled: z.boolean().optional(),
+    cavemanEnabled: z.boolean().optional(),
+    cavemanLevel: z.string().optional(),
+    ponytailEnabled: z.boolean().optional(),
+    ponytailLevel: z.string().optional(),
+    headroomEnabled: z.boolean().optional(),
+    comboStrategy: z.string().optional(),
+    stickyRoundRobinLimit: z.number().optional(),
+  }),
+  output: z.object({ ok: z.boolean(), message: z.string() }),
+});
+
+/** 9router's live console, so a failing turn can be read without leaving Paseo. */
+export const routerLogs = defineRpc({
+  name: "agent-link.router.logs",
+  input: z.object({ limit: z.number().optional() }),
+  output: z.object({ lines: z.array(z.string()) }),
+});

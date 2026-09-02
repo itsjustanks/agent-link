@@ -13,6 +13,14 @@ import {
   routerStart,
   routerStatus,
   routerSyncModels,
+  routerUsageStats,
+  routerHolds,
+  routerClearHold,
+  routerComboCreate,
+  routerTestModel,
+  routerTuning,
+  routerTuningSet,
+  routerLogs,
 } from "./contracts.shared";
 import {
   handleRouterAliasRemove,
@@ -28,6 +36,14 @@ import {
   handleRouterStart,
   handleRouterStatus,
   handleRouterSyncModels,
+  handleRouterUsageStats,
+  handleRouterHolds,
+  handleRouterClearHold,
+  handleRouterComboCreate,
+  handleRouterTestModel,
+  handleRouterTuning,
+  handleRouterTuningSet,
+  handleRouterLogs,
 } from "./handlers.server";
 import { AgentLinkSurface } from "./surface.client";
 
@@ -45,6 +61,14 @@ export default function contribute(plugin: PluginContext) {
   plugin.handle(routerModelUnexpose, handleRouterModelUnexpose);
   plugin.handle(routerAliasSet, handleRouterAliasSet);
   plugin.handle(routerAliasRemove, handleRouterAliasRemove);
+  plugin.handle(routerUsageStats, handleRouterUsageStats);
+  plugin.handle(routerHolds, handleRouterHolds);
+  plugin.handle(routerClearHold, handleRouterClearHold);
+  plugin.handle(routerComboCreate, handleRouterComboCreate);
+  plugin.handle(routerTestModel, handleRouterTestModel);
+  plugin.handle(routerTuning, handleRouterTuning);
+  plugin.handle(routerTuningSet, handleRouterTuningSet);
+  plugin.handle(routerLogs, handleRouterLogs);
 
   plugin.addSurface("agent-link", AgentLinkSurface);
   plugin.addSidebarItem({ id: "agent-link", title: "9Router", icon: "Users", surface: "agent-link" });
