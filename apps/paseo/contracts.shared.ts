@@ -48,15 +48,33 @@ export const AliasSchema = z.object({ alias: z.string(), model: z.string() });
  * rewrite, read back from 9router rather than guessed.
  */
 export const CliHijackSchema = z.object({
-  cli: z.enum(["claude", "codex"]),
+  // 9router routes far more than Claude and Codex; the panel discovers the
+  // list from the router rather than hardcoding two.
+  cli: z.string(),
   installed: z.boolean(),
   routed: z.boolean(),
+  label: z.string(),
   configPath: z.string().nullable(),
   baseUrl: z.string().nullable(),
+  supported: z.boolean(),
+  note: z.string(),
   defaultModels: z.array(z.object({ key: z.string(), value: z.string() })),
 });
 
+/**
+ * 9router sends its own hardcoded `claude-cli/<version>` User-Agent rather than
+ * the one you have installed. When Anthropic gates a model behind a newer
+ * client, every account 400s until 9router ships a bump — and it parks them
+ * for the trouble. Detecting the mismatch turns a cryptic error into a fact.
+ */
+export const ClientVersionSchema = z.object({
+  installed: z.string().nullable(),
+  advertised: z.string().nullable(),
+  mismatch: z.boolean(),
+});
+
 export const RouterStatusSchema = z.object({
+  clientVersion: ClientVersionSchema,
   binary: z.object({ path: z.string().nullable(), version: z.string().nullable() }),
   running: z.boolean(),
   url: z.string(),
@@ -119,7 +137,7 @@ export const routerSettingsSave = defineRpc({
  */
 export const routerRouteCli = defineRpc({
   name: "agent-link.router.route-cli",
-  input: z.object({ cli: z.enum(["claude", "codex"]), routed: z.boolean() }),
+  input: z.object({ cli: z.string(), routed: z.boolean() }),
   output: z.object({ ok: z.boolean(), message: z.string() }),
 });
 

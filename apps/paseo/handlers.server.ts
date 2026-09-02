@@ -69,33 +69,115 @@ type ClaudeSettingsResponse = {
 
 type CodexSettingsResponse = { installed?: boolean; has9Router?: boolean; configPath?: string; config?: string };
 
+/**
+ * Which CLIs 9router can route, discovered from the router rather than
+ * hardcoded — it knows about far more than Claude and Codex, and the set grows
+ * with its releases. Only the two whose config shape this panel understands are
+ * switchable here; the rest are reported so the dashboard link means something.
+ */
+const CLI_LABELS: Record<string, string> = {
+  claude: "Claude Code",
+  codex: "Codex",
+  copilot: "GitHub Copilot",
+  cursor: "Cursor",
+  opencode: "OpenCode",
+  openclaw: "OpenClaw",
+  cline: "Cline",
+  kilo: "Kilo",
+  droid: "Droid",
+  cowork: "Cowork",
+  hermes: "Hermes",
+  jcode: "JCode",
+  devin: "Devin",
+  "grok-build": "Grok Build",
+  "deepseek-tui": "DeepSeek TUI",
+};
+
+/** The two whose settings this panel writes itself; the rest are read-only here. */
+const SWITCHABLE = new Set(["claude", "codex"]);
+
 async function readHijack(client: RouterClient): Promise<CliHijack[]> {
+  const all = await client.api<Record<string, Record<string, unknown>>>("cli-tools/all-statuses");
   const claude = await client.api<ClaudeSettingsResponse>("cli-tools/claude-settings");
-  const codex = await client.api<CodexSettingsResponse>("cli-tools/codex-settings");
   const env = claude?.settings?.env ?? {};
   const defaults = Object.entries(env)
     .filter(([key, value]) => key.startsWith("ANTHROPIC_DEFAULT_") && typeof value === "string")
     .map(([key, value]) => ({ key, value: String(value) }));
-  const baseUrl = typeof env.ANTHROPIC_BASE_URL === "string" ? env.ANTHROPIC_BASE_URL : null;
-  const codexBase = (codex?.config ?? "").match(/base_url\s*=\s*"([^"]+)"/)?.[1] ?? null;
-  return [
-    {
-      cli: "claude",
-      installed: claude?.installed === true,
-      routed: claude?.has9Router === true,
-      configPath: claude?.settingsPath ?? join(HOME, ".claude", "settings.json"),
-      baseUrl,
-      defaultModels: defaults,
-    },
-    {
-      cli: "codex",
-      installed: codex?.installed === true,
-      routed: codex?.has9Router === true,
-      configPath: codex?.configPath ?? join(HOME, ".codex", "config.toml"),
-      baseUrl: codexBase,
-      defaultModels: [],
-    },
-  ];
+
+  const rows: CliHijack[] = [];
+  for (const [cli, raw] of Object.entries(all ?? {})) {
+    if (!raw || typeof raw !== "object") continue;
+    const installed = raw.installed === true;
+    const switchable = SWITCHABLE.has(cli);
+    rows.push({
+      cli,
+      label: CLI_LABELS[cli] ?? cli,
+      installed,
+      routed: raw.has9Router === true,
+      configPath:
+        typeof raw.settingsPath === "string"
+          ? raw.settingsPath
+          : typeof raw.configPath === "string"
+            ? raw.configPath
+            : null,
+      baseUrl: cli === "claude" && typeof env.ANTHROPIC_BASE_URL === "string" ? env.ANTHROPIC_BASE_URL : null,
+      supported: switchable,
+      note: !installed
+        ? typeof raw.message === "string"
+          ? raw.message
+          : "not installed"
+        : switchable
+          ? ""
+          : "switch this one in the 9router dashboard",
+      defaultModels: cli === "claude" ? defaults : [],
+    });
+  }
+  // Installed first, then the ones this panel can switch, then by name.
+  rows.sort((a, b) => {
+    if (a.installed !== b.installed) return a.installed ? -1 : 1;
+    if (a.supported !== b.supported) return a.supported ? -1 : 1;
+    return a.label.localeCompare(b.label);
+  });
+  return rows;
+}
+
+/**
+ * Compare the Claude Code you have against the one 9router claims to be. The
+ * advertised version is only observable through an error it causes, so it is
+ * read from whatever 9router last recorded rather than probed for.
+ */
+async function readClientVersion(client: RouterClient | null): Promise<{
+  installed: string | null;
+  advertised: string | null;
+  mismatch: boolean;
+}> {
+  let installed: string | null = null;
+  try {
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const run = promisify(execFile);
+    const { stdout } = await run("claude", ["--version"], { timeout: 5_000 });
+    installed = stdout.trim().split(/\s+/)[0] ?? null;
+  } catch {
+    // Claude Code missing or slow: nothing to compare against.
+  }
+  let advertised: string | null = null;
+  if (client) {
+    const availability = await client.api<{ models?: Array<{ lastError?: unknown }> }>("models/availability");
+    for (const entry of availability?.models ?? []) {
+      const error = typeof entry.lastError === "string" ? entry.lastError : "";
+      const found = error.match(/Claude Code (\d+\.\d+\.\d+) does not support/);
+      if (found) {
+        advertised = found[1] ?? null;
+        break;
+      }
+    }
+  }
+  return {
+    installed,
+    advertised,
+    mismatch: Boolean(installed && advertised && installed !== advertised),
+  };
 }
 
 // ------------------------------------------------------------------- status
@@ -129,7 +211,10 @@ export async function handleRouterStatus(_input: unknown, { paseo }: PluginHandl
   const staleProviders = DEAD_PROVIDER_IDS.filter((id) => overrides[id] !== undefined);
   const staleShims = listStaleShims(isLegacyShim);
 
+  const clientVersion = await readClientVersion(running ? client : null);
+
   const empty: RouterStatus = {
+    clientVersion,
     binary: { path: binaryPath, version: null },
     running,
     url: settings.url,
@@ -275,7 +360,7 @@ export async function handleRouterSettingsSave({ url, password }: { url?: string
 
 // -------------------------------------------------------------- CLI routing
 
-export async function handleRouterRouteCli({ cli, routed }: { cli: "claude" | "codex"; routed: boolean }) {
+export async function handleRouterRouteCli({ cli, routed }: { cli: string; routed: boolean }) {
   const settings = readSettings();
   const client = new RouterClient(settings);
   if (!(await client.health())) return { ok: false, message: "9router is not running." };

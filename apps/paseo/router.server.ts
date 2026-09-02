@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { accessSync, constants, existsSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 import { cookieHeader, last4 } from "./router.logic";
@@ -58,6 +58,9 @@ export function writeSettings(next: Partial<RouterSettings>): RouterSettings {
     throw new Error(`${SETTINGS_PATH} exists but is not readable JSON — fix or remove it first.`);
   }
   const merged = { ...readSettings(), ...next };
+  // On a machine that never had agent-link, ROOT does not exist yet and every
+  // save would fail with ENOENT. Create it private — it holds a bearer key.
+  mkdirSync(ROOT, { recursive: true, mode: 0o700 });
   const mode = existsSync(SETTINGS_PATH) ? statSync(SETTINGS_PATH).mode & 0o777 : 0o600;
   const tmp = `${SETTINGS_PATH}.tmp-agent-link`;
   writeFileSync(tmp, `${JSON.stringify(merged, null, 2)}\n`, { mode });

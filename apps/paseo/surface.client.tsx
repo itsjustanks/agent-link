@@ -692,33 +692,49 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
             <Step theme={theme} index={data?.binary.path ? 4 : 5} title="Route the CLIs" />
             <Note theme={theme}>
               Routing rewrites that CLI's own config, so every launch on this machine goes through 9router — not just
-              Paseo's. Paseo's stock Claude and Codex chats pick it up with no further wiring.
+              Paseo's. Paseo's stock Claude and Codex chats pick it up with no further wiring. 9router routes more
+              tools than these two; the rest are switched from its dashboard.
             </Note>
-            {(["claude", "codex"] as const).map((cli) => {
-              const entry = hijackFor(cli);
-              const name = cli === "claude" ? "Claude Code" : "Codex";
-              return (
-                <View key={cli} style={{ gap: 4 }}>
-                  <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                    <Text style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "600", flex: 1 }}>{name}</Text>
-                    {!entry?.installed ? (
-                      <Chip theme={theme} label="not installed" tone="warning" />
-                    ) : (
-                      <Chip theme={theme} label={entry.routed ? "through 9router" : "direct"} tone={entry.routed ? "success" : "neutral"} />
-                    )}
+            {(data?.hijack ?? []).map((entry) => (
+              <View key={entry.cli} style={{ gap: 4, opacity: entry.installed ? 1 : 0.55 }}>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <Text style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "600", flex: 1 }}>{entry.label}</Text>
+                  {!entry.installed ? (
+                    <Chip theme={theme} label="not installed" />
+                  ) : (
+                    <Chip theme={theme} label={entry.routed ? "through 9router" : "direct"} tone={entry.routed ? "success" : "neutral"} />
+                  )}
+                  {entry.installed && entry.supported ? (
                     <Button
                       theme={theme}
-                      label={entry?.routed ? "Restore direct" : `Route ${name}`}
-                      tone={entry?.routed ? "default" : "primary"}
-                      disabled={!entry?.installed || !live}
-                      busy={routeMutation.isPending && routeMutation.variables?.cli === cli}
-                      onPress={() => routeMutation.mutate({ cli, routed: !entry?.routed })}
+                      label={entry.routed ? "Restore direct" : "Route"}
+                      tone={entry.routed ? "default" : "primary"}
+                      disabled={!live}
+                      busy={routeMutation.isPending && routeMutation.variables?.cli === entry.cli}
+                      onPress={() => routeMutation.mutate({ cli: entry.cli, routed: !entry.routed })}
                     />
-                  </View>
-                  {entry?.routed && entry.configPath ? <Note theme={theme}>Writes {entry.configPath}</Note> : null}
+                  ) : null}
                 </View>
-              );
-            })}
+                {entry.routed && entry.configPath ? <Note theme={theme}>Writes {entry.configPath}</Note> : null}
+                {entry.note ? <Note theme={theme}>{entry.note}</Note> : null}
+              </View>
+            ))}
+            <Button theme={theme} label="Route the others in the dashboard" onPress={openDashboard} />
+            {data?.clientVersion.advertised ? (
+              <View style={{ gap: 4, padding: 10, borderRadius: 8, backgroundColor: theme.colors.surface2 }}>
+                <Text style={{ color: theme.colors.statusWarning, fontSize: 13, fontWeight: "600" }}>
+                  9router identifies as Claude Code {data.clientVersion.advertised}
+                </Text>
+                <Note theme={theme}>
+                  {data.clientVersion.installed
+                    ? `You have ${data.clientVersion.installed}. `
+                    : ""}
+                  9router sends its own hardcoded client version, so a model Anthropic gates behind a newer Claude
+                  Code fails on every account — and 9router then parks them, which outlives the cause. Clear the
+                  holds under Accounts once 9router ships a bump.
+                </Note>
+              </View>
+            ) : null}
           </Card>
 
           <Note theme={theme}>
