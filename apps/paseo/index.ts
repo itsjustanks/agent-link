@@ -1,5 +1,12 @@
 import type { PluginContext } from "@getpaseo/plugin";
 import { AgentSyncSurface } from "./agents.client";
+import { accountLoginCancel, accountLoginSessions, accountLoginStart, accountLoginSubmit } from "./auth.shared";
+import {
+  handleAccountLoginCancel,
+  handleAccountLoginSessions,
+  handleAccountLoginStart,
+  handleAccountLoginSubmit,
+} from "./auth.server";
 import { cliInstall, cliStatus, cliUpdateApply, cliUpdateCheck } from "./cli.shared";
 import { handleCliInstall, handleCliStatus, handleCliUpdateApply, handleCliUpdateCheck } from "./cli.server";
 import {
@@ -53,6 +60,10 @@ import {
 // Register only contracts reachable from the current AgentLink surface.
 // Retired routing and continuation contracts are intentionally not active.
 export default function contribute(plugin: PluginContext) {
+  plugin.handle(accountLoginSessions, handleAccountLoginSessions);
+  plugin.handle(accountLoginStart, handleAccountLoginStart);
+  plugin.handle(accountLoginSubmit, handleAccountLoginSubmit);
+  plugin.handle(accountLoginCancel, handleAccountLoginCancel);
   plugin.handle(scan, handleScan);
   plugin.handle(wireProvider, handleWireProvider);
   plugin.handle(wireAuto, handleWireAuto);

@@ -30,4 +30,16 @@ test ! -e "$fixture_root/agent-link/state/pools/hold-codex-primary"
 test ! -e "$fixture_root/agent-link/state/pools/reason-codex-primary"
 grep -q 'agent-link login \$p \$e' "$repo_root/agent-link"
 
+mkdir -p "$fixture_root/agent-link/accounts/claude/person@icloud.com"
+printf '%s\n' '{"oauthAccount":{"emailAddress":"Person@iCloud.com"}}' \
+  > "$fixture_root/home/.claude.json"
+printf '%s\n' '{"oauthAccount":{"emailAddress":"PERSON@ICLOUD.COM"}}' \
+  > "$fixture_root/agent-link/accounts/claude/person@icloud.com/.claude.json"
+next="$(HOME="$fixture_root/home" AGENT_LINK_HOME="$fixture_root/agent-link" PATH="/usr/bin:/bin" \
+  "$repo_root/agent-link" next claude)"
+test "$next" = 'person@icloud.com'
+status="$(HOME="$fixture_root/home" AGENT_LINK_HOME="$fixture_root/agent-link" PATH="/usr/bin:/bin" \
+  "$repo_root/agent-link" status)"
+grep -q 'duplicated by a slot below' <<< "$status"
+
 echo "authentication fixture passed"

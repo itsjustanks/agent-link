@@ -2,7 +2,16 @@ import type { PluginSurfaceProps } from "@getpaseo/plugin";
 import { useRpc } from "@getpaseo/plugin";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import React, { useEffect, useState } from "react";
-import { ScrollView, Text, View } from "react-native";
+import { Linking, ScrollView, Text, View } from "react-native";
+import {
+  accountLoginCancel,
+  accountLoginSessions,
+  accountLoginStart,
+  accountLoginSubmit,
+  type AccountLoginSession,
+  type AccountSource,
+} from "./auth.shared";
+import { accountIdentity, normalizeAccountEmail } from "./account-capacity.logic";
 import { cliInstall, cliStatus, cliUpdateApply, cliUpdateCheck } from "./cli.shared";
 import { resourceSetEnabled, resourceStatus } from "./resources.shared";
 import {
@@ -17,7 +26,6 @@ import {
   accountUsage,
   accountCapacity,
   probeAccounts,
-  addAccount,
   removeAccount,
   diagnoseProvider,
   providerHeartbeat,
@@ -55,6 +63,7 @@ import {
   Tag,
   Toolbar,
   statusColor,
+  copyToClipboard,
   useTokens,
   useUi,
   type Status,
@@ -76,8 +85,9 @@ type RouterDraftGroup = { name: string; purpose: string; skillsText: string; ins
 type AuthenticationNeed = {
   key: string;
   provider: ProviderId;
+  source: AccountSource;
   target: string;
-  command: string;
+  email: string;
   reason: string;
 };
 const ROUTER_MODE_OPTIONS: Array<{ value: RouterDraftMode; label: string; description: string }> = [
@@ -152,18 +162,16 @@ function durationLabel(window: CapacityWindow): string {
 }
 
 function capacityTone(entry: CapacityAccount): Status {
-  if (entry.state === "held") return "error";
-  if (entry.state === "parked" || entry.state === "nearing") return "attention";
-  if (entry.state === "ready") return "ok";
+  if (entry.state === "nearing" || entry.state === "stale") return "attention";
+  if (entry.state === "current") return "ok";
   return "neutral";
 }
 
 function capacityStateLabel(entry: CapacityAccount): string {
-  if (entry.state === "held") return "blocked until tested";
-  if (entry.state === "parked") return "cooling down";
-  if (entry.state === "nearing") return "automatic turns routed elsewhere";
-  if (entry.state === "ready") return "available in AgentLink";
-  return entry.windows.length > 0 ? "usage data is old" : "waiting for usage data";
+  if (entry.state === "nearing") return "near plan limit";
+  if (entry.state === "current") return "plan limits current";
+  if (entry.state === "stale") return "plan-limit data is old";
+  return "plan limits not reported";
 }
 
 function creditLabel(entry: CapacityAccount): string | null {
@@ -172,6 +180,59 @@ function creditLabel(entry: CapacityAccount): string | null {
   if (!entry.credits.hasCredits) return "no extra credits";
   const balance = Number(entry.credits.balance);
   return Number.isFinite(balance) ? `extra credit balance ${balance.toFixed(2)}` : "extra credits available";
+}
+
+function moneyLabel(value: number, currency: string): string {
+  if (!currency) return value.toFixed(2);
+  try {
+    return new Intl.NumberFormat(undefined, { style: "currency", currency }).format(value);
+  } catch {
+    return `${currency} ${value.toFixed(2)}`;
+  }
+}
+
+function extraUsageState(entry: CapacityAccount): { label: string; detail: string; tone: Status } {
+  const extra = entry.extraUsage;
+  if (!extra) {
+    return {
+      label: "Extra usage not reported",
+      detail: "Extra usage is separate from the plan-limit windows above.",
+      tone: "neutral",
+    };
+  }
+  const enabled = extra.accountEnabled ?? extra.enabled;
+  const conflict =
+    extra.accountEnabled !== null && extra.enabled !== null && extra.accountEnabled !== extra.enabled;
+  if (enabled === true) {
+    const spend = extra.used !== null && extra.limit !== null
+      ? `${moneyLabel(extra.used, extra.currency)} of ${moneyLabel(extra.limit, extra.currency)} used`
+      : extra.balance !== null
+        ? `${moneyLabel(extra.balance, extra.currency)} balance`
+        : "No spend amount was reported.";
+    return {
+      label: extra.spendLimitReached ? "Extra usage spend limit reached" : "Extra usage enabled",
+      detail: conflict
+        ? `The account profile says enabled, but the /usage snapshot still says off. ${spend} Reload active Claude chats after signing in or changing this setting.`
+        : spend,
+      tone: extra.spendLimitReached || conflict ? "attention" : "ok",
+    };
+  }
+  if (enabled === false) {
+    return {
+      label: "Extra usage off",
+      detail: extra.reason
+        ? `Claude reported ${extra.reason.replace(/_/g, " ")}.`
+        : extra.canToggle === false
+          ? "Claude reported that extra usage cannot be enabled from this sign-in."
+          : "Claude reported extra usage as disabled.",
+      tone: "neutral",
+    };
+  }
+  return {
+    label: "Extra usage state not reported",
+    detail: "Claude has not supplied an enabled or disabled state for this account.",
+    tone: "neutral",
+  };
 }
 
 function LimitWindow({ window }: { window: CapacityWindow }) {
@@ -211,6 +272,7 @@ function LimitWindow({ window }: { window: CapacityWindow }) {
 function CapacitySummary({ entry }: { entry: CapacityAccount }) {
   const t = useTokens();
   const tone = capacityTone(entry);
+  const extra = extraUsageState(entry);
   const windows = entry.windows.slice(0, 2);
   return (
     <View style={{ gap: t.space.xs }}>
@@ -218,7 +280,8 @@ function CapacitySummary({ entry }: { entry: CapacityAccount }) {
         items={[
           { value: capacityStateLabel(entry), tone },
           entry.plan ? { value: `${entry.plan} plan` } : null,
-          entry.at > 0 ? { value: `limits updated ${agoLabel(entry.at)}` } : { value: "waiting for usage limits", tone: "attention" },
+          entry.at > 0 ? { value: `plan limits updated ${agoLabel(entry.at)}` } : { value: "plan limits not reported" },
+          { value: extra.label, tone: extra.tone },
         ]}
       />
       {windows.map((window, index) => {
@@ -241,11 +304,12 @@ function CapacityDetail({ entry }: { entry: CapacityAccount }) {
   const t = useTokens();
   const tone = capacityTone(entry);
   const credit = creditLabel(entry);
+  const extra = extraUsageState(entry);
   const freshest = entry.at > 0 ? `updated ${agoLabel(entry.at)}` : "not reported yet";
   return (
     <View style={{ gap: t.space.sm }}>
       <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: t.space.sm }}>
-        <Text style={t.text.bodyStrong}>Usage limits</Text>
+        <Text style={t.text.bodyStrong}>Plan limits</Text>
         <StatusPill status={tone} label={capacityStateLabel(entry)} />
       </View>
       {entry.windows.length > 0 ? (
@@ -256,18 +320,26 @@ function CapacityDetail({ entry }: { entry: CapacityAccount }) {
         </View>
       ) : (
         <View style={{ padding: t.space.md, borderRadius: t.radius.sm, backgroundColor: t.color.surface2, gap: t.space.xs }}>
-          <Text style={t.text.bodyStrong}>Usage limits unavailable</Text>
+          <Text style={t.text.bodyStrong}>Plan-limit telemetry not reported</Text>
           <Text style={t.text.caption}>{entry.detail}</Text>
         </View>
       )}
       <Facts
         items={[
-          entry.detail ? { value: entry.detail, tone: entry.state === "ready" ? undefined : tone } : null,
-          { value: entry.source ? `${freshest} from ${entry.source}` : freshest, tone: entry.state === "unknown" ? "attention" : undefined },
+          entry.detail ? { value: entry.detail, tone: entry.state === "current" ? undefined : tone } : null,
+          { value: entry.source ? `${freshest} from ${entry.source}` : freshest, tone: entry.state === "stale" ? "attention" : undefined },
           entry.model ? { value: entry.model } : null,
           credit ? { value: credit, tone: entry.credits?.hasCredits ? "ok" : "neutral" } : null,
         ]}
       />
+      <View style={{ padding: t.space.md, borderRadius: t.radius.sm, backgroundColor: t.color.surface2, gap: t.space.xs }}>
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: t.space.sm }}>
+          <Text style={t.text.bodyStrong}>Extra usage</Text>
+          <StatusPill status={extra.tone} label={extra.label} />
+        </View>
+        <Text style={t.text.caption}>{extra.detail}</Text>
+        {entry.extraUsage?.at ? <Text style={t.text.caption}>{`Claude /usage snapshot updated ${agoLabel(entry.extraUsage.at)}`}</Text> : null}
+      </View>
     </View>
   );
 }
@@ -490,12 +562,15 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const callRouterStatus = useRpc(routerStatus);
   const callRouterConfigure = useRpc(routerConfigure);
   const callCooldown = useRpc(setCooldown);
-  const callAddAccount = useRpc(addAccount);
   const callRemoveAccount = useRpc(removeAccount);
   const callSetPreference = useRpc(setPreference);
   const callUsage = useRpc(accountUsage);
   const callCapacity = useRpc(accountCapacity);
   const callProbe = useRpc(probeAccounts);
+  const callLoginSessions = useRpc(accountLoginSessions);
+  const callLoginStart = useRpc(accountLoginStart);
+  const callLoginSubmit = useRpc(accountLoginSubmit);
+  const callLoginCancel = useRpc(accountLoginCancel);
   const callResourceStatus = useRpc(resourceStatus);
   const callResourceSetEnabled = useRpc(resourceSetEnabled);
   const callToolchainStatus = useRpc(toolchainStatus);
@@ -510,6 +585,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const [notice, setNotice] = useState<string | null>(null);
   const [addingFor, setAddingFor] = useState<ProviderId | null>(null);
   const [newEmail, setNewEmail] = useState("");
+  const [loginCodes, setLoginCodes] = useState<Record<string, string>>({});
   const [panelTab, setPanelTab] = useState<PanelTab>("accounts");
   const [providerTab, setProviderTab] = useState("claude");
   const [probeLogs, setProbeLogs] = useState<Record<string, string>>({});
@@ -522,6 +598,16 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
     queryFn: () => callScan({}),
     enabled: panelTab === "accounts",
     refetchInterval: panelTab === "accounts" ? 30_000 : false,
+  });
+  const loginSessionsQuery = useQuery({
+    queryKey: ["agent-link", "login-sessions"],
+    queryFn: () => callLoginSessions({}),
+    enabled: panelTab === "accounts",
+    refetchInterval: (query) =>
+      panelTab === "accounts" && query.state.data?.sessions.some((session) =>
+        session.status === "starting" || session.status === "awaiting_code" || session.status === "waiting")
+        ? 1_000
+        : false,
   });
   // Usage re-reads every transcript on disk, so it runs on request only.
   const usageQuery = useQuery({
@@ -624,16 +710,41 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
       refresh();
     },
   });
-  const addMutation = useMutation({
-    mutationFn: (input: { provider: ProviderId; email: string }) => callAddAccount(input),
+  const openLoginPage = (session: AccountLoginSession) => {
+    if (!session.url) return;
+    if (session.userCode && !copyToClipboard(session.userCode)) {
+      setNotice("Clipboard access is unavailable. Copy the visible device code before continuing.");
+    }
+    void Linking.openURL(session.url).catch(() => {
+      setNotice("The browser could not open automatically. Use Open browser again or copy the sign-in link.");
+    });
+  };
+  const loginStartMutation = useMutation({
+    mutationFn: (input: { provider: ProviderId; source: AccountSource; email: string }) => callLoginStart(input),
     onSuccess: (result) => {
       setNotice(result.message);
-      if (result.ok) {
-        setAddingFor(null);
-        setNewEmail("");
-      }
-      refresh();
+      openLoginPage(result);
+      void queryClient.invalidateQueries({ queryKey: ["agent-link", "login-sessions"] });
+      void queryClient.invalidateQueries({ queryKey: ["agent-link", "scan"] });
     },
+    onError: (error: Error) => setNotice(error.message),
+  });
+  const loginSubmitMutation = useMutation({
+    mutationFn: (input: { sessionId: string; code: string }) => callLoginSubmit(input),
+    onSuccess: (result) => {
+      setLoginCodes((previous) => ({ ...previous, [result.id]: "" }));
+      setNotice(result.message);
+      void queryClient.invalidateQueries({ queryKey: ["agent-link", "login-sessions"] });
+    },
+    onError: (error: Error) => setNotice(error.message),
+  });
+  const loginCancelMutation = useMutation({
+    mutationFn: (sessionId: string) => callLoginCancel({ sessionId }),
+    onSuccess: (result) => {
+      setNotice(result.message);
+      void queryClient.invalidateQueries({ queryKey: ["agent-link", "login-sessions"] });
+    },
+    onError: (error: Error) => setNotice(error.message),
   });
   const cooldownMutation = useMutation({
     mutationFn: (input: { provider: ProviderId; email: string; minutes: number }) => callCooldown(input),
@@ -676,35 +787,98 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   const heartbeatById = new Map(heartbeatProviders.map((provider) => [provider.id, provider]));
   const primaryInfo = (provider: ProviderId) => (scanQuery.data?.primaries ?? []).find((entry) => entry.provider === provider);
   const primaryEmail = (provider: ProviderId) => (provider === "claude" ? primaryAccounts?.claude : primaryAccounts?.codex) ?? "";
+  const loginSessions = loginSessionsQuery.data?.sessions ?? [];
+  const loginFor = (provider: ProviderId, source: AccountSource, email: string) =>
+    loginSessions.find((session) =>
+      session.provider === provider &&
+      session.source === source &&
+      (source === "primary" || normalizeAccountEmail(session.email) === normalizeAccountEmail(email)));
 
   const lastRouteForAccount = (provider: ProviderId, email: string) =>
     (scanQuery.data?.recentRoutes ?? []).find((route) => {
       if (route.provider !== provider) return false;
-      if (route.email === "primary") return primaryEmail(provider) === email;
+      if (route.email === "primary") return normalizeAccountEmail(primaryEmail(provider)) === normalizeAccountEmail(email);
       const target = routingSlots.find((slot) => slot.provider === provider && slot.email === route.email);
-      return Boolean(target && (target.actualEmail || target.email) === email);
+      return Boolean(
+        target && normalizeAccountEmail(target.actualEmail || target.email) === normalizeAccountEmail(email),
+      );
     });
   const routeLocation = (cwd: string) => cwd.split("/").filter(Boolean).pop() || cwd;
 
-  // A rate limit belongs to an ACCOUNT, so two entries signed into the same
-  // account are one pool wearing two hats — the failure mode where you think
-  // you have a spare pool and don't.
+  const slotAccountId = (slot: Slot): string | null =>
+    slot.loggedIn && !slot.wrongAccount && (slot.actualEmail || slot.email)
+      ? accountIdentity(slot.provider, slot.actualEmail || slot.email)
+      : null;
+  const slotCanRoute = (slot: Slot): boolean =>
+    slot.source === "agent-link" &&
+    slot.loggedIn &&
+    !slot.wrongAccount &&
+    !slot.blocked &&
+    slot.cooldownUntil === 0 &&
+    !isAuthenticationFailure(slot.parkReason);
   const accountUses = new Map<string, number>();
-  const countAccount = (provider: string, email: string) => {
+  const countAccount = (provider: ProviderId, email: string) => {
     if (!email) return;
-    const key = `${provider}:${email}`;
+    const key = accountIdentity(provider, email);
     accountUses.set(key, (accountUses.get(key) ?? 0) + 1);
   };
   countAccount("claude", primaryAccounts?.claude ?? "");
   countAccount("codex", primaryAccounts?.codex ?? "");
-  for (const slot of routingSlots) countAccount(slot.provider, slot.actualEmail || slot.email);
-  const isShared = (provider: string, email: string) => (accountUses.get(`${provider}:${email}`) ?? 0) > 1;
+  for (const slot of slots) {
+    if (!slot.loggedIn || slot.wrongAccount) continue;
+    countAccount(slot.provider, slot.actualEmail || slot.email);
+  }
+
+  // One account owns one visible row. Extra config directories remain
+  // available under that row as sign-in locations, so no quota is counted twice.
+  const rowOwner = new Map<string, string>();
+  for (const provider of ["claude", "codex"] as const) {
+    const email = primaryEmail(provider);
+    if (email) rowOwner.set(accountIdentity(provider, email), `primary-${provider}`);
+  }
+  for (const slot of slots) {
+    const id = slotAccountId(slot);
+    if (id && !rowOwner.has(id)) rowOwner.set(id, slot.dir);
+  }
+  const visibleSlots = slots.filter((slot) => {
+    const id = slotAccountId(slot);
+    return !id || rowOwner.get(id) === slot.dir;
+  });
+  const duplicateSlotsFor = (owner: string): Slot[] =>
+    slots.filter((slot) => {
+      const id = slotAccountId(slot);
+      return Boolean(id && rowOwner.get(id) === owner && slot.dir !== owner);
+    });
 
   useEffect(() => {
     if (heartbeatProviders.length > 0 && !heartbeatProviders.some((provider) => provider.id === providerTab)) {
       setProviderTab(heartbeatProviders[0]!.id);
     }
   }, [heartbeatProviders, providerTab]);
+  const completedLoginKey = loginSessions
+    .filter((session) => session.status === "succeeded")
+    .map((session) => session.id)
+    .sort()
+    .join(":");
+  useEffect(() => {
+    if (!completedLoginKey) return;
+    void queryClient.invalidateQueries({ queryKey: ["agent-link", "scan"] });
+    void queryClient.invalidateQueries({ queryKey: ["agent-link", "account-capacity"] });
+    void queryClient.invalidateQueries({ queryKey: ["agent-link", "provider-heartbeat"] });
+    if (
+      addingFor &&
+      loginSessions.some(
+        (session) =>
+          session.status === "succeeded" &&
+          session.source === "agent-link" &&
+          session.provider === addingFor &&
+          normalizeAccountEmail(session.email) === normalizeAccountEmail(newEmail),
+      )
+    ) {
+      setAddingFor(null);
+      setNewEmail("");
+    }
+  }, [addingFor, completedLoginKey, loginSessions, newEmail, queryClient]);
   useEffect(() => {
     const state = routerProviderQuery.data;
     if (!state || routerDirty) return;
@@ -782,7 +956,7 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
     }
     routerConfigureMutation.mutate({
       controllerAccount: routerProviderQuery.data?.controllerAccount ?? "auto",
-      controllerModel: routerProviderQuery.data?.controllerModel ?? "claude-fable-5",
+      controllerModel: routerProviderQuery.data?.controllerModel ?? "claude-fable-5-1",
       targetGroups,
       userRules: routerRules,
     });
@@ -790,25 +964,26 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
   // The server already picked who takes the next agent; resolve it to a row so
   // the tag lands on that row and not on a duplicate of the same address.
   const nextUpKey = (provider: ProviderId): string => {
-    const email = (scanQuery.data?.nextUp ?? []).find((entry) => entry.provider === provider)?.email ?? "";
-    if (!email) return "";
-    const info = primaryInfo(provider);
-    if (email === primaryEmail(provider) && info && !info.duplicated) return `primary-${provider}`;
+    const selection = (scanQuery.data?.nextUp ?? []).find((entry) => entry.provider === provider);
+    if (!selection?.poolKey) return "";
+    if (selection.poolKey === "primary") return `primary-${provider}`;
     const slot = routingSlots.find(
       (entry) =>
         entry.provider === provider &&
-        entry.email === email &&
+        entry.email === selection.poolKey &&
         entry.loggedIn &&
         !entry.wrongAccount &&
         !entry.blocked &&
         entry.cooldownUntil === 0,
     );
-    return slot ? slot.dir : "";
+    if (!slot) return "";
+    const id = slotAccountId(slot);
+    return id ? rowOwner.get(id) ?? slot.dir : slot.dir;
   };
   const nextUpKeys: Record<ProviderId, string> = { claude: nextUpKey("claude"), codex: nextUpKey("codex") };
 
-  const usageFor = (provider: ProviderId, email: string): AccountUsage | null =>
-    (usageQuery.data?.accounts ?? []).find((entry) => entry.provider === provider && entry.email === email) ?? null;
+  const usageFor = (provider: ProviderId, poolKey: string): AccountUsage | null =>
+    (usageQuery.data?.accounts ?? []).find((entry) => entry.provider === provider && entry.poolKey === poolKey) ?? null;
 
   const pad = t.compact ? t.space.md : t.space.lg;
   const toggleRow = (key: string) => {
@@ -827,9 +1002,9 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
 
   const capacityAccounts = capacityQuery.data?.accounts ?? [];
   const capacityFor = (provider: ProviderId, poolKey: string, email: string): CapacityAccount | null =>
-    capacityAccounts.find(
-      (entry) => entry.provider === provider && (entry.poolKey === poolKey || (entry.email === email && entry.isPrimary === (poolKey === "primary"))),
-    ) ?? null;
+    capacityAccounts.find((entry) => entry.provider === provider && entry.poolKey === poolKey) ??
+    capacityAccounts.find((entry) => entry.accountId === accountIdentity(provider, email)) ??
+    null;
 
   // Everything else on this surface works without the CLI, but a Paseo provider
   // runs a command, so routing needs the launcher the CLI writes. Rather than
@@ -1003,21 +1178,6 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
     </View>
   );
 
-  const primaryLoginCommand = (provider: ProviderId, email: string): string => {
-    if (scanQuery.data?.agentAuthInstalled) return `agent-link login ${provider} primary`;
-    if (provider === "claude") return email ? `claude auth login --email ${email}` : "claude auth login";
-    return "codex login";
-  };
-
-  const loginCommand = (slot: Slot): string => {
-    if (slot.source === "agent-link" && scanQuery.data?.agentAuthInstalled) {
-      return `agent-link login ${slot.provider} ${slot.email}`;
-    }
-    return slot.provider === "claude"
-      ? `CLAUDE_CONFIG_DIR="${slot.dir}" claude auth login --email ${slot.email}`
-      : `CODEX_HOME="${slot.dir}" codex login`;
-  };
-
   const isAuthenticationFailure = (reason: string) =>
     /authenticat|not logged|login required|unauthori[sz]ed|revoked|expired token/i.test(reason);
 
@@ -1029,8 +1189,9 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
       authenticationNeeds.push({
         key: `primary-${provider}`,
         provider,
+        source: "primary",
         target: account || `your primary ${SHORT[provider]} account`,
-        command: primaryLoginCommand(provider, account),
+        email: account,
         reason: account
           ? `The provider rejected the saved credentials for the primary ${SHORT[provider]} sign-in.`
           : `The default ${SHORT[provider]} sign-in has not been authenticated.`,
@@ -1043,8 +1204,9 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
     authenticationNeeds.push({
       key: slot.dir,
       provider: slot.provider,
+      source: slot.source,
       target: slot.email,
-      command: loginCommand(slot),
+      email: slot.email,
       reason: slot.wrongAccount
         ? `This sign-in must use ${slot.email}; it is currently authenticated as ${slot.actualEmail}.`
         : authFailure
@@ -1052,6 +1214,103 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
           : `The saved sign-in for ${slot.email} has not been completed.`,
     });
   }
+
+  const loginIsStarting = (target: Pick<AuthenticationNeed, "provider" | "source" | "email">) =>
+    loginStartMutation.isPending &&
+    loginStartMutation.variables?.provider === target.provider &&
+    loginStartMutation.variables?.source === target.source &&
+    loginStartMutation.variables?.email === target.email;
+
+  const startLogin = (target: Pick<AuthenticationNeed, "provider" | "source" | "email">) =>
+    loginStartMutation.mutate({ provider: target.provider, source: target.source, email: target.email });
+
+  const loginFlow = (target: Pick<AuthenticationNeed, "provider" | "source" | "email">) => {
+    const session = loginFor(target.provider, target.source, target.email);
+    if (!session || session.status === "failed" || session.status === "cancelled") {
+      return (
+        <View style={{ gap: t.space.sm }}>
+          {session ? <Notice tone={session.status === "failed" ? "error" : "neutral"}>{session.message}</Notice> : null}
+          <View style={{ flexDirection: "row", gap: t.space.sm }}>
+            <Button
+              label={session?.status === "failed" ? "Try sign-in again" : "Sign in"}
+              variant="primary"
+              loading={loginIsStarting(target)}
+              disabled={loginStartMutation.isPending}
+              onPress={() => startLogin(target)}
+            />
+          </View>
+        </View>
+      );
+    }
+    if (session.status === "succeeded") return <Notice tone="ok">{session.message}</Notice>;
+    if (session.status === "starting") return <Loading label="Starting secure sign-in…" />;
+    if (session.provider === "claude" && session.status === "awaiting_code") {
+      const code = loginCodes[session.id] ?? "";
+      return (
+        <View style={{ gap: t.space.sm }}>
+          <Notice tone="attention">{session.message}</Notice>
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: t.space.sm }}>
+            <Button label="Open Claude sign-in" onPress={() => openLoginPage(session)} />
+            <Button label="Copy sign-in link" variant="ghost" onPress={() => session.url && copyToClipboard(session.url)} />
+          </View>
+          <Field
+            label="One-time code from Claude"
+            value={code}
+            onChangeText={(value) => setLoginCodes((previous) => ({ ...previous, [session.id]: value }))}
+            placeholder="Paste the complete code"
+            mono
+            hint="The code goes straight to Claude Code and is never stored by AgentLink."
+          />
+          <View style={{ flexDirection: "row", gap: t.space.sm }}>
+            <Button
+              label="Complete sign-in"
+              variant="primary"
+              loading={loginSubmitMutation.isPending && loginSubmitMutation.variables?.sessionId === session.id}
+              disabled={!code.trim()}
+              onPress={() => loginSubmitMutation.mutate({ sessionId: session.id, code })}
+            />
+            <Button
+              label="Cancel"
+              variant="ghost"
+              loading={loginCancelMutation.isPending && loginCancelMutation.variables === session.id}
+              onPress={() => loginCancelMutation.mutate(session.id)}
+            />
+          </View>
+        </View>
+      );
+    }
+    if (session.provider === "codex" && session.userCode) {
+      return (
+        <View style={{ gap: t.space.sm }}>
+          <Notice tone="attention">{session.message}</Notice>
+          <CodeBlock tone="attention">{session.userCode}</CodeBlock>
+          <Text style={t.text.caption}>Open ChatGPT copies this code first. Paste it on the device sign-in page; this panel detects completion automatically.</Text>
+          <View style={{ flexDirection: "row", gap: t.space.sm }}>
+            <Button label="Open ChatGPT" variant="primary" onPress={() => openLoginPage(session)} />
+            <Button
+              label="Cancel"
+              variant="ghost"
+              loading={loginCancelMutation.isPending && loginCancelMutation.variables === session.id}
+              onPress={() => loginCancelMutation.mutate(session.id)}
+            />
+          </View>
+        </View>
+      );
+    }
+    return (
+      <View style={{ gap: t.space.sm }}>
+        <Loading label={session.message} />
+        <View style={{ flexDirection: "row" }}>
+          <Button
+            label="Cancel"
+            variant="ghost"
+            loading={loginCancelMutation.isPending && loginCancelMutation.variables === session.id}
+            onPress={() => loginCancelMutation.mutate(session.id)}
+          />
+        </View>
+      </View>
+    );
+  };
 
   const parkButton = (provider: ProviderId, email: string, parked: boolean, held = false) =>
     held && provider === "claude" ? (
@@ -1092,30 +1351,57 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
     </View>
   );
 
-  const slotDetail = (slot: Slot) => {
-    const usage = usageFor(slot.provider, slot.actualEmail || slot.email);
+  const slotDetail = (slot: Slot, showAccountCapacity = true, showRoutingControl = false) => {
+    const usage = usageFor(slot.provider, slot.email);
     const capacity = capacityFor(slot.provider, slot.email, slot.actualEmail || slot.email);
     const pinning = pinMutation.variables?.dir === slot.dir;
     const lastRoute = lastRouteForAccount(slot.provider, slot.actualEmail || slot.email);
     const authenticationRequired = !slot.loggedIn || slot.wrongAccount || isAuthenticationFailure(slot.parkReason);
+    const accountLoginSession = loginFor(slot.provider, slot.source, slot.email);
     return (
       <View style={{ gap: t.space.sm }}>
         {authenticationRequired ? (
           <View style={{ gap: t.space.xs }}>
             <Text style={t.text.caption}>
               {slot.wrongAccount
-                ? `Authenticate this saved sign-in as exactly ${slot.email}:`
-                : `Authenticate this saved sign-in as ${slot.email} in a terminal:`}
+                ? `Authenticate this saved sign-in as exactly ${slot.email}.`
+                : `Authenticate this saved sign-in as ${slot.email}.`}
             </Text>
-            <CodeBlock tone="attention">{loginCommand(slot)}</CodeBlock>
-            <Text style={t.text.caption}>
-              Each run prints a fresh single-use link — use that run's URL and paste the whole code, including
-              everything after “#”. A 400 means the code was stale or partial: run the command again.
-            </Text>
+            {loginFlow({ provider: slot.provider, source: slot.source, email: slot.email })}
           </View>
         ) : null}
-        {capacity ? <CapacityDetail entry={capacity} /> : null}
-        {capacityQuery.error ? <ErrorText>{`Usage limits failed to load: ${String(capacityQuery.error)}`}</ErrorText> : null}
+        {!authenticationRequired ? (
+          <View style={{ gap: t.space.xs }}>
+            <Text style={t.text.caption}>Login is managed here. Reauthenticate if the provider session has changed or expired.</Text>
+            {accountLoginSession && accountLoginSession.status !== "succeeded" ? (
+              loginFlow({ provider: slot.provider, source: slot.source, email: slot.email })
+            ) : (
+              <View style={{ flexDirection: "row" }}>
+                <Button
+                  label="Sign in again"
+                  loading={loginIsStarting({ provider: slot.provider, source: slot.source, email: slot.email })}
+                  disabled={loginStartMutation.isPending}
+                  onPress={() => startLogin({ provider: slot.provider, source: slot.source, email: slot.email })}
+                />
+              </View>
+            )}
+          </View>
+        ) : null}
+        {showAccountCapacity && capacity ? <CapacityDetail entry={capacity} /> : null}
+        {showAccountCapacity && capacityQuery.error ? <ErrorText>{`Usage limits failed to load: ${String(capacityQuery.error)}`}</ErrorText> : null}
+        {showRoutingControl && slot.source === "agent-link" && slot.loggedIn && !slot.wrongAccount ? (
+          <View style={{ gap: t.space.xs }}>
+            <Text style={t.text.caption}>Controls for this sign-in location</Text>
+            <View style={{ flexDirection: "row" }}>
+              {parkButton(
+                slot.provider,
+                slot.email,
+                slot.cooldownUntil > 0 || slot.blocked,
+                slot.blocked,
+              )}
+            </View>
+          </View>
+        ) : null}
         <Facts
           items={[
             { value: slot.source === "external" ? "existing sign-in folder" : "AgentLink sign-in" },
@@ -1178,21 +1464,28 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
 
   const slotRow = (slot: Slot) => {
     const parked = slot.cooldownUntil > 0 || slot.blocked;
-    const shared = slot.loggedIn && isShared(slot.provider, slot.actualEmail || slot.email);
-    const usage = usageFor(slot.provider, slot.actualEmail || slot.email);
+    const duplicates = duplicateSlotsFor(slot.dir);
+    const availableBinding = [slot, ...duplicates].find(slotCanRoute);
+    const accountAvailable = Boolean(availableBinding);
+    const externalOnly = slot.source === "external" && !duplicates.some((binding) => binding.source === "agent-link");
+    const usage = usageFor(slot.provider, slot.email);
     const capacity = capacityFor(slot.provider, slot.email, slot.actualEmail || slot.email);
     const lastRoute = lastRouteForAccount(slot.provider, slot.actualEmail || slot.email);
     const authenticationRequired = !slot.loggedIn || slot.wrongAccount || isAuthenticationFailure(slot.parkReason);
-    const status: Status = !slot.loggedIn
-      ? "attention"
-      : authenticationRequired || slot.blocked
-        ? "error"
-        : parked
-          ? "neutral"
-          : slot.creditNote
-            ? "attention"
-            : "ok";
-    const label = !slot.loggedIn
+    const status: Status = accountAvailable
+      ? slot.creditNote ? "attention" : "ok"
+      : externalOnly && slot.loggedIn && !authenticationRequired
+        ? "neutral"
+      : !slot.loggedIn
+        ? "attention"
+        : authenticationRequired || slot.blocked
+          ? "error"
+          : "neutral";
+    const label = accountAvailable && availableBinding?.dir !== slot.dir
+      ? "available via another sign-in"
+      : externalOnly && slot.loggedIn && !authenticationRequired
+        ? "not in AgentLink rotation"
+      : !slot.loggedIn
       ? "sign-in needed"
       : slot.wrongAccount
         ? "wrong account"
@@ -1218,20 +1511,23 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
       <Row
         key={slot.dir}
         tone={status}
-        title={slot.email}
+        title={slot.wrongAccount ? slot.email : slot.actualEmail || slot.email}
         subtitle={
           slot.wrongAccount
-            ? `signed in as ${slot.actualEmail}`
+            ? `saved for this account · signed in as ${slot.actualEmail}`
             : parked && slot.parkReason
               ? slot.parkReason
-              : undefined
+              : slot.source === "agent-link"
+                ? "Secondary AgentLink sign-in"
+                : "Discovered external sign-in"
         }
         meta={
           <View style={{ gap: t.space.xs }}>
             <View style={{ flexDirection: "row", alignItems: "center", gap: t.space.sm }}>
               <StatusPill status={status} label={label} />
+              <Tag label={slot.source === "agent-link" ? "Secondary" : "External"} />
               {nextUpKeys[slot.provider] === slot.dir ? <Tag label="next automatic account" tone="busy" /> : null}
-              {shared ? <Tag label="same usage limit" tone="attention" /> : null}
+              {duplicates.length > 0 ? <Tag label={`${duplicates.length + 1} sign-in locations`} /> : null}
               {slot.modelHolds.map((model) => <Tag key={model} label={`${model} limited`} tone="attention" />)}
             </View>
             <Facts items={facts.slice(0, 5)} />
@@ -1241,11 +1537,34 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
         }
         trailing={
           <>
-            {slot.loggedIn && !authenticationRequired ? parkButton(slot.provider, slot.email, parked, slot.blocked) : null}
+            {duplicates.length > 0 || slot.source === "external" ? null : authenticationRequired ? (
+              <Button
+                label="Sign in"
+                loading={loginIsStarting({ provider: slot.provider, source: slot.source, email: slot.email })}
+                disabled={loginStartMutation.isPending}
+                onPress={() => {
+                  setOpenRows((previous) => ({ ...previous, [slot.dir]: true }));
+                  startLogin({ provider: slot.provider, source: slot.source, email: slot.email });
+                }}
+              />
+            ) : slot.loggedIn ? parkButton(slot.provider, slot.email, parked, slot.blocked) : null}
             <Button label={open ? "Hide" : "Details"} variant="ghost" onPress={() => toggleRow(slot.dir)} />
           </>
         }
-        expanded={open ? slotDetail(slot) : undefined}
+        expanded={
+          open ? (
+            <View style={{ gap: t.space.sm }}>
+              {slotDetail(slot, true, duplicates.length > 0)}
+              {duplicates.map((binding) => (
+                <View key={binding.dir}>
+                  <Disclosure title={`${binding.source === "agent-link" ? "Secondary" : "External"} sign-in location · ${binding.email}`}>
+                    {slotDetail(binding, false, true)}
+                  </Disclosure>
+                </View>
+              ))}
+            </View>
+          ) : undefined
+        }
       />
     );
   };
@@ -1255,22 +1574,33 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
     const info = primaryInfo(provider);
     const account = primaryEmail(provider);
     const parked = (info?.cooldownUntil ?? 0) > 0 || Boolean(info?.blocked);
-    const shared = account !== "" && isShared(provider, account);
+    const duplicateBindings = duplicateSlotsFor(key);
     const credit = provider === "claude" ? scanQuery.data?.primaryCreditNote ?? "" : "";
-    const usage = account ? usageFor(provider, account) : null;
+    const usage = account ? usageFor(provider, "primary") : null;
     const capacity = account ? capacityFor(provider, "primary", account) : null;
     const lastRoute = lastRouteForAccount(provider, account);
     const authenticationRequired = !account || isAuthenticationFailure(info?.parkReason ?? "");
-    const status: Status = authenticationRequired ? "error" : parked ? "neutral" : credit || info?.duplicated ? "attention" : "ok";
-    const label = authenticationRequired
+    const accountLoginSession = loginFor(provider, "primary", account);
+    const primaryAvailable = !authenticationRequired && !parked;
+    const primaryRoutable = primaryAvailable && !info?.duplicated;
+    const availableDuplicate = duplicateBindings.find(slotCanRoute);
+    const routerAvailable = primaryRoutable || Boolean(availableDuplicate);
+    const status: Status = routerAvailable
+      ? credit ? "attention" : "ok"
+      : primaryAvailable && info?.duplicated
+        ? "neutral"
+      : authenticationRequired ? "error" : "neutral";
+    const label = availableDuplicate
+      ? `available via ${availableDuplicate.source === "agent-link" ? "Secondary" : "External"} sign-in`
+      : primaryAvailable && info?.duplicated
+        ? "Primary direct sign-in available"
+      : authenticationRequired
       ? "authentication required"
       : info?.blocked
         ? "blocked until test passes"
         : parked
           ? `cooling down for ${remainingLabel(info?.cooldownUntil ?? 0)}`
-        : info?.duplicated
-          ? "duplicated"
-          : credit
+        : credit
             ? "credit limited"
             : "available in AgentLink";
     const open = Boolean(openRows[key]);
@@ -1284,14 +1614,23 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
           <View style={{ gap: t.space.xs }}>
             <View style={{ flexDirection: "row", alignItems: "center", gap: t.space.sm }}>
               <StatusPill status={status} label={label} />
+              <Tag label="Primary" />
               {nextUpKeys[provider] === key ? <Tag label="next automatic account" tone="busy" /> : null}
-              {shared ? <Tag label="same usage limit" tone="attention" /> : null}
+              {duplicateBindings.length > 0 ? <Tag label={`${duplicateBindings.length + 1} sign-in locations`} /> : null}
               {info?.modelHolds.map((model) => <Tag key={model} label={`${model} limited`} tone="attention" />)}
             </View>
             <Facts
               items={[
                 credit ? { value: credit, tone: "attention" } : null,
-                info?.duplicated ? { value: "the same login appears below, so both rows share one limit", tone: "attention" } : null,
+                { value: "primary account" },
+                info?.duplicated
+                  ? {
+                      value: availableDuplicate
+                        ? "AgentLink routes this account through the Secondary sign-in"
+                        : "Its Secondary sign-in is not available to AgentLink",
+                      tone: availableDuplicate ? undefined : "attention",
+                    }
+                  : null,
                 lastRoute?.agentId ? { value: `Paseo ${lastRoute.agentId}` } : null,
                 lastRoute?.cwd ? { value: `last used in ${routeLocation(lastRoute.cwd)}` } : null,
                 usage && usage.limitHits > 0
@@ -1305,7 +1644,17 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
         }
         trailing={
           <>
-            {account && !authenticationRequired ? parkButton(provider, "primary", parked, Boolean(info?.blocked)) : null}
+            {duplicateBindings.length > 0 ? null : authenticationRequired ? (
+              <Button
+                label="Sign in"
+                loading={loginIsStarting({ provider, source: "primary", email: account })}
+                disabled={loginStartMutation.isPending}
+                onPress={() => {
+                  setOpenRows((previous) => ({ ...previous, [key]: true }));
+                  startLogin({ provider, source: "primary", email: account });
+                }}
+              />
+            ) : account ? parkButton(provider, "primary", parked, Boolean(info?.blocked)) : null}
             <Button label={open ? "Hide" : "Details"} variant="ghost" onPress={() => toggleRow(key)} />
           </>
         }
@@ -1314,18 +1663,52 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
             <View style={{ gap: t.space.sm }}>
               {!authenticationRequired ? null : (
                 <View style={{ gap: t.space.xs }}>
-                  <Text style={t.text.caption}>{`Authenticate the primary ${SHORT[provider]} account in a terminal:`}</Text>
-                  <CodeBlock tone="attention">{primaryLoginCommand(provider, account)}</CodeBlock>
+                  <Text style={t.text.caption}>{`Authenticate the primary ${SHORT[provider]} account.`}</Text>
+                  {loginFlow({ provider, source: "primary", email: account })}
                 </View>
               )}
+              {!authenticationRequired ? (
+                <View style={{ gap: t.space.xs }}>
+                  <Text style={t.text.caption}>Login is managed here. Reauthenticate if the provider session has changed or expired.</Text>
+                  {accountLoginSession && accountLoginSession.status !== "succeeded" ? (
+                    loginFlow({ provider, source: "primary", email: account })
+                  ) : (
+                    <View style={{ flexDirection: "row" }}>
+                      <Button
+                        label="Sign in again"
+                        loading={loginIsStarting({ provider, source: "primary", email: account })}
+                        disabled={loginStartMutation.isPending}
+                        onPress={() => startLogin({ provider, source: "primary", email: account })}
+                      />
+                    </View>
+                  )}
+                </View>
+              ) : null}
               <Facts items={[{ value: "This is the provider's default sign-in." }]} />
               {capacity ? <CapacityDetail entry={capacity} /> : null}
               {capacityQuery.error ? <ErrorText>{`Usage limits failed to load: ${String(capacityQuery.error)}`}</ErrorText> : null}
+              {duplicateBindings.length > 0 && account ? (
+                <View style={{ gap: t.space.xs }}>
+                  <Text style={t.text.caption}>Controls for the Primary sign-in location</Text>
+                  <View style={{ flexDirection: "row" }}>
+                    {authenticationRequired
+                      ? null
+                      : parkButton(provider, "primary", parked, Boolean(info?.blocked))}
+                  </View>
+                </View>
+              ) : null}
               {info ? preferenceControl(provider, "primary", info.preference) : null}
               {lastRoute?.agentId ? <CodeBlock>{`Paseo agent ${lastRoute.agentId}${lastRoute.cwd ? `\n${lastRoute.cwd}` : ""}`}</CodeBlock> : null}
               {usage ? activityDetail(provider, usage) : null}
               {!usage && usageQuery.isFetching ? <Text style={t.text.caption}>Reading 7-day activity…</Text> : null}
               {usageQuery.error ? <ErrorText>{`Activity failed to load: ${String(usageQuery.error)}`}</ErrorText> : null}
+              {duplicateBindings.map((binding) => (
+                <View key={binding.dir}>
+                  <Disclosure title={`${binding.source === "agent-link" ? "Secondary" : "External"} sign-in location · ${binding.email}`}>
+                    {slotDetail(binding, false, true)}
+                  </Disclosure>
+                </View>
+              ))}
             </View>
           ) : undefined
         }
@@ -1359,19 +1742,29 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                 onChangeText={setNewEmail}
                 placeholder={`new ${provider} account email`}
                 autoFocus
-                hint="Creates a separate sign-in and gives you the terminal command needed to finish logging in."
+                hint="Creates an isolated sign-in, opens the provider page, and completes it here—no terminal needed."
               />
               <View style={{ flexDirection: "row", gap: t.space.sm }}>
                 <Button
-                  label="Create sign-in slot"
+                  label="Connect and sign in"
                   variant="primary"
-                  loading={addMutation.isPending}
+                  loading={loginIsStarting({ provider, source: "agent-link", email: newEmail.trim() })}
                   disabled={newEmail.trim() === ""}
-                  onPress={() => addMutation.mutate({ provider, email: newEmail.trim() })}
+                  onPress={() => startLogin({ provider, source: "agent-link", email: newEmail.trim() })}
                 />
-                <Button label="Cancel" variant="ghost" onPress={() => setAddingFor(null)} />
+                <Button
+                  label="Close"
+                  variant="ghost"
+                  onPress={() => {
+                    setAddingFor(null);
+                    setNewEmail("");
+                  }}
+                />
               </View>
-              {addMutation.error ? <ErrorText>{String(addMutation.error)}</ErrorText> : null}
+              {newEmail.trim() && loginFor(provider, "agent-link", newEmail.trim())
+                ? loginFlow({ provider, source: "agent-link", email: newEmail.trim() })
+                : null}
+              {loginStartMutation.error ? <ErrorText>{String(loginStartMutation.error)}</ErrorText> : null}
             </View>
           ) : undefined
         }
@@ -1387,15 +1780,54 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
 
   const providerCard = (provider: ProviderId, heartbeat: ProviderHeartbeat | undefined) => {
     const state = heartbeatStatus(heartbeat);
-    const providerCapacity = capacityAccounts.filter((entry) => entry.provider === provider);
-    const ready = providerCapacity.filter((entry) => entry.state === "ready").length;
-    const constrained = providerCapacity.filter(
-      (entry) => entry.state === "nearing" || entry.state === "parked" || entry.state === "held",
-    ).length;
     const providerPools = [...accountUses.entries()].filter(([key]) => key.startsWith(`${provider}:`));
-    const totalEntries = providerPools.reduce((sum, [, count]) => sum + count, 0);
+    const accountCount = providerPools.length;
+    const mappedLocationCount = providerPools.reduce((sum, [, count]) => sum + count, 0);
+    const locationCount = (primaryEmail(provider) ? 1 : 0) + slots.filter((slot) => slot.provider === provider).length;
+    const duplicateLocationCount = Math.max(0, mappedLocationCount - accountCount);
+    const routedAccounts = new Set<string>();
+    const availableAccounts = new Set<string>();
+    const primary = primaryEmail(provider);
+    const primaryState = primaryInfo(provider);
+    if (primary) {
+      const id = accountIdentity(provider, primary);
+      routedAccounts.add(id);
+      if (
+        !primaryState?.duplicated &&
+        !primaryState?.blocked &&
+        (primaryState?.cooldownUntil ?? 0) === 0 &&
+        !isAuthenticationFailure(primaryState?.parkReason ?? "")
+      ) {
+        availableAccounts.add(id);
+      }
+    }
+    for (const slot of routingSlots) {
+      if (slot.provider !== provider) continue;
+      const id = slotAccountId(slot);
+      if (!id) continue;
+      routedAccounts.add(id);
+      if (
+        slot.loggedIn &&
+        !slot.wrongAccount &&
+        !slot.blocked &&
+        slot.cooldownUntil === 0 &&
+        !isAuthenticationFailure(slot.parkReason)
+      ) {
+        availableAccounts.add(id);
+      }
+    }
+    const capacityByAccount = new Map<string, CapacityAccount>();
+    for (const entry of capacityAccounts) {
+      if (entry.provider !== provider || capacityByAccount.has(entry.accountId)) continue;
+      capacityByAccount.set(entry.accountId, entry);
+    }
+    const currentCapacity = [...capacityByAccount.values()].filter((entry) => entry.state === "current").length;
+    const capacityWarnings = [...capacityByAccount.values()].filter(
+      (entry) => entry.state === "nearing" || entry.state === "stale",
+    ).length;
+    const unavailableRouted = Math.max(0, routedAccounts.size - availableAccounts.size);
     return (
-      <Card key={provider} padded={false} tone={constrained > 0 ? "attention" : undefined}>
+      <Card key={provider} padded={false} tone={unavailableRouted > 0 || capacityWarnings > 0 ? "attention" : undefined}>
         <View>
           <View style={{ padding: pad, gap: t.space.sm }}>
             <View
@@ -1412,10 +1844,10 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
                   <StatusPill status={state.status} label={state.label} />
                   <Facts
                     items={[
-                      { value: plural(totalEntries, "saved sign-in", "saved sign-ins") },
-                      { value: plural(providerPools.length, "separate usage limit", "separate usage limits"), tone: totalEntries > providerPools.length ? "attention" : undefined },
-                      { value: plural(ready, "sign-in ready", "sign-ins ready"), tone: ready > 0 ? "ok" : "attention" },
-                      constrained > 0 ? { value: plural(constrained, "sign-in unavailable", "sign-ins unavailable"), tone: "attention" } : null,
+                      { value: plural(accountCount, "account", "accounts") },
+                      { value: plural(locationCount, "sign-in location", "sign-in locations"), tone: duplicateLocationCount > 0 ? "attention" : undefined },
+                      { value: `${availableAccounts.size} of ${routedAccounts.size} routed accounts available`, tone: availableAccounts.size > 0 ? "ok" : "attention" },
+                      { value: `${currentCapacity} of ${accountCount} plan-limit reports current`, tone: currentCapacity === accountCount && accountCount > 0 ? "ok" : "attention" },
                     ]}
                   />
                 </View>
@@ -1448,10 +1880,10 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
               </View>
             </View>
             <Text style={t.text.caption}>
-              {heartbeat?.summary ?? "Waiting for Paseo."} Each unique login has its own usage limit. Open Details to load its recent activity.
+              {heartbeat?.summary ?? "Waiting for Paseo."} Limits belong to accounts; config folders are shown as sign-in locations under them.
             </Text>
-            {totalEntries > providerPools.length ? (
-              <Notice tone="attention">The same login appears twice. Those rows share one usage limit.</Notice>
+            {duplicateLocationCount > 0 ? (
+              <Notice tone="attention">{`${plural(duplicateLocationCount, "duplicate sign-in location", "duplicate sign-in locations")} grouped under the account ${duplicateLocationCount === 1 ? "it uses" : "they use"}.`}</Notice>
             ) : null}
             {capacityQuery.error ? <ErrorText>{`Usage limits failed to load: ${String(capacityQuery.error)}`}</ErrorText> : null}
             {usageQuery.error ? <ErrorText>{`Activity failed to load: ${String(usageQuery.error)}`}</ErrorText> : null}
@@ -1462,12 +1894,12 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
             first
             tone="ok"
             title="Available in AgentLink"
-            subtitle="Each connected sign-in is shown as an account-suffixed model in AgentLink's native picker."
-            meta={<Facts items={[{ value: plural(providerPools.length, "account profile", "account profiles") }, { value: "switches the next turn only" }]} />}
+            subtitle="Primary and managed accounts appear as account-qualified models in AgentLink's native picker; discovered external folders are informational."
+            meta={<Facts items={[{ value: plural(routedAccounts.size, "account profile", "account profiles") }, { value: "switches the next turn only" }]} />}
             trailing={<StatusPill status="ok" label="same chat" />}
           />
           {primaryRow(provider)}
-          {slots.filter((slot) => slot.provider === provider).map(slotRow)}
+          {visibleSlots.filter((slot) => slot.provider === provider).map(slotRow)}
           {addRow(provider)}
         </View>
       </Card>
@@ -1585,21 +2017,38 @@ export function AgentSyncSurface({ theme, layout }: PluginSurfaceProps) {
           <StatusPill status="attention" label={plural(authenticationNeeds.length, "sign-in", "sign-ins")} />
         </View>
         <Text style={t.text.body}>
-          Run each command below in a normal terminal, then choose exactly the named account in the provider's browser flow. AgentLink never opens a terminal or handles your password.
+          Choose Sign in. AgentLink opens the provider page on this device and completes the flow here—no terminal required.
         </Text>
-        <Text style={t.text.caption}>Each command authenticates only its named local sign-in. For code-based flows, use the fresh link and complete code from that same run.</Text>
+        <Text style={t.text.caption}>Your password stays with Claude or ChatGPT. AgentLink forwards only the short-lived authorization response to the provider CLI and never stores it.</Text>
       </View>
-      {authenticationNeeds.map((need, index) => (
-        <Row
-          key={need.key}
-          first={index === 0}
-          tone="attention"
-          title={`Authenticate ${SHORT[need.provider]} as ${need.target}`}
-          subtitle={need.reason}
-          meta={<CodeBlock tone="attention">{need.command}</CodeBlock>}
-          trailing={<StatusPill status="attention" label="run in terminal" />}
-        />
-      ))}
+      {authenticationNeeds.map((need, index) => {
+        const session = loginFor(need.provider, need.source, need.email);
+        const active = session?.status === "starting" || session?.status === "awaiting_code" || session?.status === "waiting";
+        return (
+          <Row
+            key={need.key}
+            first={index === 0}
+            tone={session?.status === "failed" ? "error" : "attention"}
+            title={`Authenticate ${SHORT[need.provider]} as ${need.target}`}
+            subtitle={need.reason}
+            trailing={
+              !session ? (
+                <Button
+                  label="Sign in"
+                  loading={loginIsStarting(need)}
+                  disabled={loginStartMutation.isPending}
+                  onPress={() => startLogin(need)}
+                />
+              ) : active ? (
+                <StatusPill status="busy" label="sign-in active" />
+              ) : (
+                <StatusPill status={session.status === "failed" ? "error" : session.status === "succeeded" ? "ok" : "neutral"} label={session.status} />
+              )
+            }
+            expanded={session ? loginFlow(need) : undefined}
+          />
+        );
+      })}
     </Card>
   ) : null;
 

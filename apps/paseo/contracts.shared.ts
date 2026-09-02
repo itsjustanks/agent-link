@@ -65,7 +65,9 @@ export const scan = defineRpc({
         duplicated: z.boolean(), // an account slot already holds this account
       }),
     ),
-    nextUp: z.array(z.object({ provider: z.enum(["claude", "codex"]), email: z.string() })),
+    nextUp: z.array(
+      z.object({ provider: z.enum(["claude", "codex"]), email: z.string(), poolKey: z.string() }),
+    ),
     recentRoutes: z.array(RouteEventSchema),
     autoRouters: z.array(AutoRouterSchema),
     agentAuthInstalled: z.boolean(),
@@ -216,6 +218,9 @@ export const diagnoseProvider = defineRpc({
 export const AccountUsageSchema = z.object({
   provider: z.enum(["claude", "codex"]),
   email: z.string(),
+  accountId: z.string(),
+  poolKey: z.string(),
+  isPrimary: z.boolean(),
   sessions: z.number(),
   inputTokens: z.number(),
   outputTokens: z.number(),
@@ -259,9 +264,10 @@ export const CapacityWindowSchema = z.object({
 export const CapacityAccountSchema = z.object({
   provider: z.enum(["claude", "codex"]),
   email: z.string(),
+  accountId: z.string(),
   isPrimary: z.boolean(),
   poolKey: z.string(),
-  state: z.enum(["ready", "nearing", "parked", "held", "unknown"]),
+  state: z.enum(["current", "nearing", "stale", "missing"]),
   detail: z.string(),
   at: z.number(),
   plan: z.string(),
@@ -272,6 +278,22 @@ export const CapacityAccountSchema = z.object({
       hasCredits: z.boolean(),
       unlimited: z.boolean(),
       balance: z.string(),
+    })
+    .nullable(),
+  extraUsage: z
+    .object({
+      at: z.number(),
+      accountEnabled: z.boolean().nullable(),
+      enabled: z.boolean().nullable(),
+      used: z.number().nullable(),
+      limit: z.number().nullable(),
+      balance: z.number().nullable(),
+      currency: z.string(),
+      reason: z.string(),
+      spendLimitReached: z.boolean(),
+      userDisabled: z.boolean().nullable(),
+      everEnabled: z.boolean().nullable(),
+      canToggle: z.boolean().nullable(),
     })
     .nullable(),
   windows: z.array(CapacityWindowSchema),

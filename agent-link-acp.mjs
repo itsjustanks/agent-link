@@ -68,6 +68,7 @@ const genericConnections = new Map();
 
 const MODEL_CATALOG = {
   claude: [
+    ["claude-fable-5-1", "Claude Fable 5.1"],
     ["claude-fable-5", "Claude Fable 5"],
     ["claude-opus-5", "Claude Opus 5"],
     ["claude-opus-5[1m]", "Claude Opus 5 · 1M"],
@@ -97,7 +98,7 @@ const ROUTER_DEFAULT_GROUPS = [
     name: "planning",
     purpose: "Product and implementation plans",
     targets: [
-      { provider: "claude", account: "auto", model: "claude-fable-5" },
+      { provider: "claude", account: "auto", model: "claude-fable-5-1" },
       { provider: "codex", account: "auto", model: "gpt-5.6-terra" },
     ],
   },
@@ -347,19 +348,24 @@ function heldReason(provider, accountKey, model) {
   return "";
 }
 
+const ROUTER_PROFILE = {
+  id: ROUTER_PROFILE_ID,
+  kind: "router",
+  provider: "agent-link",
+  model: "agent-router-auto",
+  modelLabel: "AgentRouter",
+  accountKey: "automatic",
+  email: "Automatic route",
+  configDir: "",
+  primary: true,
+  unavailable: "",
+};
+
+// Accounts come first and the automatic route comes last, so the picker leads
+// with the explicit sign-ins. Auto-routing is something you opt into, never
+// where a fresh chat lands by default.
 function profiles() {
-  const result = [{
-    id: ROUTER_PROFILE_ID,
-    kind: "router",
-    provider: "agent-link",
-    model: "agent-router-auto",
-    modelLabel: "AgentRouter",
-    accountKey: "automatic",
-    email: "Automatic route",
-    configDir: "",
-    primary: true,
-    unavailable: "",
-  }];
+  const result = [];
   for (const provider of ["claude", "codex"]) {
     for (const account of accountRecords(provider)) {
       for (const [model, modelLabel] of MODEL_CATALOG[provider]) {
@@ -379,15 +385,23 @@ function profiles() {
     }
   }
   result.push(...(genericCatalog ?? []));
+  result.push(ROUTER_PROFILE);
   return result;
+}
+
+function accountLabel(entry) {
+  return `${entry.modelLabel} · ${entry.email}`;
 }
 
 function modelsState(currentModelId) {
   const available = profiles();
+  // Default to an explicit account — the primary sign-in when it can serve —
+  // so a new chat stays on one account until you choose otherwise. The
+  // automatic route is only ever reached when no account is usable.
   const fallback =
+    available.find((entry) => entry.kind !== "router" && entry.primary && !entry.unavailable) ??
+    available.find((entry) => entry.kind !== "router" && !entry.unavailable) ??
     available.find((entry) => entry.id === ROUTER_PROFILE_ID) ??
-    available.find((entry) => !entry.unavailable && entry.model === "gpt-5.6-sol") ??
-    available.find((entry) => !entry.unavailable) ??
     available[0];
   if (!fallback) throw new Error("AgentLink has no connected Claude or Codex accounts");
   const selected = available.some((entry) => entry.id === currentModelId) ? currentModelId : fallback.id;
@@ -395,9 +409,9 @@ function modelsState(currentModelId) {
     currentModelId: selected,
     availableModels: available.map((entry) => ({
       modelId: entry.id,
-      name: `${entry.modelLabel} · ${entry.email}`,
+      name: accountLabel(entry),
       description: entry.kind === "router"
-        ? "Automatic route · chooses a configured work type, model and healthy account for this turn"
+        ? "Automatic route · opt in to let AgentLink pick the work type, model and a healthy account each turn"
         : entry.kind === "paseo-acp"
         ? `${entry.email} · connected Paseo provider${entry.providerDescription ? ` · ${entry.providerDescription}` : ""}`
         : `${entry.provider === "claude" ? "Claude Code" : "Codex"} · ${entry.primary ? "primary sign-in" : "connected sign-in"}${entry.unavailable ? ` · unavailable: ${entry.unavailable}` : " · available"}`,
@@ -696,9 +710,8 @@ function bridgePrompt(session, backend, currentText) {
   return [
     "[AgentLink runtime contract]",
     "This is one logical Paseo chat. The composer model picker changes only the model/account/provider that owns the next turn; it never creates a replacement chat, continuation tab, archive, or terminal window.",
-    "When delegation is useful, read ~/.agents/skills/paseo/SKILL.md completely, call Paseo list_profiles, then use Paseo create_agent (or its agent-scoped CLI equivalent if tools are unavailable). Omit workspaceId so the child stays attached to this parent in the current workspace. Never use provider-native subagents as the default inside Paseo.",
-    "Use the installed paseo-handoff, paseo-advisor, or paseo-committee skill only when the user's intent matches it. Never create a workspace merely to delegate, retry, continue, investigate, or switch model/provider/account; create an isolated workspace only when explicitly requested or divergent repository state genuinely requires it. Keep small work here and use at most three concurrent subagents unless the user asks for more.",
-    "Preserve completed work, decisions, child history, and live child-agent ownership. Provider or account exhaustion must fail in this chat and wait for another picker choice; never detach, archive, replace, rotate, move, or reparent a child behind the user's back.",
+    "Delegate only useful independent tracks. Native subagents are appropriate for quick same-provider work; use Paseo subagents for cross-provider work, explicit workspace control, inspectable long-lived sessions, or follow-ups. Read ~/.agents/skills/paseo/SKILL.md before using Paseo tools. If tools are unavailable, use the Paseo CLI only when agent-scoped; never create an orphan top-level agent.",
+    "Prefer direct Paseo providers. AgentLink is a fallback when no suitable direct provider/account is available. Preserve child ownership and history; never detach, archive, replace, move, or reparent a child automatically.",
     "Treat the context below as prior conversation and answer only the current request.",
     context,
     "[Current user request]",
@@ -1293,6 +1306,56 @@ function parseCodexLine(line, state) {
   }
 }
 
+// A turn can fail because the account is out of headroom, or because the turn
+// itself was bad. Only the first kind is fixed by moving to another account, so
+// the hint below is gated on the same vocabulary `agent-link` parks accounts on.
+const LIMIT_SIGNALS = [
+  /you(?:'|’)?ve\s+(?:hit|reached)\s+[^.!\n]{0,80}\blimit\b/i,
+  /usage limit/i,
+  /spend limit/i,
+  /limit reached/i,
+  /rate[_ -]?limit/i,
+  /quota/i,
+  /credit balance is too low/i,
+];
+
+function looksLikeLimit(text) {
+  return LIMIT_SIGNALS.some((pattern) => pattern.test(text));
+}
+
+// Ranked so the first suggestion is the smallest change from what just failed:
+// the same model on another account, then the rest of that provider, then the
+// models left on the account you were already using.
+function swapSuggestions(selected, limit = 4) {
+  const rank = (entry) => {
+    if (entry.model === selected.model && entry.accountKey !== selected.accountKey) return 0;
+    if (entry.provider === selected.provider && entry.accountKey !== selected.accountKey) return 1;
+    if (entry.accountKey === selected.accountKey) return 3;
+    return 2;
+  };
+  return profiles()
+    .filter((entry) => entry.kind !== "router" && !entry.unavailable && entry.id !== selected.id)
+    .sort((a, b) => rank(a) - rank(b))
+    .slice(0, limit)
+    .map(accountLabel);
+}
+
+// Naming the healthy accounts turns a dead end into one click in the model
+// picker. Switching there keeps this chat and its history.
+function withSwapHint(message, selected) {
+  if (!looksLikeLimit(message)) return message;
+  const options = swapSuggestions(selected);
+  if (options.length === 0) {
+    return `${message}\n\nNo other connected account can serve this right now. \`agent-link usage\` shows when each one frees up; \`agent-link revalidate\` releases an account after you raise its spend limit.`;
+  }
+  return [
+    message,
+    "Switch account in the model picker to carry on — this chat and its history stay put:",
+    options.map((option) => `  • ${option}`).join("\n"),
+    'Or pick "AgentRouter · Automatic route" to let AgentLink choose a healthy account for every turn.',
+  ].join("\n\n");
+}
+
 function conciseProviderError(profile, result, state) {
   const combined = [state.providerError, result.stderr].filter(Boolean).join("\n").trim();
   const lines = combined.split(/\r?\n/).filter((line) => line.trim() && !/could not create PATH aliases/i.test(line));
@@ -1472,7 +1535,7 @@ async function runPrompt(session, request) {
     return refuse(
       route
         ? `AgentRouter could not complete this turn. The same chat and history remain available.\n\n${detail}`
-        : failures[0] ?? "The selected AgentLink profile could not serve this turn.",
+        : withSwapHint(failures[0] ?? "The selected AgentLink profile could not serve this turn.", pickerSelection),
       route ? "AgentRouter · Automatic route" : `${pickerSelection.modelLabel} · ${pickerSelection.email}`,
     );
   }

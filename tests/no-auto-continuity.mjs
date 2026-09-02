@@ -11,6 +11,7 @@ const source = readFileSync(join(repo, "agent-link"), "utf8");
 const plugin = readFileSync(join(repo, "apps", "paseo", "index.ts"), "utf8");
 const client = readFileSync(join(repo, "apps", "paseo", "agents.client.tsx"), "utf8");
 const handlers = readFileSync(join(repo, "apps", "paseo", "handlers.server.ts"), "utf8");
+const auth = readFileSync(join(repo, "apps", "paseo", "auth.server.ts"), "utf8");
 const runtime = readFileSync(join(repo, "agent-link-acp.mjs"), "utf8");
 const watchdog = readFileSync("/Users/ankit/.local/bin/paseo-watchdog.py", "utf8");
 
@@ -30,12 +31,17 @@ assert.doesNotMatch(source, /\n(?:write_recovery_helper|cmd_recover|cmd_rescue|c
 assert.doesNotMatch(plugin, /limitsStatus|limitsResume|agentContinue|contributeModelPills|AgentRoutingPanel/);
 assert.doesNotMatch(client, /New-chat account selection|callWireAuto|routerPending/);
 assert.match(client, /Authentication required/);
-assert.match(client, /agent-link login \$\{provider\} primary/);
-assert.match(client, /AgentLink never opens a terminal or handles your password/);
+assert.match(client, /Connect and sign in/);
+assert.match(client, /no terminal required/);
+assert.match(client, /Complete sign-in/);
+assert.match(client, /Linking\.openURL/);
 assert.match(client, /Paseo-native subagents/);
 assert.doesNotMatch(handlers, /ensureLimitSentry/);
 assert.doesNotMatch(handlers, /agent-link-continuation|agents\.create\(|\.archive\(\)|paseo\.parent-agent-id/);
-assert.match(handlers, /Deliberately do NOT spawn the login here/);
+assert.match(auth, /\["login", "--device-auth"\]/);
+assert.match(auth, /session\.child\.stdin\.write/);
+assert.match(auth, /BROWSER: existsSync\("\/usr\/bin\/false"\)/);
+assert.doesNotMatch(auth, /writeFileSync|writeTextAtomic|CLAUDE_CODE_OAUTH_TOKEN/);
 assert.doesNotMatch(watchdog, /process_agent_recovery|agent-link[^\n]*recover/);
 assert.doesNotMatch(runtime, /paseo\s+(run|send|archive|delete)|PASEO_AGENT_ID/);
 for (const retired of ["limits.server.ts", "limits.shared.ts", "model-pill.client.tsx"]) {

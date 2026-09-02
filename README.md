@@ -91,7 +91,7 @@ The Paseo plugin shows:
 - AgentRouter work types and ordered model/account choices
 - memory protection for Paseo-owned compiler jobs
 
-When Claude/Codex authentication is missing, expired, or attached to the wrong account, a top-level **Authentication required** card names exactly which account to select and gives one copyable command per affected sign-in. Kimi and Grok cards keep their exact `kimi login` and `grok login` commands visible beside Check setup. AgentLink never opens a terminal automatically.
+When Claude/Codex authentication is missing, expired, or attached to the wrong account, a top-level **Authentication required** card names the account and offers **Sign in**. Claude opens its browser flow and accepts the returned one-time code in the panel; Codex uses device authorization, copies its code, and detects completion automatically. The short-lived response is forwarded directly to the provider CLI and is never stored. Kimi and Grok cards keep their own login commands beside Check setup.
 
 A usage limit belongs to the signed-in account, not its local slot. Duplicate slots signed into the same account share one quota pool. Unknown capacity stays **unknown**.
 
@@ -164,7 +164,7 @@ They choose an account when a new native session starts. They do not provide Pas
 - AgentLink never reads, copies, backs up, or restores OAuth tokens.
 - Never move `~/.agent-link`; Claude logins are bound to the literal config path.
 - MCP definitions and preferences can sync, but OAuth grants remain per account.
-- Sign-in may require an interactive terminal.
+- Paseo account sign-in runs from AgentLink → Accounts; the CLI commands remain available for headless recovery.
 - AgentRouter routes a new turn inside the current chat; no post-failure continuation, replacement-agent creation, archive, or subagent reparenting runs.
 
 ## Troubleshooting

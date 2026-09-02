@@ -1,9 +1,24 @@
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import { execFileSync, spawn } from "node:child_process";
-import { copyFileSync, createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
+import {
+  accountIdentity,
+  claudeCachedQuotaFromConfig,
+  groupAccountQuotaBindings,
+  mergePoolQuotas,
+  normalizeAccountEmail,
+  poolQuotaFromRaw,
+  type PoolQuota,
+} from "./account-capacity.logic";
+import {
+  accountCoveredByManagedBinding,
+  compareRouteCandidates,
+  dedupeRouteCandidates,
+  type AccountRouteCandidate,
+} from "./account-routing.logic";
 import type { RouteEvent, Slot } from "./contracts.shared";
 import { onStart } from "./lifecycle.shared";
 
@@ -22,7 +37,7 @@ function hasAccounts(root: string): boolean {
   return false;
 }
 
-const AGENT_LINK_HOME_DIR = (() => {
+export const AGENT_LINK_HOME_DIR = (() => {
   const explicit = process.env.AGENT_LINK_HOME ?? process.env.AGENT_AUTH_HOME;
   if (explicit) return explicit;
   const link = join(HOME, ".agent-link");
@@ -32,10 +47,10 @@ const AGENT_LINK_HOME_DIR = (() => {
   return existsSync(link) ? link : auth;
 })();
 
-const AGENT_LINK_ROOT = join(AGENT_LINK_HOME_DIR, "accounts");
+export const AGENT_LINK_ROOT = join(AGENT_LINK_HOME_DIR, "accounts");
 const PASEO_CONFIG_PATH = join(HOME, ".paseo", "config.json");
 // Hand-rolled slot layouts some setups use outside agent-link (read-only here).
-const EXTERNAL_ROOTS: Array<{ provider: "claude" | "codex"; root: string }> = [
+export const EXTERNAL_ROOTS: Array<{ provider: "claude" | "codex"; root: string }> = [
   { provider: "claude", root: join(HOME, ".claude-accounts") },
   { provider: "codex", root: join(HOME, ".codex-accounts") },
 ];
@@ -103,13 +118,13 @@ export function writeJsonAtomic(path: string, value: unknown): void {
 
 // Only the account email is ever read from credential-adjacent files — no token
 // material leaves the handler.
-function claudeAccountEmail(configDir: string): string {
+export function claudeAccountEmail(configDir: string): string {
   const config = readJson(configDir === HOME ? join(HOME, ".claude.json") : join(configDir, ".claude.json"));
   const account = config?.oauthAccount as { emailAddress?: string } | undefined;
   return account?.emailAddress ?? "";
 }
 
-function codexAccountEmail(codexHome: string): string {
+export function codexAccountEmail(codexHome: string): string {
   const auth = readJson(join(codexHome, "auth.json"));
   const idToken = (auth?.tokens as { id_token?: string } | undefined)?.id_token;
   if (!idToken) return "";
@@ -148,6 +163,20 @@ export function envVarFor(provider: "claude" | "codex"): string {
   return provider === "claude" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME";
 }
 
+export function accountConfigDir(
+  provider: "claude" | "codex",
+  source: "primary" | "agent-link" | "external",
+  email: string,
+): string | null {
+  if (source === "primary") return provider === "claude" ? HOME : join(HOME, ".codex");
+  if (!/^[^\s/\\]+@[^\s/\\]+$/.test(email)) return null;
+  if (source === "agent-link") return join(AGENT_LINK_ROOT, provider, email);
+  const root = EXTERNAL_ROOTS.find((entry) => entry.provider === provider)?.root;
+  if (!root) return null;
+  const dir = join(root, email);
+  return existsSync(dir) ? dir : null;
+}
+
 function collectSlots(): Array<Omit<Slot, "wiredProviderId" | "cooldownUntil" | "launches" | "lastUsed" | "preference" | "nearing" | "creditNote" | "blocked" | "parkReason" | "outputStyle" | "settingsDrift" | "modelHolds">> {
   const slots: Array<Omit<Slot, "wiredProviderId" | "cooldownUntil" | "launches" | "lastUsed" | "preference" | "nearing" | "creditNote" | "blocked" | "parkReason" | "outputStyle" | "settingsDrift" | "modelHolds">> = [];
   const seen = new Set<string>();
@@ -164,7 +193,8 @@ function collectSlots(): Array<Omit<Slot, "wiredProviderId" | "cooldownUntil" | 
       source,
       loggedIn,
       actualEmail,
-      wrongAccount: loggedIn && actualEmail !== "" && actualEmail !== email,
+      wrongAccount:
+        loggedIn && actualEmail !== "" && normalizeAccountEmail(actualEmail) !== normalizeAccountEmail(email),
     });
   };
   for (const provider of ["claude", "codex"] as const) {
@@ -525,16 +555,28 @@ export async function handleScan(_input: Record<string, never>, { paseo }: Plugi
         preference: routePreference(provider, "primary"),
         nearing: nearingLimit(provider, "primary"),
         modelHolds: modelHolds(provider, "primary"),
-        duplicated: routingSlots.some((slot) => slot.provider === provider && (slot.actualEmail || slot.email) === email),
+        duplicated: routingSlots.some(
+          (slot) =>
+            slot.provider === provider &&
+            slot.actualEmail !== "" &&
+            normalizeAccountEmail(slot.actualEmail) === normalizeAccountEmail(email),
+        ),
       };
     }),
     nextUp: (["claude", "codex"] as const).map((provider) => {
       const primaryEmail = primaryEmails[provider];
-      const candidates: Array<{ email: string; last: number; preference: RoutePreference; nearing: boolean }> = [];
-      const duplicated = routingSlots.some((slot) => slot.provider === provider && (slot.actualEmail || slot.email) === primaryEmail);
-      if (primaryEmail && !duplicated && !primaryParked[provider] && primaryCooldowns[provider] === 0) {
-        candidates.push({
+      const accountBindings: AccountRouteCandidate[] = [];
+      const primaryCovered = accountCoveredByManagedBinding(
+        provider,
+        primaryEmail,
+        routingSlots
+          .filter((slot) => slot.actualEmail !== "")
+          .map((slot) => ({ provider: slot.provider, email: slot.actualEmail })),
+      );
+      if (primaryEmail && !primaryCovered && !primaryParked[provider] && primaryCooldowns[provider] === 0) {
+        accountBindings.push({
           email: primaryEmail,
+          poolKey: "primary",
           last: poolNumber("last", provider, "primary"),
           preference: routePreference(provider, "primary"),
           nearing: nearingLimit(provider, "primary"),
@@ -542,13 +584,19 @@ export async function handleScan(_input: Record<string, never>, { paseo }: Plugi
       }
       for (const slot of routingSlots) {
         if (slot.provider !== provider || !slot.loggedIn || slot.wrongAccount || slot.blocked || slot.cooldownUntil > 0) continue;
-        candidates.push({ email: slot.email, last: slot.lastUsed, preference: slot.preference, nearing: slot.nearing });
+        accountBindings.push({
+          email: slot.actualEmail || slot.email,
+          poolKey: slot.email,
+          last: slot.lastUsed,
+          preference: slot.preference,
+          nearing: slot.nearing,
+        });
       }
-      const preferenceRank = { preferred: 0, standard: 1, reserve: 2 } as const;
+      const candidates = dedupeRouteCandidates(provider, accountBindings);
       const healthy = candidates.filter((candidate) => !candidate.nearing);
       const eligible = healthy.length > 0 ? healthy : candidates;
-      eligible.sort((a, b) => preferenceRank[a.preference] - preferenceRank[b.preference] || a.last - b.last);
-      return { provider, email: eligible[0]?.email ?? "" };
+      eligible.sort(compareRouteCandidates);
+      return { provider, email: eligible[0]?.email ?? "", poolKey: eligible[0]?.poolKey ?? "" };
     }),
     recentRoutes: recentRouteEvents(),
     autoRouters,
@@ -655,7 +703,7 @@ const ROUTER_TARGET_GROUPS: RouterTargetGroup[] = [
     instructions: "",
     selector: "in_order" as const,
     targets: [
-      autoTarget("claude", "claude-fable-5"),
+      autoTarget("claude", "claude-fable-5-1"),
       autoTarget("codex", "gpt-5.6-terra"),
       providerTarget("grok", "grok-4.6"),
     ],
@@ -697,7 +745,7 @@ const ROUTER_DEFAULT_CONFIG: RouterConfig = {
   controllerProvider: "claude-auto",
   controllerAccount: "auto",
   controllerConfigDir: "",
-  controllerModel: "claude-fable-5",
+  controllerModel: "claude-fable-5-1",
   targetGroups: ROUTER_TARGET_GROUPS,
 };
 
@@ -1021,46 +1069,51 @@ export async function handleRouterModels({ provider }: { provider: string }, { p
   }
 }
 
-// Create only the isolated slot. Interactive authentication belongs in the
-// user's normal terminal, where the provider can receive the pasted code.
-export async function handleAddAccount({ provider, email }: { provider: "claude" | "codex"; email: string }) {
+// Create the isolated slot. auth.server owns the guided browser/device flow so
+// the provider process can stay live while the panel completes authentication.
+export function ensureManagedAccountSlot(provider: "claude" | "codex", email: string): string {
   if (!/^[^\s/\\]+@[^\s/\\]+$/.test(email)) {
-    return { ok: false, started: false, message: "that does not look like an account email" };
+    throw new Error("that does not look like an account email");
   }
   const dir = join(AGENT_LINK_ROOT, provider, email);
-  try {
-    mkdirSync(dir, { recursive: true });
-    if (provider === "codex") {
-      // Codex slots must keep credentials inside CODEX_HOME.
-      const target = join(dir, "config.toml");
-      let text = existsSync(target)
-        ? readFileSync(target, "utf8")
-        : existsSync(join(HOME, ".codex", "config.toml"))
-          ? readFileSync(join(HOME, ".codex", "config.toml"), "utf8")
-          : "";
-      const pin = 'cli_auth_credentials_store = "file"';
-      text = /^\s*cli_auth_credentials_store\s*=/m.test(text)
-        ? text.replace(/^\s*cli_auth_credentials_store\s*=.*$/m, pin)
-        : `${pin}\n${text}`;
-      writeTextAtomic(target, text);
+  mkdirSync(dir, { recursive: true });
+  if (provider === "claude") {
+    for (const file of ["CLAUDE.md", "settings.json"]) {
+      const source = join(HOME, ".claude", file);
+      const target = join(dir, file);
+      if (existsSync(source) && !existsSync(target)) copyFileSync(source, target);
     }
+    const stylesSource = join(HOME, ".claude", "output-styles");
+    const stylesTarget = join(dir, "output-styles");
+    if (existsSync(stylesSource) && !existsSync(stylesTarget)) cpSync(stylesSource, stylesTarget, { recursive: true });
+  } else {
+    // Codex slots must keep credentials inside CODEX_HOME.
+    const target = join(dir, "config.toml");
+    let text = existsSync(target)
+      ? readFileSync(target, "utf8")
+      : existsSync(join(HOME, ".codex", "config.toml"))
+        ? readFileSync(join(HOME, ".codex", "config.toml"), "utf8")
+        : "";
+    const pin = 'cli_auth_credentials_store = "file"';
+    text = /^\s*cli_auth_credentials_store\s*=/m.test(text)
+      ? text.replace(/^\s*cli_auth_credentials_store\s*=.*$/m, pin)
+      : `${pin}\n${text}`;
+    writeTextAtomic(target, text);
+  }
+  return dir;
+}
+
+export async function handleAddAccount({ provider, email }: { provider: "claude" | "codex"; email: string }) {
+  try {
+    ensureManagedAccountSlot(provider, email);
   } catch (error) {
     return { ok: false, started: false, message: error instanceof Error ? error.message : String(error) };
   }
 
-  // Deliberately do NOT spawn the login here. Both CLIs finish sign-in by having
-  // you paste a code back into the terminal, which a detached process cannot
-  // receive — it would sit there looking busy and never complete. Create the
-  // slot, hand over the exact command.
-  const cli = searchPath().some((entry) => existsSync(join(entry, "agent-link"))) ? "agent-link" : null;
   return {
     ok: true,
     started: false,
-    message: cli
-      ? `Sign-in created. Finish in a terminal: agent-link login ${provider} ${email}`
-      : `Sign-in created. Finish in a terminal: ${envVarFor(provider)}="${dir}" ${provider} ${
-          provider === "claude" ? `auth login --email ${email}` : "login"
-        }`,
+    message: "Sign-in slot created. Use Sign in from the Accounts panel to authenticate it.",
   };
 }
 
@@ -1480,97 +1533,6 @@ async function usageForCodexDir(dir: string, sinceMs: number, days: number) {
   return totals;
 }
 
-type PoolQuota = {
-  at: number;
-  model: string;
-  plan: string;
-  source: string;
-  credits: { hasCredits: boolean; unlimited: boolean; balance: string } | null;
-  windows: Array<{
-    label: string;
-    kind: "session" | "weekly" | "other";
-    durationMinutes: number | null;
-    pct: number;
-    resetsAt: number | null;
-  }>;
-};
-
-function poolQuotaFromRaw(provider: string, raw: Record<string, unknown> | null): PoolQuota | null {
-  if (!raw) return null;
-  const windows: PoolQuota["windows"] = [];
-  for (const [keyName, fallbackMinutes] of [
-    ["five_hour", 300],
-    ["seven_day", 10_080],
-    ["primary", null],
-    ["secondary", null],
-  ] as const) {
-    const value = raw[keyName] as { pct?: number; resets_at?: number; window_minutes?: number } | undefined;
-    if (value && typeof value.pct === "number") {
-      const legacyMinutes = keyName === "primary" && typeof raw.window_minutes === "number" ? raw.window_minutes : null;
-      const durationMinutes = typeof value.window_minutes === "number" ? value.window_minutes : legacyMinutes ?? fallbackMinutes;
-      const kind =
-        durationMinutes !== null && durationMinutes <= 360
-          ? "session"
-          : durationMinutes !== null && durationMinutes >= 10_080
-            ? "weekly"
-            : "other";
-      const label = kind === "session" ? "Session limit" : kind === "weekly" ? "Weekly limit" : "Usage limit";
-      windows.push({
-        label,
-        kind,
-        durationMinutes,
-        pct: value.pct,
-        resetsAt: typeof value.resets_at === "number" ? value.resets_at : null,
-      });
-    }
-  }
-  const extraWindows = Array.isArray(raw.windows) ? raw.windows : [];
-  for (const candidate of extraWindows) {
-    if (!candidate || typeof candidate !== "object") continue;
-    const value = candidate as Record<string, unknown>;
-    if (typeof value.pct !== "number" || typeof value.label !== "string") continue;
-    const kind = value.kind === "session" || value.kind === "weekly" ? value.kind : "other";
-    const resetsAt = typeof value.resets_at === "number" ? value.resets_at : null;
-    if (windows.some((entry) => entry.label === value.label && entry.resetsAt === resetsAt)) continue;
-    windows.push({
-      label: value.label,
-      kind,
-      durationMinutes: typeof value.duration_minutes === "number" ? value.duration_minutes : null,
-      pct: value.pct,
-      resetsAt,
-    });
-  }
-  if (windows.length === 0) return null;
-  const credit = raw.credits as { has_credits?: boolean; unlimited?: boolean; balance?: string | number } | undefined;
-  return {
-    at: typeof raw.at === "number" ? raw.at : 0,
-    model: typeof raw.model === "string" ? raw.model : "",
-    plan: typeof raw.plan === "string" ? raw.plan : "",
-    source:
-      typeof raw.source === "string" && raw.source !== ""
-        ? raw.source
-        : provider === "claude"
-          ? "Claude statusline"
-          : "Codex rollout",
-    credits:
-      credit && typeof credit.has_credits === "boolean"
-        ? {
-            hasCredits: credit.has_credits,
-            unlimited: Boolean(credit.unlimited),
-            balance: credit.balance === undefined || credit.balance === null ? "" : String(credit.balance),
-          }
-        : null,
-    windows,
-  };
-}
-
-function epochSeconds(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value)) return value > 10_000_000_000 ? Math.floor(value / 1000) : value;
-  if (typeof value !== "string" || value === "") return null;
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : null;
-}
-
 /**
  * Claude's interactive /usage view caches the same account limits in
  * .claude.json. Paseo runs Claude in non-interactive mode, so its statusline
@@ -1580,62 +1542,13 @@ function epochSeconds(value: unknown): number | null {
 function readClaudeCachedQuota(configDir: string): PoolQuota | null {
   const primaryDir = join(HOME, ".claude");
   const path = configDir === HOME || configDir === primaryDir ? join(HOME, ".claude.json") : join(configDir, ".claude.json");
-  const config = readJson(path);
-  const cached = config?.cachedUsageUtilization as { fetchedAtMs?: unknown; utilization?: Record<string, unknown> } | undefined;
-  const utilization = cached?.utilization;
-  if (!utilization) return null;
-  const windows: PoolQuota["windows"] = [];
-  for (const [key, label, kind, durationMinutes] of [
-    ["five_hour", "Session limit", "session", 300],
-    ["seven_day", "Weekly limit", "weekly", 10_080],
-  ] as const) {
-    const value = utilization[key] as { utilization?: unknown; resets_at?: unknown } | undefined;
-    if (typeof value?.utilization !== "number") continue;
-    windows.push({
-      label,
-      kind,
-      durationMinutes,
-      pct: value.utilization,
-      resetsAt: epochSeconds(value.resets_at),
-    });
-  }
-  const limits = Array.isArray(utilization.limits) ? utilization.limits : [];
-  for (const candidate of limits) {
-    if (!candidate || typeof candidate !== "object") continue;
-    const value = candidate as {
-      kind?: unknown;
-      percent?: unknown;
-      resets_at?: unknown;
-      scope?: { model?: { display_name?: unknown } } | null;
-    };
-    const model = value.scope?.model?.display_name;
-    if (typeof model !== "string" || typeof value.percent !== "number") continue;
-    windows.push({
-      label: `${model} weekly limit`,
-      kind: "weekly",
-      durationMinutes: 10_080,
-      pct: value.percent,
-      resetsAt: epochSeconds(value.resets_at),
-    });
-  }
-  if (windows.length === 0) return null;
-  return {
-    at: epochSeconds(cached?.fetchedAtMs) ?? 0,
-    model: "",
-    plan: "",
-    source: "Claude /usage cache",
-    credits: null,
-    windows,
-  };
+  return claudeCachedQuotaFromConfig(readJson(path));
 }
 
 function readPoolQuota(provider: string, key: string, configDir?: string): PoolQuota | null {
   const stored = poolQuotaFromRaw(provider, readJson(join(poolsDir(), `quota-${provider}-${key}.json`)));
   if (provider !== "claude" || !configDir) return stored;
-  const cached = readClaudeCachedQuota(configDir);
-  if (!stored) return cached;
-  if (!cached) return stored;
-  return cached.at > stored.at ? cached : stored;
+  return mergePoolQuotas(stored, readClaudeCachedQuota(configDir));
 }
 
 function readHeld(provider: string, key: string): string | null {
@@ -1647,39 +1560,57 @@ function readHeld(provider: string, key: string): string | null {
 }
 
 export async function handleAccountCapacity() {
-  const shape = (provider: "claude" | "codex", email: string, poolKey: string, isPrimary: boolean, dir: string) => {
-    const quota = readPoolQuota(provider, poolKey, dir);
-    const held = readHeld(provider, poolKey);
-    const cooling = cooldownUntil(provider, poolKey);
+  const bindings: Array<{
+    provider: "claude" | "codex";
+    email: string;
+    poolKey: string;
+    isPrimary: boolean;
+    dir: string;
+    quota: PoolQuota | null;
+  }> = [];
+  const add = (provider: "claude" | "codex", email: string, poolKey: string, isPrimary: boolean, dir: string) => {
+    bindings.push({ provider, email, poolKey, isPrimary, dir, quota: readPoolQuota(provider, poolKey, dir) });
+  };
+  const primaryClaude = claudeAccountEmail(HOME);
+  const primaryCodexDir = join(HOME, ".codex");
+  const primaryCodex = codexAccountEmail(primaryCodexDir);
+  if (primaryClaude) add("claude", primaryClaude, "primary", true, HOME);
+  if (primaryCodex) add("codex", primaryCodex, "primary", true, primaryCodexDir);
+  for (const slot of collectSlots()) {
+    if (!slot.loggedIn || slot.wrongAccount) continue;
+    add(slot.provider, slot.actualEmail || slot.email, slot.email, false, slot.dir);
+  }
+
+  const accounts = groupAccountQuotaBindings(bindings).map(({ accountId, bindings: accountBindings, representative, quota }) => {
+    const { provider, email, poolKey } = representative;
+    const isPrimary = accountBindings.some((binding) => binding.isPrimary);
     const maxUsed = Math.max(0, ...(quota?.windows.map((entry) => entry.pct) ?? []));
-    const stale = quota ? quota.at <= 0 || Date.now() / 1000 - quota.at > 45 * 60 : false;
-    const state = held
-      ? "held"
-      : cooling > 0
-        ? "parked"
-        : !quota || stale
-          ? "unknown"
-          : maxUsed >= 85
-            ? "nearing"
-            : "ready";
-    const noTelemetry =
-      provider === "claude"
-        ? isPrimary
-          ? "Claude only reports these limits during an interactive chat. Open `claude`, send one message, then refresh."
-          : `Claude only reports these limits during an interactive chat. Run \`agent-link run claude ${poolKey} claude\`, send one message, then refresh.`
-        : "No current usage limits are available. Run one Codex chat with this sign-in, then refresh.";
+    const missing = !quota || quota.windows.length === 0;
+    const stale = !missing && (quota.at <= 0 || Date.now() / 1_000 - quota.at > 45 * 60);
+    const state = missing ? "missing" : stale ? "stale" : maxUsed >= 85 ? "nearing" : "current";
+    const detail = stale
+      ? "The last plan-limit report is over 45 minutes old."
+      : missing
+        ? provider === "claude"
+          ? isPrimary
+            ? "Claude has not reported plan-limit windows for this account. Run /usage in Claude Code, then refresh."
+            : `Claude has not reported plan-limit windows for this account. Open it with \`agent-link run claude ${poolKey} claude\`, run /usage, then refresh.`
+          : "Codex has not reported plan-limit windows for this account yet."
+        : "";
     return {
       provider,
       email,
+      accountId,
       isPrimary,
       poolKey,
-      state: state as "ready" | "nearing" | "parked" | "held" | "unknown",
-      detail: held ?? (cooling > 0 ? parkReason(provider, poolKey) : stale ? "Last report is over 45 minutes old." : quota ? "" : noTelemetry),
+      state: state as "current" | "nearing" | "stale" | "missing",
+      detail,
       at: quota?.at ?? 0,
       plan: quota?.plan ?? "",
       model: quota?.model ?? "",
       source: quota?.source ?? "",
       credits: quota?.credits ?? null,
+      extraUsage: quota?.extraUsage ?? null,
       windows: (quota?.windows ?? []).map((entry) => ({
         label: entry.label,
         kind: entry.kind,
@@ -1688,29 +1619,21 @@ export async function handleAccountCapacity() {
         resetsAt: entry.resetsAt,
       })),
     };
-  };
-  const accounts = [];
-  const primary = {
-    claude: claudeAccountEmail(HOME),
-    codex: codexAccountEmail(join(HOME, ".codex")),
-  };
-  if (primary.claude) accounts.push(shape("claude", primary.claude, "primary", true, HOME));
-  if (primary.codex) accounts.push(shape("codex", primary.codex, "primary", true, join(HOME, ".codex")));
-  for (const slot of collectSlots()) {
-    if (!slot.loggedIn) continue;
-    accounts.push(shape(slot.provider, slot.actualEmail || slot.email, slot.email, false, slot.dir));
-  }
+  });
   return { accounts };
 }
 
 export async function handleAccountUsage({ days }: { days: number }) {
   const window = Math.max(1, Math.min(30, days));
   const sinceMs = Date.now() - window * 86_400_000;
-  const shape = async (provider: "claude" | "codex", email: string, dir: string, poolKey: string) => {
+  const shape = async (provider: "claude" | "codex", email: string, dir: string, poolKey: string, isPrimary: boolean) => {
     const t = provider === "claude" ? await usageForClaudeDir(dir, sinceMs, window) : await usageForCodexDir(dir, sinceMs, window);
     return {
       provider,
       email,
+      accountId: accountIdentity(provider, email),
+      poolKey,
+      isPrimary,
       sessions: t.sessions,
       inputTokens: t.inputTokens,
       outputTokens: t.outputTokens,
@@ -1728,21 +1651,23 @@ export async function handleAccountUsage({ days }: { days: number }) {
       held: readHeld(provider, poolKey),
     };
   };
-  const pending: Array<{ provider: "claude" | "codex"; email: string; dir: string; poolKey: string }> = [];
+  const pending: Array<{ provider: "claude" | "codex"; email: string; dir: string; poolKey: string; isPrimary: boolean }> = [];
   const primaryClaude = claudeAccountEmail(HOME);
   const primaryCodexDir = join(HOME, ".codex");
   const primaryCodex = codexAccountEmail(primaryCodexDir);
-  if (primaryClaude) pending.push({ provider: "claude", email: primaryClaude, dir: join(HOME, ".claude"), poolKey: "primary" });
-  if (primaryCodex) pending.push({ provider: "codex", email: primaryCodex, dir: primaryCodexDir, poolKey: "primary" });
+  if (primaryClaude) pending.push({ provider: "claude", email: primaryClaude, dir: join(HOME, ".claude"), poolKey: "primary", isPrimary: true });
+  if (primaryCodex) pending.push({ provider: "codex", email: primaryCodex, dir: primaryCodexDir, poolKey: "primary", isPrimary: true });
   for (const slot of collectSlots()) {
-    if (!slot.loggedIn) continue;
-    pending.push({ provider: slot.provider, email: slot.actualEmail || slot.email, dir: slot.dir, poolKey: slot.email });
+    if (!slot.loggedIn || slot.wrongAccount) continue;
+    pending.push({ provider: slot.provider, email: slot.actualEmail || slot.email, dir: slot.dir, poolKey: slot.email, isPrimary: false });
   }
   // Transcript scans are deliberately sequential: Activity is on-demand and
   // can take a little longer, while parallel multi-account reads recreate the
   // memory and disk-pressure problem this plugin is meant to prevent.
   const accounts = [];
-  for (const account of pending) accounts.push(await shape(account.provider, account.email, account.dir, account.poolKey));
+  for (const account of pending) {
+    accounts.push(await shape(account.provider, account.email, account.dir, account.poolKey, account.isPrimary));
+  }
   return { accounts };
 }
 

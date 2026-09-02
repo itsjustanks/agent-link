@@ -23,6 +23,7 @@ export function resolveRuntimeModel(provider: string | null | undefined, model: 
 
 const FRIENDLY_MODELS: Record<string, string> = {
   "claude-haiku-4-5": "Claude Haiku 4.5",
+  "claude-fable-5-1": "Claude Fable 5.1",
   "claude-fable-5": "Claude Fable 5",
   "claude-sonnet-5": "Claude Sonnet 5",
   "claude-opus-5": "Claude Opus 5",

@@ -18,22 +18,12 @@ printf '%s\n' '{"daemon":{"appendSystemPrompt":"Session: [brief context]\\n\\n##
 HOME="$fixture_root" AGENT_LINK_HOME="$fixture_root/agent-link" \
   "$repo_root/agent-link" style install >/dev/null
 
-grep -q -- '- Asked: the original request.' "$fixture_root/.claude/output-styles/concise.md"
-grep -q -- '- Goal: the intended end state.' "$fixture_root/.codex/AGENTS.md"
-grep -q -- '- Next: the most useful immediate action, only when relevant.' "$fixture_root/.claude/output-styles/concise.md"
-grep -q -- '- Next: the most useful immediate action, only when relevant.' "$fixture_root/.codex/AGENTS.md"
-grep -q 'Runtime model identity comes from AgentLink' \
-  "$fixture_root/agent-link/accounts/codex/codex@example.com/AGENTS.md"
-grep -q 'Never call Paseo `create_terminal` for ordinary shell commands' \
-  "$fixture_root/.codex/AGENTS.md"
-grep -q 'Never call Paseo `create_terminal` for ordinary shell commands' \
-  "$fixture_root/.claude/output-styles/concise.md"
-grep -q 'read `~/.agents/skills/paseo/SKILL.md` completely' \
-  "$fixture_root/.claude/output-styles/concise.md"
-grep -q 'Omit `workspaceId` for ordinary delegation' \
-  "$fixture_root/.codex/AGENTS.md"
-grep -q 'Never create a workspace merely to delegate, retry, continue, investigate, or switch model/provider/account' \
-  "$fixture_root/.codex/AGENTS.md"
+grep -q '# Response style' "$fixture_root/.claude/output-styles/concise.md"
+grep -q '# Response style' "$fixture_root/.codex/AGENTS.md"
+grep -q 'Lead with the result or the answer' "$fixture_root/agent-link/accounts/codex/codex@example.com/AGENTS.md"
+! grep -q 'delegate useful parallel work' "$fixture_root/.codex/AGENTS.md"
+! grep -q '## Orchestration' "$fixture_root/.codex/AGENTS.md"
+! grep -q '## Orchestration' "$fixture_root/.claude/output-styles/concise.md"
 test "$(jq -r '.outputStyle' "$fixture_root/.claude/settings.json")" = "Concise"
 test "$(jq -r '.outputStyle' "$fixture_root/agent-link/accounts/claude/claude@example.com/settings.json")" = "Concise"
 ! rg -q 'PASEO_TERMINAL_ID|PASEO_HOOK_CLI|paseo.*hooks claude' "$fixture_root/agent-link/accounts/claude/claude@example.com/settings.json"
@@ -42,9 +32,9 @@ rg -q 'agent-link refused claude' "$fixture_root/agent-link/accounts/claude/clau
 test "$(jq -r '.daemon.appendSystemPrompt | startswith("<!-- agent-link:paseo-contract:start -->")' "$fixture_root/.paseo/config.json")" = "true"
 test "$(jq -r '.daemon.autoArchiveAfterMerge' "$fixture_root/.paseo/config.json")" = "false"
 test "$(jq -r '.daemon.enableTerminalAgentHooks' "$fixture_root/.paseo/config.json")" = "false"
-jq -r '.daemon.appendSystemPrompt' "$fixture_root/.paseo/config.json" | grep -q -- '- Next: the most useful immediate action, only when relevant.'
-jq -r '.daemon.appendSystemPrompt' "$fixture_root/.paseo/config.json" | grep -q 'Never call Paseo `create_terminal` for ordinary shell commands'
-jq -r '.daemon.appendSystemPrompt' "$fixture_root/.paseo/config.json" | grep -q 'Use Paseo `create_agent`'
+jq -r '.daemon.appendSystemPrompt' "$fixture_root/.paseo/config.json" | grep -q 'Use native subagents for quick same-provider'
+jq -r '.daemon.appendSystemPrompt' "$fixture_root/.paseo/config.json" | grep -q 'Use Paseo subagents for cross-provider work'
+jq -r '.daemon.appendSystemPrompt' "$fixture_root/.paseo/config.json" | grep -q 'Use AgentLink only when requested or no suitable direct provider/account is available'
 jq -r '.daemon.appendSystemPrompt' "$fixture_root/.paseo/config.json" | grep -q '<!-- agent-link:paseo-contract:end -->'
 ! rg -q 'Session: \[brief context\]' "$fixture_root/.paseo/config.json"
 rg -q 'keep this' "$fixture_root/.paseo/config.json"
@@ -59,12 +49,12 @@ printf '%s\n' '{"daemon":{"appendSystemPrompt":"## Response contract\nold\n\n## 
 HOME="$fixture_root" AGENT_LINK_HOME="$fixture_root/agent-link" \
   "$repo_root/agent-link" style install >/dev/null
 ! rg -q '## Accounts and limits|## Paseo MCP approval|## Agent hygiene' "$fixture_root/.paseo/config.json"
-rg -q 'keep safe server rules' "$fixture_root/.paseo/config.json"
+! rg -q 'keep safe server rules' "$fixture_root/.paseo/config.json"
 ! rg -q '## Finishing' "$fixture_root/.paseo/config.json"
-jq -r '.daemon.appendSystemPrompt' "$fixture_root/.paseo/config.json" | grep -q 'Omit `workspaceId` for ordinary delegation'
+jq -r '.daemon.appendSystemPrompt' "$fixture_root/.paseo/config.json" | grep -q 'Give independent edits separate worktrees'
 
 status="$(HOME="$fixture_root" AGENT_LINK_HOME="$fixture_root/agent-link" "$repo_root/agent-link" style status)"
-grep -q 'Claude orchestration contract: installed' <<< "$status"
-grep -q 'Codex orchestration contract: installed' <<< "$status"
+grep -q 'Claude response style: installed' <<< "$status"
+grep -q 'Codex response style: installed' <<< "$status"
 
 echo "response style fixture passed"

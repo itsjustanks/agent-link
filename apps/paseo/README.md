@@ -100,9 +100,9 @@ Claude usage comes from provider-owned interactive status or cached usage state.
 
 Only eligible Paseo-owned type-check/compiler process trees are managed. One heavy job runs at a time; critical memory pressure pauses it and recovery resumes it. Provider agents and terminal-owned processes are never killed.
 
-## What may open Terminal
+## Account sign-in
 
-Only an explicit login or provider authentication flow may need Terminal. Normal AgentLink turns and model changes run inside the existing Paseo chat.
+Claude and Codex accounts are connected from **AgentLink → Accounts**. The panel starts the provider-owned browser flow, forwards Claude's one-time response directly to Claude Code, or waits for Codex device authorization. It never stores that response, reads OAuth tokens, or opens Terminal. CLI login commands remain available for headless recovery.
 
 ## Troubleshooting
 
@@ -114,7 +114,7 @@ Only an explicit login or provider authentication flow may need Terminal. Normal
 
 ## Security
 
-Plugin backend code is trusted daemon code. It reads account identity and provider-owned usage state, never OAuth token material. It does not archive chats, spawn continuation agents, or switch an in-flight native process.
+Plugin backend code is trusted daemon code. It reads account identity and provider-owned usage state, never OAuth token material. During sign-in it holds only the live provider process and forwards the short-lived response without writing it to disk. It does not archive chats, spawn continuation agents, or switch an in-flight native process.
 
 ## License
 
