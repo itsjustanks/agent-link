@@ -36,6 +36,9 @@ import {
   routerPowerUpApply,
   routerSyncSelection,
   routerSyncSelectionSet,
+  routerTunnel,
+  routerTunnelSet,
+  routerRequireApiKey,
 } from "./contracts.shared";
 import { cliForModel, formatReset, groupModelIds, parseOauthPaste, providerLabel, quotaTone } from "./router.logic";
 
@@ -357,6 +360,9 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
   const callPowerUpApply = useRpc(routerPowerUpApply);
   const callSyncSelection = useRpc(routerSyncSelection);
   const callSyncSelectionSet = useRpc(routerSyncSelectionSet);
+  const callTunnel = useRpc(routerTunnel);
+  const callTunnelSet = useRpc(routerTunnelSet);
+  const callRequireApiKey = useRpc(routerRequireApiKey);
 
   const status = useQuery({
     queryKey: ["agent-link", "router-status"],
@@ -431,6 +437,13 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
     queryFn: () => callSyncSelection({}),
     enabled: tab === "models",
   });
+  const tunnel = useQuery({
+    queryKey: ["agent-link", "tunnel"],
+    queryFn: () => callTunnel({}),
+    enabled: live && tab === "setup",
+    // A tunnel takes a few seconds to publish its URL, so poll while open.
+    refetchInterval: tab === "setup" ? 8_000 : false,
+  });
   const holds = useQuery({
     queryKey: ["agent-link", "holds"],
     queryFn: () => callHolds({}),
@@ -466,6 +479,8 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
   const passwordMutation = useMutation({ mutationFn: callPasswordChange, ...feedback });
   const powerUpMutation = useMutation({ mutationFn: callPowerUpApply, ...feedback });
   const selectionMutation = useMutation({ mutationFn: callSyncSelectionSet, ...feedback });
+  const tunnelMutation = useMutation({ mutationFn: callTunnelSet, ...feedback });
+  const requireKeyMutation = useMutation({ mutationFn: callRequireApiKey, ...feedback });
   const keyRevealMutation = useMutation({
     mutationFn: callKeyReveal,
     onSuccess: (result) => {
@@ -763,6 +778,72 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
                 </Note>
               </View>
             ) : null}
+          </Card>
+
+
+          <Card theme={theme}>
+            <Step theme={theme} index={data?.binary.path ? 5 : 6} title="Remote access" hint="optional" />
+            <Note theme={theme}>
+              A tunnel publishes 9router past this machine, so the same accounts answer from anywhere. It is also a
+              proxy holding live subscription credentials, so the key requirement below is not optional in practice —
+              without it, anyone with the URL spends your quota.
+            </Note>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <Text style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "600", flex: 1 }}>
+                API key required on /v1
+              </Text>
+              <Chip
+                theme={theme}
+                label={tunnel.data?.requireApiKey ? "required" : "open"}
+                tone={tunnel.data?.requireApiKey ? "success" : "danger"}
+              />
+              <Button
+                theme={theme}
+                label={tunnel.data?.requireApiKey ? "Make open" : "Require a key"}
+                tone={tunnel.data?.requireApiKey ? "default" : "primary"}
+                disabled={!live}
+                busy={requireKeyMutation.isPending}
+                onPress={() => requireKeyMutation.mutate({ required: !tunnel.data?.requireApiKey })}
+              />
+            </View>
+            {(tunnel.data?.tunnels ?? []).map((entry) => (
+              <View key={entry.provider} style={{ gap: 4 }}>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <Text style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "600", flex: 1 }}>
+                    {entry.provider === "cloudflare" ? "Cloudflare tunnel" : "Tailscale"}
+                  </Text>
+                  <Chip
+                    theme={theme}
+                    label={entry.running ? "published" : entry.enabled ? "starting" : "off"}
+                    tone={entry.running ? "warning" : "neutral"}
+                  />
+                  <Button
+                    theme={theme}
+                    label={entry.enabled ? "Stop" : "Publish"}
+                    tone={entry.enabled ? "default" : "primary"}
+                    disabled={!live}
+                    busy={tunnelMutation.isPending && tunnelMutation.variables?.provider === entry.provider}
+                    onPress={() => tunnelMutation.mutate({ provider: entry.provider, enabled: !entry.enabled })}
+                  />
+                </View>
+                {entry.url ? (
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                    <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11, flex: 1 }} numberOfLines={1}>
+                      {entry.url}
+                    </Text>
+                    <Button
+                      theme={theme}
+                      label="Copy"
+                      onPress={() => {
+                        Clipboard.setString(entry.url);
+                        setMessage("Public URL copied. Treat it as a credential.");
+                      }}
+                    />
+                  </View>
+                ) : null}
+                {entry.note ? <Note theme={theme}>{entry.note}</Note> : null}
+              </View>
+            ))}
           </Card>
 
           <Note theme={theme}>

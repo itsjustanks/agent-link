@@ -434,3 +434,41 @@ export const routerSyncSelectionSet = defineRpc({
   input: z.object({ selected: z.array(z.string()) }),
   output: z.object({ ok: z.boolean(), message: z.string() }),
 });
+
+// -------------------------------------------------------------------- tunnel
+
+/**
+ * 9router can publish itself past loopback. That exposes a proxy holding live
+ * subscription credentials, so the panel reports the API-key requirement
+ * alongside the switch: a tunnel without one is an open proxy.
+ */
+export const TunnelSchema = z.object({
+  provider: z.enum(["cloudflare", "tailscale"]),
+  enabled: z.boolean(),
+  running: z.boolean(),
+  url: z.string(),
+  note: z.string(),
+});
+
+export const routerTunnel = defineRpc({
+  name: "agent-link.router.tunnel",
+  input: z.object({}),
+  output: z.object({
+    tunnels: z.array(TunnelSchema),
+    requireApiKey: z.boolean(),
+    localUrl: z.string(),
+  }),
+});
+
+export const routerTunnelSet = defineRpc({
+  name: "agent-link.router.tunnel.set",
+  input: z.object({ provider: z.enum(["cloudflare", "tailscale"]), enabled: z.boolean() }),
+  output: z.object({ ok: z.boolean(), message: z.string() }),
+});
+
+/** Require a bearer key on /v1 — the thing that makes a tunnel survivable. */
+export const routerRequireApiKey = defineRpc({
+  name: "agent-link.router.require-api-key",
+  input: z.object({ required: z.boolean() }),
+  output: z.object({ ok: z.boolean(), message: z.string() }),
+});

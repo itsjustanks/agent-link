@@ -987,3 +987,75 @@ export async function handleRouterSyncSelectionSet({ selected }: { selected: str
         : `Sync will list ${selected.length} model(s).`,
   };
 }
+
+// -------------------------------------------------------------------- tunnel
+
+export async function handleRouterTunnel() {
+  const client = new RouterClient();
+  const settings = readSettings();
+  const raw = await client.api<{ tunnel?: Record<string, unknown>; tailscale?: Record<string, unknown> }>(
+    "tunnel/status",
+  );
+  const config = await client.api<Record<string, unknown>>("settings");
+  const read = (source: Record<string, unknown> | undefined, provider: "cloudflare" | "tailscale") => ({
+    provider,
+    enabled: source?.settingsEnabled === true || source?.enabled === true,
+    running: source?.running === true,
+    url: String(source?.publicUrl ?? source?.tunnelUrl ?? ""),
+    note:
+      provider === "tailscale" && source?.loggedIn === false
+        ? "Tailscale is not signed in on this machine."
+        : "",
+  });
+  return {
+    tunnels: [read(raw?.tunnel, "cloudflare"), read(raw?.tailscale, "tailscale")],
+    requireApiKey: config?.requireApiKey === true,
+    localUrl: settings.url,
+  };
+}
+
+export async function handleRouterTunnelSet({
+  provider,
+  enabled,
+}: {
+  provider: "cloudflare" | "tailscale";
+  enabled: boolean;
+}) {
+  const client = new RouterClient();
+  if (enabled) {
+    // A tunnel without a required bearer key publishes an open proxy onto your
+    // subscriptions. Refuse rather than warn: the failure mode is somebody
+    // else spending your quota, and it is silent.
+    const config = await client.api<Record<string, unknown>>("settings");
+    if (config?.requireApiKey !== true) {
+      return {
+        ok: false,
+        message: "Turn on \"API key required on /v1\" first — a tunnel without it is an open proxy onto your accounts.",
+      };
+    }
+  }
+  const path =
+    provider === "tailscale"
+      ? `tunnel/tailscale-${enabled ? "enable" : "disable"}`
+      : `tunnel/${enabled ? "enable" : "disable"}`;
+  const result = await client.api<{ success?: boolean; error?: string }>(path, { method: "POST" });
+  if (result === null) {
+    return { ok: false, message: client.authError ?? `Could not ${enabled ? "start" : "stop"} the tunnel.` };
+  }
+  return {
+    ok: true,
+    message: enabled ? "Tunnel starting — its public URL appears once it connects." : "Tunnel stopped.",
+  };
+}
+
+export async function handleRouterRequireApiKey({ required }: { required: boolean }) {
+  const client = new RouterClient();
+  const result = await client.apiJson<{ success?: boolean; error?: string }>("settings", "PATCH", {
+    requireApiKey: required,
+  });
+  if (result === null) return { ok: false, message: client.authError ?? "Could not change that setting." };
+  return {
+    ok: true,
+    message: required ? "/v1 now requires a bearer key." : "/v1 no longer requires a key — keep it on loopback.",
+  };
+}

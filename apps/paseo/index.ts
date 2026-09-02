@@ -33,6 +33,9 @@ import {
   routerPowerUpApply,
   routerSyncSelection,
   routerSyncSelectionSet,
+  routerTunnel,
+  routerTunnelSet,
+  routerRequireApiKey,
 } from "./contracts.shared";
 import {
   handleRouterAliasRemove,
@@ -68,6 +71,9 @@ import {
   handleRouterPowerUpApply,
   handleRouterSyncSelection,
   handleRouterSyncSelectionSet,
+  handleRouterTunnel,
+  handleRouterTunnelSet,
+  handleRouterRequireApiKey,
 } from "./handlers.server";
 import { AgentLinkSurface } from "./surface.client";
 
@@ -105,6 +111,9 @@ export default function contribute(plugin: PluginContext) {
   plugin.handle(routerPowerUpApply, handleRouterPowerUpApply);
   plugin.handle(routerSyncSelection, handleRouterSyncSelection);
   plugin.handle(routerSyncSelectionSet, handleRouterSyncSelectionSet);
+  plugin.handle(routerTunnel, handleRouterTunnel);
+  plugin.handle(routerTunnelSet, handleRouterTunnelSet);
+  plugin.handle(routerRequireApiKey, handleRouterRequireApiKey);
 
   plugin.addSurface("agent-link", AgentLinkSurface);
   plugin.addSidebarItem({ id: "agent-link", title: "9Router", icon: "Users", surface: "agent-link" });
