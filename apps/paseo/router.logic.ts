@@ -61,9 +61,19 @@ export function normalizeUsage(raw: unknown): Usage | null {
   return { plan, limitReached: r.limitReached === true, quotas };
 }
 
-/** Which CLI drives a 9router model id: Codex for `cx/`, Claude Code for everything else. */
-export function cliForModel(modelId: string): "codex" | "claude" {
-  return modelId.startsWith("cx/") ? "codex" : "claude";
+/**
+ * Which Paseo provider should list a 9router model.
+ *
+ * `cx/` is Codex's own OpenAI-shaped pool and `cc/` is Claude Code's. Every
+ * other prefix (kimi, cu, gh, glm…) is a third-party pool that 9router can
+ * translate into either wire format, so it is reachable through the Claude
+ * provider — but only on request. Listing all of them by default put 214
+ * Cursor models in the Claude picker, which is noise, not capability.
+ */
+export function cliForModel(modelId: string): "codex" | "claude" | "other" {
+  if (modelId.startsWith("cx/")) return "codex";
+  if (modelId.startsWith("cc/")) return "claude";
+  return "other";
 }
 
 const PROVIDER_LABELS: Record<string, string> = {

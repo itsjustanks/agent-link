@@ -1,7 +1,7 @@
 {
   "id": "paseo",
-  "title": "AgentLink",
-  "summary": "One AgentLink chat for every connected model and account",
+  "title": "9Router Agent Link",
+  "summary": "Accounts, quotas and models from a local 9router, wired into Paseo",
   "requires": "paseo",
   "kind": "paseo-plugin",
   "pluginId": "agent-link"

@@ -2,11 +2,12 @@
 # agent-link — Paseo front-end for 9router.
 #
 # 9router (npm i -g 9router) owns your Claude Code / Codex accounts, OAuth,
-# quotas, rotation and fallback. agent-link installs the AgentLink ACP provider
-# into Paseo so one chat can pick any 9router model, and gives you a small CLI
-# to start/inspect 9router from a terminal.
+# quotas, rotation and fallback, and rewrites each CLI's own config so every
+# launch of that binary routes through it — Paseo's native providers included.
+# agent-link lists 9router's models on those providers and gives you a small
+# CLI to start/inspect 9router from a terminal.
 #
-# Requires: bash, python3, curl, node (for the ACP runtime), 9router, paseo.
+# Requires: bash, python3, curl, 9router, paseo.
 set -u
 
 VERSION="0.9.0"
@@ -26,10 +27,9 @@ else ROOT="$HOME/.agent-link"
 fi
 BIN="$ROOT/bin"
 SETTINGS="$ROOT/9router.json"
-RUNTIME="$BIN/agent-link-acp"
 PASEO_CONFIG="$HOME/.paseo/config.json"
-LEGACY_PROVIDERS="claude-auto codex-auto agent-router"
-LEGACY_SHIMS="claude-auto codex-auto agent-router codex-app-server-proxy claude codex claude-quota-statusline"
+LEGACY_PROVIDERS="agent-link claude-auto codex-auto agent-router"
+LEGACY_SHIMS="agent-link-acp claude-auto codex-auto agent-router codex-app-server-proxy claude codex claude-quota-statusline"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -159,13 +159,28 @@ cmd_9router() {
 
 # ---------------------------------------------------------------- Paseo wiring
 
-paseo_provider_installed() {
-  python3 - "$PASEO_CONFIG" "$RUNTIME" <<'PY' 2>/dev/null
+# How many 9router models Paseo's own claude/codex providers currently offer.
+models_listed() {
+  python3 - "$PASEO_CONFIG" <<'PY' 2>/dev/null
 import json, sys
-p = json.load(open(sys.argv[1])).get("agents", {}).get("providers", {}).get("agent-link") or {}
-sys.exit(0 if p.get("extends") == "acp" and p.get("command") == [sys.argv[2]] else 1)
+try: config = json.load(open(sys.argv[1]))
+except Exception: print("0 0"); sys.exit(0)
+providers = config.get("providers") or config.get("agents", {}).get("providers", {})
+def count(name):
+    entry = providers.get(name) or {}
+    models = entry.get("additionalModels") or []
+    return sum(1 for m in models if isinstance(m, dict) and str(m.get("id", "")).startswith(("cc/", "cx/")))
+print(f"{count('claude')} {count('codex')}")
 PY
 }
+# Does 9router currently own this CLI's config? 9router answers for itself.
+cli_routed() { # $1 claude|codex
+  curl -fsS -m 5 "$(r_url)/api/cli-tools/$1-settings" 2>/dev/null \
+    | python3 -c 'import json,sys
+try: sys.exit(0 if json.load(sys.stdin).get("has9Router") else 1)
+except Exception: sys.exit(1)'
+}
+
 legacy_providers_present() {
   python3 - "$PASEO_CONFIG" $LEGACY_PROVIDERS <<'PY' 2>/dev/null
 import json, sys
@@ -181,50 +196,92 @@ legacy_shims_present() {
   echo "${out# }"
 }
 
-install_runtime() { # ROOT/bin/agent-link-acp = byte copy of agent-link-acp.mjs
-  local src="" c
-  for c in "$HERE/agent-link-acp.mjs" "$HERE/../agent-link-acp.mjs"; do [ -f "$c" ] && { src="$c"; break; }; done
-  mkdir -p "$BIN" || return 1
-  local tmp="$RUNTIME.tmp.mjs"   # .mjs so node --check parses it as a module
-  if [ -n "$src" ]; then cp "$src" "$tmp" || return 1
-  else
-    echo "no checkout next to $0 — fetching agent-link-acp.mjs from GitHub ($REPO@main)"
-    curl -fsSL -m 30 "$RAW/agent-link-acp.mjs" -o "$tmp" || { rm -f "$tmp"; return 1; }
-  fi
-  node --check "$tmp" 2>/dev/null || { rm -f "$tmp"; echo "runtime source does not parse: ${src:-$RAW/agent-link-acp.mjs}" >&2; return 1; }
-  chmod 755 "$tmp" && mv -f "$tmp" "$RUNTIME" && ok "runtime: $RUNTIME"
-}
-
-write_paseo_provider() { # add agents.providers["agent-link"], drop legacy providers; backup + atomic replace
+# Ask 9router which models it serves, then list them on Paseo's own claude and
+# codex providers so they appear in an ordinary chat's model picker. Dead
+# provider entries from the pre-9router design are removed in the same write.
+sync_models() {
   [ -f "$PASEO_CONFIG" ] || { warn "no $PASEO_CONFIG — is Paseo installed?"; return 0; }
-  local result; result="$(python3 - "$PASEO_CONFIG" "$RUNTIME" $LEGACY_PROVIDERS <<'PY'
+  local ids
+  ids="$(curl -fsS -m 10 -H "Authorization: Bearer $(r_key)" "$(r_url)/v1/models" 2>/dev/null \
+    | python3 -c 'import json,sys
+try: print(" ".join(m["id"] for m in json.load(sys.stdin).get("data", []) if isinstance(m.get("id"), str)))
+except Exception: print("")')"
+  [ -n "$ids" ] || { bad "9router returned no models — is it running and signed in?"; return 1; }
+
+  local result
+  result="$(python3 - "$PASEO_CONFIG" "$ids" $LEGACY_PROVIDERS <<'PY'
 import json, os, shutil, sys, tempfile, time
-path, runtime, legacy = sys.argv[1], sys.argv[2], sys.argv[3:]
-try: config = json.load(open(path, encoding="utf-8"))
-except Exception as e: print(f"error:{e}"); sys.exit(0)
+path, ids, legacy = sys.argv[1], sys.argv[2].split(), sys.argv[3:]
+try:
+    config = json.load(open(path, encoding="utf-8"))
+except Exception as error:
+    print(f"error:{error}")
+    sys.exit(0)
+
+def label(model_id):
+    bare = model_id.split("/", 1)[-1]
+    pretty = bare.replace("-", " ").replace("_", " ")
+    pretty = " ".join(word.upper() if word.lower() in ("gpt",) else word.capitalize() for word in pretty.split())
+    return f"{pretty} \u00b7 9router"
+
 providers = config.setdefault("agents", {}).setdefault("providers", {})
-desired = {"extends": "acp", "label": "AgentLink",
-           "description": "Every 9router model and connected account in one chat", "command": [runtime]}
-removed = [k for k in legacy if providers.pop(k, None) is not None]
-changed = providers.get("agent-link") != desired or bool(removed)
-providers["agent-link"] = desired
-if not changed: print("unchanged"); sys.exit(0)
+wanted = {
+    "claude": [{"id": i, "label": label(i)} for i in ids if i.startswith("cc/")],
+    "codex": [{"id": i, "label": label(i)} for i in ids if i.startswith("cx/")],
+}
+changed = False
+for name, models in wanted.items():
+    entry = providers.setdefault(name, {})
+    if entry.get("additionalModels") != models:
+        entry["additionalModels"] = models
+        changed = True
+removed = [key for key in legacy if providers.pop(key, None) is not None]
+if removed:
+    changed = True
+if not changed:
+    print(f"unchanged {len(wanted['claude'])} {len(wanted['codex'])}")
+    sys.exit(0)
+
 shutil.copy2(path, f"{path}.bak-agent-link-{int(time.time())}")
 mode = os.stat(path).st_mode & 0o777
 fd, tmp = tempfile.mkstemp(prefix=".agent-link-config-", dir=os.path.dirname(path))
 try:
-    with os.fdopen(fd, "w", encoding="utf-8") as h: json.dump(config, h, indent=2); h.write("\n")
-    os.chmod(tmp, mode); os.replace(tmp, path)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(config, handle, indent=2)
+        handle.write("\n")
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
 finally:
-    if os.path.exists(tmp): os.unlink(tmp)
-print("changed " + " ".join(removed))
+    if os.path.exists(tmp):
+        os.unlink(tmp)
+print(f"changed {len(wanted['claude'])} {len(wanted['codex'])} " + " ".join(removed))
 PY
 )"
   case "$result" in
     error:*) echo "could not update Paseo config: ${result#error:}" >&2; return 1 ;;
-    unchanged) ok "Paseo provider AgentLink already configured" ;;
-    changed*) result="${result#changed}"; ok "Paseo provider AgentLink written${result:+ · removed legacy providers:$result}" ;;
+    unchanged*) set -- $result; ok "Paseo already lists $2 Claude and $3 Codex models" ;;
+    changed*) set -- $result; ok "listed $2 Claude and $3 Codex models in Paseo${4:+ · removed: ${*:4}}" ;;
   esac
+}
+
+# Point a CLI at 9router (or restore it) using 9router's own endpoint, so the
+# rewrite of ~/.claude/settings.json or ~/.codex/config.toml stays its job.
+route_cli() { # $1 claude|codex, $2 on|off
+  local cli="$1" mode="$2" url key body
+  url="$(r_url)"; key="$(r_key)"
+  [ -n "$key" ] || { bad "no API key — agent-link 9router key"; return 1; }
+  if [ "$mode" = off ]; then
+    curl -fsS -m 10 -X DELETE "$url/api/cli-tools/$cli-settings" >/dev/null 2>&1 \
+      && ok "$cli restored to its direct connection" || { bad "could not restore $cli"; return 1; }
+    return 0
+  fi
+  if [ "$cli" = claude ]; then
+    body="$(python3 -c 'import json,sys; print(json.dumps({"env": {"ANTHROPIC_BASE_URL": sys.argv[1], "ANTHROPIC_AUTH_TOKEN": sys.argv[2]}}))' "$url" "$key")"
+  else
+    body="$(python3 -c 'import json,sys; print(json.dumps({"baseUrl": sys.argv[1] + "/v1", "apiKey": sys.argv[2]}))' "$url" "$key")"
+  fi
+  curl -fsS -m 10 -X POST -H 'content-type: application/json' -d "$body" "$url/api/cli-tools/$cli-settings" >/dev/null 2>&1 \
+    && ok "$cli now runs through 9router" || { bad "could not route $cli"; return 1; }
 }
 
 remove_legacy_shims() {
@@ -235,15 +292,23 @@ remove_legacy_shims() {
 }
 
 cmd_auto() {
-  command -v node >/dev/null || die "node is required for the AgentLink ACP runtime"
-  [ -f "$SETTINGS" ] || warn "no $SETTINGS yet — run 'agent-link 9router key' (or Wire from the Paseo plugin) so the runtime can reach 9router"
-  install_runtime || die "could not install the ACP runtime"
-  write_paseo_provider || exit 1
+  [ -f "$SETTINGS" ] || warn "no $SETTINGS yet — run 'agent-link 9router key' first"
+  r_running || die "9router is not running at $(r_url) — agent-link 9router start"
+  sync_models || exit 1
   remove_legacy_shims
   if command -v paseo >/dev/null; then
-    paseo reload >/dev/null 2>&1 && ok "paseo reload done" || warn "paseo reload failed — restart the Paseo daemon to pick up the provider"
-  else warn "paseo CLI not found — restart Paseo to pick up the provider"; fi
-  echo; echo "  Start a chat with the AgentLink provider in Paseo and pick a model."
+    paseo reload >/dev/null 2>&1 && ok "paseo reload done" || warn "paseo reload failed — restart Paseo to pick up the models"
+  else warn "paseo CLI not found — restart Paseo to pick up the models"; fi
+  echo
+  echo "  Route a CLI through 9router with: agent-link route claude on"
+  echo "  Then pick a 9router model in any Paseo chat."
+}
+
+cmd_route() { # claude|codex on|off
+  case "${1:-}" in claude|codex) ;; *) die "usage: agent-link route claude|codex on|off" ;; esac
+  case "${2:-}" in on|off) ;; *) die "usage: agent-link route claude|codex on|off" ;; esac
+  r_running || die "9router is not running at $(r_url) — agent-link 9router start"
+  route_cli "$1" "$2"
 }
 
 # ---------------------------------------------------------------- status / doctor
@@ -251,8 +316,11 @@ cmd_auto() {
 cmd_status() {
   printf '  %sagent-link %s%s   %s%s%s\n' "$C_BOLD" "$VERSION" "$C_OFF" "$C_DIM" "$ROOT" "$C_OFF"
   router_status
-  [ -x "$RUNTIME" ] && ok "ACP runtime: $RUNTIME" || bad "ACP runtime missing — agent-link auto"
-  paseo_provider_installed && ok "Paseo provider: AgentLink → $RUNTIME" || bad "Paseo provider AgentLink not configured — agent-link auto"
+  local counts; counts="$(models_listed)"; set -- $counts
+  if [ "${1:-0}" != 0 ] || [ "${2:-0}" != 0 ]; then ok "Paseo lists $1 Claude and $2 Codex 9router models"
+  else bad "Paseo lists no 9router models — agent-link auto"; fi
+  cli_routed claude && ok "Claude Code routes through 9router" || warn "Claude Code is direct — agent-link route claude on"
+  cli_routed codex && ok "Codex routes through 9router" || warn "Codex is direct — agent-link route codex on"
   local l; l="$(legacy_providers_present)"; [ -n "$l" ] && warn "legacy Paseo providers still present: $l (agent-link auto removes them)"
   l="$(legacy_shims_present)"; [ -n "$l" ] && warn "legacy launchers in $BIN: $l (agent-link auto removes them)"
   return 0
@@ -260,7 +328,7 @@ cmd_status() {
 
 cmd_doctor() {
   local rc=0 t
-  for t in python3 curl node; do command -v "$t" >/dev/null && ok "$t: $(command -v "$t")" || { bad "$t not found (required)"; rc=1; }; done
+  for t in python3 curl; do command -v "$t" >/dev/null && ok "$t: $(command -v "$t")" || { bad "$t not found (required)"; rc=1; }; done
   command -v 9router >/dev/null && ok "9router: $(command -v 9router)" || { bad "9router not installed — npm i -g 9router"; rc=1; }
   command -v paseo >/dev/null && ok "paseo: $(command -v paseo)" || { warn "paseo CLI not found — the Paseo provider cannot be reloaded"; }
   for t in claude codex; do command -v "$t" >/dev/null && ok "$t: $(command -v "$t")" || warn "$t CLI not found — its 9router models will fail to start"; done
@@ -269,9 +337,10 @@ cmd_doctor() {
     [ -n "$(r_key)" ] || { warn "no apiKey in $SETTINGS — agent-link 9router key"; }
   else bad "$SETTINGS missing — agent-link 9router key"; rc=1; fi
   r_running && ok "9router answering at $(r_url)" || { bad "9router not running at $(r_url)"; rc=1; }
-  [ -x "$RUNTIME" ] && ok "ACP runtime installed" || { bad "ACP runtime missing — agent-link auto"; rc=1; }
-  paseo_provider_installed && ok "Paseo provider AgentLink configured" || { bad "Paseo provider not configured — agent-link auto"; rc=1; }
-  [ -n "${ANTHROPIC_API_KEY:-}${CLAUDE_CONFIG_DIR:-}" ] && warn "ANTHROPIC_API_KEY/CLAUDE_CONFIG_DIR are set in this shell; the runtime unsets them for its Claude children"
+  local counts; counts="$(models_listed)"; set -- $counts
+  if [ "${1:-0}" != 0 ] || [ "${2:-0}" != 0 ]; then ok "Paseo lists $1 Claude and $2 Codex 9router models"
+  else bad "Paseo lists no 9router models — agent-link auto"; rc=1; fi
+  [ -n "${ANTHROPIC_API_KEY:-}" ] && warn "ANTHROPIC_API_KEY is set in this shell; it overrides the 9router token for Claude Code"
   [ "$rc" = 0 ] && echo "  All good."
   return "$rc"
 }
@@ -368,13 +437,14 @@ usage() {
   cat <<EOF
 agent-link $VERSION — Paseo front-end for 9router      ($ROOT)
 
-  agent-link auto                       install the AgentLink ACP provider into Paseo (runtime,
-                                        provider entry, legacy cleanup, paseo reload)
+  agent-link auto                       list 9router's models on Paseo's claude/codex providers
+                                        (plus legacy cleanup and paseo reload)
+  agent-link route claude|codex on|off  send that CLI through 9router, or restore it
   agent-link status                     9router + Paseo wiring at a glance
   agent-link 9router start|stop|status  run the local 9router server (127.0.0.1:$(r_port))
   agent-link 9router key                reuse or mint a 9router API key into $SETTINGS
   agent-link app install|status|remove paseo [--link]
-                                        the AgentLink Paseo plugin (--link runs from this checkout)
+                                        the 9Router Agent Link Paseo plugin (--link uses this checkout)
   agent-link doctor                     check prerequisites and wiring
   agent-link --version
 
@@ -387,6 +457,7 @@ main() {
   case "${1:-}" in
     ""|status) cmd_status ;;
     auto)      cmd_auto ;;
+    route)     shift; cmd_route "$@" ;;
     9router)   shift; cmd_9router "$@" ;;
     app)       shift; cmd_app "$@" ;;
     doctor)    cmd_doctor ;;

@@ -328,7 +328,7 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
 
   return (
     <ScrollView style={{ flex: 1, backgroundColor: theme.colors.surface0 }} contentContainerStyle={{ padding: gap + 4 }}>
-      <Text style={{ color: theme.colors.foreground, fontSize: 18, fontWeight: "700", marginBottom: 4 }}>AgentLink</Text>
+      <Text style={{ color: theme.colors.foreground, fontSize: 18, fontWeight: "700", marginBottom: 4 }}>9Router Agent Link</Text>
       <Note theme={theme}>
         Your accounts, quotas and fallback live in 9router. This panel sets it up and points Paseo's Claude and Codex
         providers at it.
@@ -351,7 +351,40 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
           {data?.apiKey.present ? <Chip theme={theme} label={`key ···${data.apiKey.last4 ?? ""}`} /> : <Chip theme={theme} label="no api key" tone="warning" />}
           {data?.version?.hasUpdate ? <Chip theme={theme} label={`update ${data.version.latest}`} tone="warning" /> : null}
         </View>
-        {!data?.binary.path ? <Note theme={theme}>Install it first: npm i -g 9router</Note> : null}
+        {!data?.binary.path ? (
+          <View style={{ gap: 6, padding: 10, borderRadius: 8, backgroundColor: theme.colors.surface2 }}>
+            <Text style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "600" }}>Install 9router first</Text>
+            <Note theme={theme}>
+              1. In a terminal, run:{"\n"}
+              {"   npm install -g 9router"}
+              {"\n"}2. Start it here with the button below (or run 9router yourself).
+              {"\n"}3. The dashboard opens at {data?.url ?? "http://localhost:20128"}/dashboard — its first-run
+              password is 123456. Change it there, then save the new one under Settings.
+            </Note>
+            <View style={{ flexDirection: "row", gap: 8 }}>
+              <Button
+                theme={theme}
+                label="Copy install command"
+                onPress={() => {
+                  Clipboard.setString("npm install -g 9router");
+                  setMessage("Copied: npm install -g 9router");
+                }}
+              />
+            </View>
+          </View>
+        ) : null}
+        {data?.binary.path && !data.running ? (
+          <Note theme={theme}>
+            Not running yet. Start it below, or run 9router in a terminal — it serves the dashboard and an
+            OpenAI-compatible API at {data.url}/v1.
+          </Note>
+        ) : null}
+        {data?.running && !data.auth.configured ? (
+          <Note theme={theme} tone="warning">
+            No dashboard password saved yet. 9router's first-run password is 123456 — put it in Settings so this panel
+            can read your accounts and quotas.
+          </Note>
+        ) : null}
         {data?.auth.error ? <Note theme={theme} tone="warning">{data.auth.error}</Note> : null}
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
           {!data?.running ? (
@@ -362,8 +395,21 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
             label="Open dashboard"
             onPress={() => {
               const target = data?.dashboardUrl ?? "";
-              Clipboard.setString(target);
-              setMessage(`Dashboard URL copied. Open a Paseo browser tab (⌘⇧B) and paste it — ${target}`);
+              // Plugin surfaces cannot open a Paseo browser tab — the SDK has no
+              // browser namespace — so hand the URL to the system browser and
+              // keep the clipboard as the fallback.
+              void Linking.openURL(target).catch(() => {
+                Clipboard.setString(target);
+                setMessage(`Copied ${target} — paste it into a Paseo browser tab (⌘⇧B).`);
+              });
+            }}
+          />
+          <Button
+            theme={theme}
+            label="Copy dashboard URL"
+            onPress={() => {
+              Clipboard.setString(data?.dashboardUrl ?? "");
+              setMessage("Dashboard URL copied. A Paseo browser tab is ⌘⇧B.");
             }}
           />
           <Button theme={theme} label={showSettings ? "Hide settings" : "Settings"} onPress={() => setShowSettings((open) => !open)} />
@@ -527,8 +573,9 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
       <Card theme={theme}>
         <Step theme={theme} index={4} title="Models in Paseo" hint={`${data?.models.count ?? 0} available`} />
         <Note theme={theme}>
-          Lists 9router's models on Paseo's own Claude and Codex providers, so they appear in the model picker of a
-          normal chat.
+          Lists 9router's Claude (cc/) and Codex (cx/) models on Paseo's own providers, so they appear in the model
+          picker of a normal chat. Models from other pools stay in 9router — reach them through a combo or an alias
+          rather than crowding the picker.
         </Note>
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
           <Chip

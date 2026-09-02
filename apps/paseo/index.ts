@@ -47,10 +47,10 @@ export default function contribute(plugin: PluginContext) {
   plugin.handle(routerAliasRemove, handleRouterAliasRemove);
 
   plugin.addSurface("agent-link", AgentLinkSurface);
-  plugin.addSidebarItem({ id: "agent-link", title: "AgentLink", icon: "Users", surface: "agent-link" });
+  plugin.addSidebarItem({ id: "agent-link", title: "9Router", icon: "Users", surface: "agent-link" });
   plugin.addCommandCenterItem({
     id: "open-agent-link",
-    title: "Open AgentLink (9router accounts, quotas & models)",
+    title: "Open 9Router Agent Link (accounts, quotas & models)",
     icon: "Users",
     keywords: ["9router", "accounts", "quota", "models", "router", "agent-link"],
     context: "global",
