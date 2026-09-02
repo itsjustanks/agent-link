@@ -32,6 +32,10 @@ import {
   routerComboSave,
   routerComboDelete,
   routerPasswordChange,
+  routerPowerUps,
+  routerPowerUpApply,
+  routerSyncSelection,
+  routerSyncSelectionSet,
 } from "./contracts.shared";
 import { cliForModel, formatReset, groupModelIds, parseOauthPaste, providerLabel, quotaTone } from "./router.logic";
 
@@ -221,6 +225,7 @@ const TABS = [
   { id: "models", label: "Models" },
   { id: "keys", label: "Keys" },
   { id: "tuning", label: "Tuning" },
+  { id: "powerups", label: "Power-ups" },
   { id: "usage", label: "Usage" },
   { id: "logs", label: "Logs" },
 ] as const;
@@ -348,6 +353,10 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
   const callComboSave = useRpc(routerComboSave);
   const callComboDelete = useRpc(routerComboDelete);
   const callPasswordChange = useRpc(routerPasswordChange);
+  const callPowerUps = useRpc(routerPowerUps);
+  const callPowerUpApply = useRpc(routerPowerUpApply);
+  const callSyncSelection = useRpc(routerSyncSelection);
+  const callSyncSelectionSet = useRpc(routerSyncSelectionSet);
 
   const status = useQuery({
     queryKey: ["agent-link", "router-status"],
@@ -412,6 +421,16 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
     queryFn: () => callCombos({}),
     enabled: live && (tab === "keys" || tab === "models"),
   });
+  const powerUps = useQuery({
+    queryKey: ["agent-link", "power-ups"],
+    queryFn: () => callPowerUps({}),
+    enabled: tab === "powerups",
+  });
+  const syncSelection = useQuery({
+    queryKey: ["agent-link", "sync-selection"],
+    queryFn: () => callSyncSelection({}),
+    enabled: tab === "models",
+  });
   const holds = useQuery({
     queryKey: ["agent-link", "holds"],
     queryFn: () => callHolds({}),
@@ -445,6 +464,8 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
   const comboSaveMutation = useMutation({ mutationFn: callComboSave, ...feedback });
   const comboDeleteMutation = useMutation({ mutationFn: callComboDelete, ...feedback });
   const passwordMutation = useMutation({ mutationFn: callPasswordChange, ...feedback });
+  const powerUpMutation = useMutation({ mutationFn: callPowerUpApply, ...feedback });
+  const selectionMutation = useMutation({ mutationFn: callSyncSelectionSet, ...feedback });
   const keyRevealMutation = useMutation({
     mutationFn: callKeyReveal,
     onSuccess: (result) => {
@@ -535,6 +556,13 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
     list.push(connection);
     byProvider.set(connection.provider, list);
   }
+
+  const openLink = (target: string) => {
+    void Linking.openURL(target).catch(() => {
+      Clipboard.setString(target);
+      setMessage(`Copied ${target}`);
+    });
+  };
 
   const openDashboard = () => {
     const target = data?.dashboardUrl ?? "";
@@ -871,6 +899,41 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
             {(data?.paseo.staleProviders.length ?? 0) > 0 ? (
               <Note theme={theme} tone="warning">Old provider entries still present: {data?.paseo.staleProviders.join(", ")} — Sync removes them.</Note>
             ) : null}
+            <Note theme={theme}>
+              {(syncSelection.data?.selected.length ?? 0) === 0
+                ? "Syncing every Claude and Codex model. Tap below to choose a shorter list instead."
+                : `Syncing ${syncSelection.data?.selected.length} chosen model(s).`}
+            </Note>
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+              {(data?.models.ids ?? [])
+                .filter((id) => cliForModel(id) !== "other")
+                .map((id) => {
+                  const chosen = syncSelection.data?.selected.includes(id) ?? false;
+                  return (
+                    <Pressable
+                      key={id}
+                      onPress={() => {
+                        const current = syncSelection.data?.selected ?? [];
+                        const next = chosen ? current.filter((entry) => entry !== id) : [...current, id];
+                        selectionMutation.mutate({ selected: next });
+                      }}
+                      style={{
+                        paddingHorizontal: 8,
+                        paddingVertical: 4,
+                        borderRadius: 999,
+                        borderWidth: 1,
+                        borderColor: chosen ? theme.colors.accent : theme.colors.border,
+                        backgroundColor: chosen ? theme.colors.accent : "transparent",
+                      }}
+                    >
+                      <Text style={{ color: chosen ? theme.colors.accentForeground : theme.colors.foregroundMuted, fontSize: 11 }}>{id}</Text>
+                    </Pressable>
+                  );
+                })}
+            </View>
+            {(syncSelection.data?.selected.length ?? 0) > 0 ? (
+              <Button theme={theme} label="Sync everything instead" onPress={() => selectionMutation.mutate({ selected: [] })} />
+            ) : null}
           </Card>
 
           <Card theme={theme}>
@@ -1122,6 +1185,12 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
               These rewrite what reaches the model, so they trade fidelity for tokens. 9router applies them to every
               request it routes — including this chat, once a CLI is routed.
             </Note>
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+              <Button theme={theme} label="RTK" onPress={() => openLink("https://github.com/rtk-ai/rtk")} />
+              <Button theme={theme} label="Caveman" onPress={() => openLink("https://github.com/JuliusBrussee/caveman")} />
+              <Button theme={theme} label="Ponytail" onPress={() => openLink("https://github.com/DietrichGebert/ponytail")} />
+              <Button theme={theme} label="Token savers in the dashboard" onPress={() => openLink(`${data?.url ?? ""}/dashboard/token-saver`)} />
+            </View>
             {!live ? <Note theme={theme} tone="warning">Finish Setup first.</Note> : null}
             {tuning.isLoading ? <ActivityIndicator color={theme.colors.accent} /> : null}
             {tuning.data ? (
@@ -1129,7 +1198,7 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
                 <Toggle
                   theme={theme}
                   label="RTK"
-                  hint="Compresses tool output (git diff, grep, build logs) before it is sent. Usually the cheapest win."
+                  hint="Compresses tool output (git diff, grep, build logs) before it is sent. Usually the cheapest win. — github.com/rtk-ai/rtk"
                   on={tuning.data.rtkEnabled}
                   busy={tuningMutation.isPending}
                   disabled={!live}
@@ -1138,7 +1207,7 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
                 <Toggle
                   theme={theme}
                   label={`Caveman (${tuning.data.cavemanLevel})`}
-                  hint="Rewrites the system prompt in terse english. Saves a lot, and changes how the model writes."
+                  hint="Rewrites the system prompt in terse english. Saves a lot, and changes how the model writes. — github.com/JuliusBrussee/caveman"
                   on={tuning.data.cavemanEnabled}
                   busy={tuningMutation.isPending}
                   disabled={!live}
@@ -1161,7 +1230,7 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
                 <Toggle
                   theme={theme}
                   label={`Ponytail (${tuning.data.ponytailLevel})`}
-                  hint="Injects a YAGNI-first coding style so replies stay short."
+                  hint="Injects a YAGNI-first coding style so replies stay short. — github.com/DietrichGebert/ponytail"
                   on={tuning.data.ponytailEnabled}
                   busy={tuningMutation.isPending}
                   disabled={!live}
@@ -1251,6 +1320,51 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
                 setMessage("Console copied.");
               }}
             />
+          </View>
+        </Card>
+      ) : null}
+
+
+      {/* ---------------------------------------------------------- POWER-UPS */}
+      {tab === "powerups" ? (
+        <Card theme={theme}>
+          <Step theme={theme} index={0} title="Power-ups" />
+          <Note theme={theme}>
+            These change software this plugin does not own. Each one is reversible here and re-checked from disk every
+            time this tab opens, because a package upgrade silently undoes them.
+          </Note>
+          {powerUps.isLoading ? <ActivityIndicator color={theme.colors.accent} /> : null}
+          {(powerUps.data?.powerUps ?? []).map((entry) => (
+            <View
+              key={entry.id}
+              style={{ borderColor: theme.colors.border, borderWidth: 1, borderRadius: 8, padding: 10, gap: 6, backgroundColor: theme.colors.surface0 }}
+            >
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <Text style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "600", flex: 1 }}>{entry.title}</Text>
+                {entry.action === "toggle" ? (
+                  <Chip theme={theme} label={entry.applied ? "applied" : "not applied"} tone={entry.applied ? "success" : "neutral"} />
+                ) : null}
+                <Button
+                  theme={theme}
+                  label={entry.action === "run" ? "Run" : entry.applied ? "Revert" : "Apply"}
+                  tone={entry.action === "run" || !entry.applied ? "primary" : "default"}
+                  disabled={!entry.available}
+                  busy={powerUpMutation.isPending && powerUpMutation.variables?.id === entry.id}
+                  onPress={() => powerUpMutation.mutate({ id: entry.id, apply: !entry.applied })}
+                />
+              </View>
+              <Note theme={theme}>{entry.detail}</Note>
+              <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>{entry.status}</Text>
+              <Note theme={theme} tone="warning">{entry.caution}</Note>
+            </View>
+          ))}
+          <Note theme={theme}>
+            Background on the version gate: platform.claude.com/docs/en/models/fable-5-1/migration-guide and
+            github.com/decolua/9router/issues/3711
+          </Note>
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+            <Button theme={theme} label="Migration guide" onPress={() => openLink("https://platform.claude.com/docs/en/models/fable-5-1/migration-guide")} />
+            <Button theme={theme} label="9router issue 3711" onPress={() => openLink("https://github.com/decolua/9router/issues/3711")} />
           </View>
         </Card>
       ) : null}

@@ -168,9 +168,9 @@ except Exception: print("0 0"); sys.exit(0)
 providers = config.get("providers") or config.get("agents", {}).get("providers", {})
 def count(name):
     entry = providers.get(name) or {}
-    models = entry.get("additionalModels") or []
+    models = entry.get("models") or entry.get("additionalModels") or []
     return sum(1 for m in models if isinstance(m, dict) and str(m.get("id", "")).startswith(("cc/", "cx/")))
-print(f"{count('claude')} {count('codex')}")
+print(f"{count('ninerouter')} {count('ninerouter-codex')}")
 PY
 }
 # Does 9router currently own this CLI's config? 9router answers for itself.
@@ -209,9 +209,9 @@ except Exception: print("")')"
   [ -n "$ids" ] || { bad "9router returned no models — is it running and signed in?"; return 1; }
 
   local result
-  result="$(python3 - "$PASEO_CONFIG" "$ids" $LEGACY_PROVIDERS <<'PY'
+  result="$(python3 - "$PASEO_CONFIG" "$ids" "$(r_url)" "$(r_key)" $LEGACY_PROVIDERS <<'PY'
 import json, os, shutil, sys, tempfile, time
-path, ids, legacy = sys.argv[1], sys.argv[2].split(), sys.argv[3:]
+path, ids, url, key, legacy = sys.argv[1], sys.argv[2].split(), sys.argv[3], sys.argv[4], sys.argv[5:]
 try:
     config = json.load(open(path, encoding="utf-8"))
 except Exception as error:
@@ -219,30 +219,43 @@ except Exception as error:
     sys.exit(0)
 
 def label(model_id):
-    bare = model_id.split("/", 1)[-1]
-    pretty = bare.replace("-", " ").replace("_", " ")
-    pretty = " ".join(word.upper() if word.lower() in ("gpt",) else word.capitalize() for word in pretty.split())
-    return f"{pretty} \u00b7 9router"
+    bare = model_id.split("/", 1)[-1].replace("-", " ").replace("_", " ")
+    pretty = " ".join(word.upper() if word.lower() == "gpt" else word.capitalize() for word in bare.split())
+    return "9Router \u00b7 " + pretty
 
 providers = config.setdefault("agents", {}).setdefault("providers", {})
-wanted = {
-    "claude": [{"id": i, "label": label(i)} for i in ids if i.startswith("cc/")],
-    "codex": [{"id": i, "label": label(i)} for i in ids if i.startswith("cx/")],
-}
+cc = [{"id": i, "label": label(i)} for i in ids if i.startswith("cc/")]
+cx = [{"id": i, "label": label(i)} for i in ids if i.startswith("cx/")]
+# Paseo rejects a provider id that starts with a digit, so "9router" cannot be
+# one; the label carries the branding instead.
+desired = {}
+if cc:
+    desired["ninerouter"] = {"extends": "claude", "label": "9Router",
+                             "description": "Claude models routed through your local 9router",
+                             "env": {"ANTHROPIC_BASE_URL": url, "ANTHROPIC_AUTH_TOKEN": key},
+                             "models": cc}
+if cx:
+    desired["ninerouter-codex"] = {"extends": "codex", "label": "9Router \u00b7 Codex",
+                                   "description": "Codex models routed through your local 9router",
+                                   "env": {"OPENAI_BASE_URL": url + "/v1", "OPENAI_API_KEY": key},
+                                   "models": cx}
 changed = False
-for name, models in wanted.items():
-    entry = providers.setdefault(name, {})
-    if entry.get("additionalModels") != models:
-        entry["additionalModels"] = models
+for pid, value in desired.items():
+    if providers.get(pid) != value:
+        providers[pid] = value
         changed = True
-removed = [key for key in legacy if providers.pop(key, None) is not None]
+for stock in ("claude", "codex"):
+    entry = providers.get(stock)
+    if isinstance(entry, dict) and entry.get("additionalModels"):
+        entry["additionalModels"] = []
+        changed = True
+removed = [k for k in legacy if providers.pop(k, None) is not None]
 if removed:
     changed = True
 if not changed:
-    print(f"unchanged {len(wanted['claude'])} {len(wanted['codex'])}")
+    print("unchanged " + str(len(cc)) + " " + str(len(cx)))
     sys.exit(0)
-
-shutil.copy2(path, f"{path}.bak-agent-link-{int(time.time())}")
+shutil.copy2(path, path + ".bak-agent-link-" + str(int(time.time())))
 mode = os.stat(path).st_mode & 0o777
 fd, tmp = tempfile.mkstemp(prefix=".agent-link-config-", dir=os.path.dirname(path))
 try:
@@ -254,7 +267,7 @@ try:
 finally:
     if os.path.exists(tmp):
         os.unlink(tmp)
-print(f"changed {len(wanted['claude'])} {len(wanted['codex'])} " + " ".join(removed))
+print("changed " + str(len(cc)) + " " + str(len(cx)) + " " + " ".join(removed))
 PY
 )"
   case "$result" in

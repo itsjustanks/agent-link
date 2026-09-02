@@ -11,6 +11,7 @@ import {
   normalizeUsage,
   sameModelSet,
 } from "./router.logic";
+import { applyPowerUp, listPowerUps } from "./powerups.server";
 import {
   DEFAULT_ROUTER_PASSWORD,
   ROOT,
@@ -27,7 +28,17 @@ import {
 
 const HOME = homedir();
 
-type ProviderEntry = { additionalModels?: Array<{ id?: unknown; label?: unknown }> } & Record<string, unknown>;
+/**
+ * Paseo requires provider IDs to match /^[a-z][a-z0-9-]*$/, so "9router" is
+ * rejected outright — a leading digit makes the whole config invalid and takes
+ * the CLI down with it. The label carries the branding instead.
+ */
+const CLAUDE_PROVIDER_ID = "ninerouter";
+const CODEX_PROVIDER_ID = "ninerouter-codex";
+
+
+type ProviderModel = { id?: unknown; label?: unknown };
+type ProviderEntry = { models?: ProviderModel[]; additionalModels?: ProviderModel[] } & Record<string, unknown>;
 type ProviderOverrides = Record<string, ProviderEntry | undefined>;
 
 /**
@@ -43,8 +54,9 @@ async function providerOverrides(paseo: PluginHandlerContext["paseo"]): Promise<
 
 function listedModels(overrides: ProviderOverrides, provider: string): string[] {
   const entry = overrides[provider];
-  if (!entry || !Array.isArray(entry.additionalModels)) return [];
-  return entry.additionalModels.map((model) => model?.id).filter((id): id is string => typeof id === "string");
+  const list = entry?.models ?? entry?.additionalModels;
+  if (!Array.isArray(list)) return [];
+  return list.map((model) => model?.id).filter((id): id is string => typeof id === "string");
 }
 
 async function refreshProviders(paseo: PluginHandlerContext["paseo"], providers: string[]): Promise<void> {
@@ -206,8 +218,8 @@ export async function handleRouterStatus(_input: unknown, { paseo }: PluginHandl
   const running = await client.health();
 
   const overrides = await providerOverrides(paseo);
-  const paseoClaude = listedModels(overrides, "claude");
-  const paseoCodex = listedModels(overrides, "codex");
+  const paseoClaude = listedModels(overrides, CLAUDE_PROVIDER_ID);
+  const paseoCodex = listedModels(overrides, CODEX_PROVIDER_ID);
   const staleProviders = DEAD_PROVIDER_IDS.filter((id) => overrides[id] !== undefined);
   const staleShims = listStaleShims(isLegacyShim);
 
@@ -442,10 +454,34 @@ async function clearOrphanClaudeDefaults(): Promise<void> {
 
 // ------------------------------------------------------------ Paseo wiring
 
+/**
+ * Create a dedicated "9Router" provider rather than editing Paseo's stock
+ * Claude and Codex entries.
+ *
+ * A derived provider (`extends: "claude"` plus an `env` block) is a first-class
+ * Paseo provider: it appears in the provider menu under its own name and owns
+ * its whole model list. That is the honest shape here — these models come from
+ * 9router, not from the Claude sign-in Paseo manages — and it leaves the stock
+ * providers untouched for anyone who wants a direct connection alongside.
+ *
+ * Codex speaks a different wire protocol, so it gets its own entry.
+ */
 export async function handleRouterSyncModels(_input: unknown, { paseo }: PluginHandlerContext) {
-  const client = new RouterClient();
+  const settings = readSettings();
+  const client = new RouterClient(settings);
   if (!(await client.health())) {
     return { ok: false, claude: 0, codex: 0, removedProviders: [], removedShims: [], message: "9router is not running." };
+  }
+  const key = settings.apiKey ?? (await client.ensureApiKey());
+  if (!key) {
+    return {
+      ok: false,
+      claude: 0,
+      codex: 0,
+      removedProviders: [],
+      removedShims: [],
+      message: client.authError ?? "No API key available — save the dashboard password first.",
+    };
   }
   const ids = await client.models();
   if (ids.length === 0) {
@@ -459,27 +495,64 @@ export async function handleRouterSyncModels(_input: unknown, { paseo }: PluginH
     };
   }
 
-  const forClaude = ids.filter((id) => cliForModel(id) === "claude").map((id) => ({ id, label: modelLabel(id) }));
-  const forCodex = ids.filter((id) => cliForModel(id) === "codex").map((id) => ({ id, label: modelLabel(id) }));
+  // An explicit selection wins; an empty one means every native-pool model.
+  const chosen = new Set(settings.syncSelection);
+  const wanted = (id: string) => chosen.size === 0 || chosen.has(id);
+  const forClaude = ids
+    .filter((id) => cliForModel(id) === "claude" && wanted(id))
+    .map((id) => ({ id, label: modelLabel(id) }));
+  const forCodex = ids
+    .filter((id) => cliForModel(id) === "codex" && wanted(id))
+    .map((id) => ({ id, label: modelLabel(id) }));
 
   const overrides = await providerOverrides(paseo);
   const removedProviders = DEAD_PROVIDER_IDS.filter((id) => overrides[id] !== undefined);
-  const patch: Record<string, unknown> = {
-    claude: { additionalModels: forClaude },
-    codex: { additionalModels: forCodex },
-  };
-  // Paseo removes a provider when its entry is patched to null.
+  const patch: Record<string, unknown> = {};
+
+  if (forClaude.length > 0) {
+    patch[CLAUDE_PROVIDER_ID] = {
+      extends: "claude",
+      label: "9Router",
+      description: "Claude models routed through your local 9router",
+      env: { ANTHROPIC_BASE_URL: settings.url, ANTHROPIC_AUTH_TOKEN: key },
+      models: forClaude,
+    };
+  }
+  if (forCodex.length > 0) {
+    patch[CODEX_PROVIDER_ID] = {
+      extends: "codex",
+      label: "9Router · Codex",
+      description: "Codex models routed through your local 9router",
+      env: { OPENAI_BASE_URL: `${settings.url}/v1`, OPENAI_API_KEY: key },
+      models: forCodex,
+    };
+  }
+  // Earlier builds wrote these onto Paseo's own providers; undo that so the
+  // stock entries go back to being a plain direct connection.
+  for (const stock of ["claude", "codex"]) {
+    if (Array.isArray((overrides[stock] as { additionalModels?: unknown } | undefined)?.additionalModels)) {
+      patch[stock] = { additionalModels: [] };
+    }
+  }
   for (const id of removedProviders) patch[id] = null;
+
   await paseo.config.patch({ agents: { providers: patch } } as never);
-  await refreshProviders(paseo, ["claude", "codex"]);
+  await refreshProviders(paseo, [CLAUDE_PROVIDER_ID, CODEX_PROVIDER_ID]);
 
   const removedShims = listStaleShims(isLegacyShim);
   for (const name of removedShims) removeShim(name);
 
-  const notes = [`Listed ${forClaude.length} Claude and ${forCodex.length} Codex models in Paseo.`];
+  const notes = [`9Router provider now offers ${forClaude.length} Claude and ${forCodex.length} Codex model(s).`];
   if (removedProviders.length > 0) notes.push(`Removed ${removedProviders.join(", ")}.`);
   if (removedShims.length > 0) notes.push(`Retired ${removedShims.length} old shim(s).`);
-  return { ok: true, claude: forClaude.length, codex: forCodex.length, removedProviders, removedShims, message: notes.join(" ") };
+  return {
+    ok: true,
+    claude: forClaude.length,
+    codex: forCodex.length,
+    removedProviders,
+    removedShims,
+    message: notes.join(" "),
+  };
 }
 
 // ------------------------------------------------------------------- OAuth
@@ -891,4 +964,34 @@ export async function handleRouterPasswordChange({
   }
   writeSettings({ password: newPassword });
   return { ok: true, message: "Password changed and saved." };
+}
+
+// ---------------------------------------------------- power-ups & selection
+
+export async function handleRouterPowerUps() {
+  return { powerUps: await listPowerUps() };
+}
+
+export async function handleRouterPowerUpApply({ id, apply }: { id: string; apply: boolean }) {
+  return applyPowerUp(id, apply);
+}
+
+/**
+ * Which models Sync writes into Paseo. Stored beside the router settings so it
+ * survives a reload; empty means "every cc/ and cx/ model", which is what
+ * anyone gets before they touch this.
+ */
+export async function handleRouterSyncSelection() {
+  return { selected: readSettings().syncSelection };
+}
+
+export async function handleRouterSyncSelectionSet({ selected }: { selected: string[] }) {
+  writeSettings({ syncSelection: selected });
+  return {
+    ok: true,
+    message:
+      selected.length === 0
+        ? "Sync will list every Claude and Codex model."
+        : `Sync will list ${selected.length} model(s).`,
+  };
 }

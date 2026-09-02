@@ -22,7 +22,13 @@ export const ROOT = (() => {
 
 export const SETTINGS_PATH = join(ROOT, "9router.json");
 
-export type RouterSettings = { url: string; apiKey: string | null; password: string | null };
+export type RouterSettings = {
+  url: string;
+  apiKey: string | null;
+  password: string | null;
+  /** Model ids Sync writes to Paseo; empty means every cc/ and cx/ model. */
+  syncSelection: string[];
+};
 
 const DEFAULT_URL = "http://127.0.0.1:20128";
 
@@ -44,6 +50,9 @@ export function readSettings(): RouterSettings {
     url: (process.env.AGENT_LINK_9ROUTER_URL ?? str(saved.url) ?? DEFAULT_URL).replace(/\/+$/, ""),
     apiKey: process.env.AGENT_LINK_9ROUTER_KEY ?? str(saved.apiKey),
     password: str(saved.password),
+    syncSelection: Array.isArray(saved.syncSelection)
+      ? saved.syncSelection.filter((entry): entry is string => typeof entry === "string")
+      : [],
   };
 }
 
@@ -256,7 +265,7 @@ export async function startRouter(url: string): Promise<{ ok: boolean; message: 
     stdio: "ignore",
   });
   child.unref();
-  const client = new RouterClient({ url, apiKey: null, password: null });
+  const client = new RouterClient({ url, apiKey: null, password: null, syncSelection: [] });
   for (let attempt = 0; attempt < 40; attempt += 1) {
     if (await client.health()) return { ok: true, message: `9router is running at ${url}` };
     await new Promise((resolve) => setTimeout(resolve, 500));
@@ -270,7 +279,7 @@ export async function startRouter(url: string): Promise<{ ok: boolean; message: 
  * a tray-launched instance is not always this process's child.
  */
 export async function stopRouter(url: string): Promise<{ ok: boolean; message: string }> {
-  const client = new RouterClient({ url, apiKey: null, password: readSettings().password });
+  const client = new RouterClient({ url, apiKey: null, password: readSettings().password, syncSelection: [] });
   if (!(await client.health())) return { ok: true, message: "9router was not running." };
   await client.api("shutdown", { method: "POST" }).catch(() => null);
   for (let attempt = 0; attempt < 20; attempt += 1) {

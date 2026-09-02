@@ -391,3 +391,46 @@ export const routerPasswordChange = defineRpc({
   input: z.object({ currentPassword: z.string(), newPassword: z.string() }),
   output: z.object({ ok: z.boolean(), message: z.string() }),
 });
+
+// ----------------------------------------------------------------- power-ups
+
+/**
+ * A local modification to an installed package. These patch someone else's
+ * files: reversible, re-checked on every read, and wiped by that package's
+ * next upgrade — the panel says so rather than pretending otherwise.
+ */
+export const PowerUpSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  detail: z.string(),
+  applied: z.boolean(),
+  available: z.boolean(),
+  status: z.string(),
+  caution: z.string(),
+  action: z.enum(["toggle", "run"]),
+});
+
+export const routerPowerUps = defineRpc({
+  name: "agent-link.router.power-ups",
+  input: z.object({}),
+  output: z.object({ powerUps: z.array(PowerUpSchema) }),
+});
+
+export const routerPowerUpApply = defineRpc({
+  name: "agent-link.router.power-up.apply",
+  input: z.object({ id: z.string(), apply: z.boolean() }),
+  output: z.object({ ok: z.boolean(), message: z.string(), restartRequired: z.boolean() }),
+});
+
+/** Which models Sync writes to Paseo. Empty means every cc/ and cx/ model. */
+export const routerSyncSelection = defineRpc({
+  name: "agent-link.router.sync-selection",
+  input: z.object({}),
+  output: z.object({ selected: z.array(z.string()) }),
+});
+
+export const routerSyncSelectionSet = defineRpc({
+  name: "agent-link.router.sync-selection.set",
+  input: z.object({ selected: z.array(z.string()) }),
+  output: z.object({ ok: z.boolean(), message: z.string() }),
+});
