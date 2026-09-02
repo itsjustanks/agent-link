@@ -41,6 +41,32 @@ chmod +x ~/.local/bin/agent-link
 agent-link doctor
 ```
 
+## The panel
+
+<div align="center">
+  <img src="docs/screenshots/setup.png" alt="Setup tab: a five-step checklist, server controls, dashboard password, and per-CLI routing" width="900"/>
+</div>
+
+**Setup** is the checklist and the wizard at once — install, start, save the password, connect an account, route a CLI — with Restart and Stop beside Start, and the dashboard password prefilled with 9router's shipped default.
+
+<div align="center">
+  <img src="docs/screenshots/accounts.png" alt="Accounts tab: parked accounts with the error that parked them, and connected accounts with quota bars" width="900"/>
+</div>
+
+**Accounts** shows each connection's quota windows and when they reset, and surfaces any account 9router has parked along with the error responsible — a hold outlives its cause, so clearing it is a button rather than a wait.
+
+<div align="center">
+  <img src="docs/screenshots/models.png" alt="Models tab: one 9Router provider carrying 249 models, with per-model test buttons" width="900"/>
+</div>
+
+**Models** writes a single 9Router provider carrying every model 9router serves, and can test any one of them with a real completion.
+
+<div align="center">
+  <img src="docs/screenshots/tuning.png" alt="Tuning tab: RTK, Caveman, Ponytail and Headroom switches with links to each upstream project" width="900"/>
+</div>
+
+**Tuning** switches the token savers, each linked to the project it came from, and shows how 9router picks among the accounts in a pool.
+
 ## How the routing actually works
 
 There is no custom provider or ACP runtime. 9router edits the CLIs themselves:
@@ -86,14 +112,16 @@ alias: cc     id: claude-fable-5-1     name: Claude Fable 5.1
 
 An alias maps a plain model name onto a 9router model, so a tool that asks for `claude-opus-5` reaches the `cc/` pool. With one of these, Paseo's stock picker entries route through 9router without listing anything.
 
-## The panel
+### Every tab
 
 | Tab | What it holds |
 | --- | --- |
-| **Setup** | checklist, install command, start button, dashboard password, per-CLI routing |
+| **Setup** | checklist, install command, server controls, dashboard password, per-CLI routing |
 | **Accounts** | connections with quota bars, OAuth sign-in, parked accounts and how to revive them |
-| **Models** | sync into Paseo, live reachability test, expose a model, aliases, combos |
+| **Models** | one 9Router provider, live reachability test, expose a model, aliases, combos |
+| **Keys** | API keys and combos, full CRUD |
 | **Tuning** | RTK, Caveman, Ponytail, Headroom; combo strategy and sticky round-robin |
+| **Power-ups** | match 9router's client version to yours; update Claude Code |
 | **Usage** | requests, tokens and equivalent API cost, by provider and by model |
 | **Logs** | 9router's console, tailed every 4s |
 

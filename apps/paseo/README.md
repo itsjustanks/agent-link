@@ -38,6 +38,10 @@ Then open **9Router** in the sidebar.
 
 **Models** writes one **9Router** provider holding every model 9router serves, tests any id with a real completion, exposes a model 9router's catalogue lacks, and manages aliases and combos. Paseo's stock Claude and Codex providers keep their matching models too, so an existing chat pinned to one keeps working.
 
+**Keys** manages API keys and combos. A key is listed by name and its last four characters; the full value only ever travels from "Copy key" to the clipboard. Combos are built by tapping models in fallback order.
+
+**Power-ups** matches 9router's hardcoded `claude-cli/<version>` to the one you actually have — which is what unblocks a model Anthropic gates behind a newer client — and can run `claude update` first. Reversible, backed up beside the file it edits, and re-read from disk because a package upgrade silently reverts it.
+
 **Tuning** switches 9router's token savers — RTK (compresses tool output), Caveman (terser system prompt, lite or full), Ponytail (YAGNI coding style), Headroom (external context compression) — and shows the combo strategy and sticky round-robin limit.
 
 **Usage** reports requests, prompt/cached/completion tokens and the equivalent API cost, broken down by provider and by model.
@@ -73,7 +77,7 @@ Restoring Claude also clears any `ANTHROPIC_DEFAULT_*` value still pointing at a
 
 **A model 400s with a version message.** 9router sends its own hardcoded Claude Code version, not yours. A model gated behind a newer client fails until 9router bumps it.
 
-**Nothing appears in the picker after Sync.** Check `paseo plugin logs agent-link`, then reload Paseo. Sync writes `additionalModels` on the native providers and refreshes them; it never restarts the daemon.
+**Nothing appears in the picker after Sync.** Check `paseo plugin logs agent-link`, then reload Paseo. Sync writes a `ninerouter` provider and refreshes it; it never restarts the daemon.
 
 ## License
 
