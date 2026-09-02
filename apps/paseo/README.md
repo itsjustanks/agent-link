@@ -17,7 +17,7 @@ Requires 9router (`npm install -g 9router`). Without it the panel shows an insta
 ## Install
 
 ```sh
-paseo plugin add itsjustanks/paseo-agent-link --path apps/paseo --id agent-link
+paseo plugin add itsjustanks/paseo-plugin-9router --path apps/paseo --id agent-link
 paseo plugin reload agent-link
 ```
 

@@ -1,10 +1,10 @@
 <div align="center">
 
-# paseo-agent-link
+# paseo-plugin-9router
 
 **9router's accounts, quotas and models, wired into Paseo.**
 
-[![Release](https://img.shields.io/github/v/release/itsjustanks/paseo-agent-link)](https://github.com/itsjustanks/paseo-agent-link/releases/latest)
+[![Release](https://img.shields.io/github/v/release/itsjustanks/paseo-plugin-9router)](https://github.com/itsjustanks/paseo-plugin-9router/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 ![Platform](https://img.shields.io/badge/macOS%20%C2%B7%20Linux-informational)
 ![Paseo](https://img.shields.io/badge/Paseo-plugin-8A63D2)
@@ -27,7 +27,7 @@ npm install -g 9router          # the router itself
 Then the Paseo plugin:
 
 ```sh
-paseo plugin add itsjustanks/paseo-agent-link --path apps/paseo --id agent-link
+paseo plugin add itsjustanks/paseo-plugin-9router --path apps/paseo --id agent-link
 ```
 
 Open **9Router** in the Paseo sidebar and work down the Setup checklist. The dashboard password field is prefilled with 9router's first-run default (`123456`) — change it in the dashboard and save the new one here.
@@ -36,7 +36,7 @@ The CLI is optional:
 
 ```sh
 mkdir -p ~/.local/bin
-curl -fsSL https://raw.githubusercontent.com/itsjustanks/paseo-agent-link/main/agent-link -o ~/.local/bin/agent-link
+curl -fsSL https://raw.githubusercontent.com/itsjustanks/paseo-plugin-9router/main/agent-link -o ~/.local/bin/agent-link
 chmod +x ~/.local/bin/agent-link
 agent-link doctor
 ```

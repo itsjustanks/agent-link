@@ -11,7 +11,7 @@
 set -u
 
 VERSION="0.9.0"
-REPO="itsjustanks/paseo-agent-link"
+REPO="itsjustanks/paseo-plugin-9router"
 RAW="https://raw.githubusercontent.com/$REPO/main"
 
 # ROOT — prefer whichever location actually holds accounts (older installs
