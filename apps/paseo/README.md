@@ -17,13 +17,13 @@ Requires 9router (`npm install -g 9router`). Without it the panel shows an insta
 ## Install
 
 ```sh
-paseo plugin add itsjustanks/paseo-plugin-9router --path apps/paseo --id router9-agent-link
-paseo plugin reload router9-agent-link
+paseo plugin add itsjustanks/paseo-plugin-9router --path apps/paseo --id agent-link-9router
+paseo plugin reload agent-link-9router
 ```
 
 ### Renaming an existing install
 
-The plugin id changed from `agent-link` to `router9-agent-link` — Paseo
+The plugin id changed from `agent-link` to `agent-link-9router` — Paseo
 requires `^[a-z][a-z0-9-]*$`, so an id cannot begin with a digit and
 `9router-agent-link` is rejected at install. A daemon that
 still has the old id keeps running the old code under the old RPC namespace, so
@@ -31,7 +31,7 @@ remove it before installing:
 
 ```bash
 paseo plugin remove agent-link
-paseo plugin add itsjustanks/paseo-plugin-9router --path apps/paseo --id router9-agent-link
+paseo plugin add itsjustanks/paseo-plugin-9router --path apps/paseo --id agent-link-9router
 ```
 
 `remove` clears configuration only; it never deletes source. Your accounts,
@@ -43,7 +43,7 @@ For local development from a checkout:
 
 ```sh
 agent-link app install paseo --link
-paseo plugin reload router9-agent-link
+paseo plugin reload agent-link-9router
 ```
 
 Then open **9Router** in the sidebar.
@@ -95,7 +95,7 @@ Restoring Claude also clears any `ANTHROPIC_DEFAULT_*` value still pointing at a
 
 **A model 400s with a version message.** 9router sends its own hardcoded Claude Code version, not yours. A model gated behind a newer client fails until 9router bumps it.
 
-**Nothing appears in the picker after Sync.** Check `paseo plugin logs router9-agent-link`, then reload Paseo. Sync writes a `ninerouter` provider and refreshes it; it never restarts the daemon.
+**Nothing appears in the picker after Sync.** Check `paseo plugin logs agent-link-9router`, then reload Paseo. Sync writes a `ninerouter` provider and refreshes it; it never restarts the daemon.
 
 ## License
 
