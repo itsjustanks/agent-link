@@ -1717,13 +1717,26 @@ export async function handleRouterCliTools() {
     return null;
   };
 
+  // Some tools report their config as a raw TOML/INI string rather than a
+  // nested object (Codex does), so an object walk alone reports "no base URL"
+  // for a tool that is correctly routed. Read the string form too.
+  const baseUrlFromText = (value: unknown): string | null => {
+    if (typeof value !== "string") return null;
+    const match = value.match(/^\s*base_url\s*=\s*["']([^"']+)["']/m);
+    return match ? match[1] : null;
+  };
+
   const tools = Object.entries(statuses)
     .map(([id, raw]) => {
       const source = raw ?? {};
       const installed = source.installed === true;
-      const baseUrl = findBaseUrl(source.settings ?? source);
-      let routed = false;
-      if (baseUrl && routerHost) {
+      // currentUrl is what the tools that answer in their own shape report.
+      const baseUrl =
+        baseUrlFromText(source.config) ??
+        (typeof source.currentUrl === "string" ? source.currentUrl : null) ??
+        findBaseUrl(source.settings ?? source);
+      let routed = source.has9Router === true;
+      if (!routed && baseUrl && routerHost) {
         try {
           routed = new URL(baseUrl).host === routerHost;
         } catch {
