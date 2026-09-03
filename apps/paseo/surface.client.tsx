@@ -613,6 +613,44 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
     onError: (error: unknown) => setMessage(error instanceof Error ? error.message : String(error)),
   });
 
+  // The dashboard is bound to the ROUTER's loopback. Opening its URL opens it on
+  // whichever machine the app runs on, so for a remote daemon the link reaches
+  // this machine's port instead — the wrong router, or nothing. The forward
+  // below makes the same URL mean the right thing.
+  const forward = useQuery({
+    queryKey: ["agent-link-9router", "local-forward"],
+    queryFn: () => callForwardStatus({}),
+    refetchInterval: 20_000,
+  });
+
+  const [forwardHost, setForwardHost] = useState("");
+  const [forwardKey, setForwardKey] = useState("");
+  const [forwardMinutes, setForwardMinutes] = useState("5");
+  const [forwardCountdown, setForwardCountdown] = useState<string | null>(null);
+
+  // Tick locally rather than polling: the expiry is known, and a countdown that
+  // only moves every 20s reads as broken.
+  const expiresAt = forward.data?.expiresAt ?? null;
+  useEffect(() => {
+    if (!expiresAt) {
+      setForwardCountdown(null);
+      return;
+    }
+    const tick = () => {
+      const left = Date.parse(expiresAt) - Date.now();
+      if (Number.isNaN(left) || left <= 0) {
+        setForwardCountdown("closing…");
+        void forward.refetch();
+        return;
+      }
+      const total = Math.round(left / 1000);
+      setForwardCountdown(`${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`);
+    };
+    tick();
+    const handle = setInterval(tick, 1000);
+    return () => clearInterval(handle);
+  }, [expiresAt]);
+
   if (status.isLoading && !data) {
     return (
       <View style={{ flex: 1, backgroundColor: theme.colors.surface0, alignItems: "center", justifyContent: "center" }}>
@@ -651,43 +689,6 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
     });
   };
 
-  // The dashboard is bound to the ROUTER's loopback. Opening its URL opens it on
-  // whichever machine the app runs on, so for a remote daemon the link reaches
-  // this machine's port instead — the wrong router, or nothing. The forward
-  // below makes the same URL mean the right thing.
-  const forward = useQuery({
-    queryKey: ["agent-link-9router", "local-forward"],
-    queryFn: () => callForwardStatus({}),
-    refetchInterval: 20_000,
-  });
-
-  const [forwardHost, setForwardHost] = useState("");
-  const [forwardKey, setForwardKey] = useState("");
-  const [forwardMinutes, setForwardMinutes] = useState("5");
-  const [forwardCountdown, setForwardCountdown] = useState<string | null>(null);
-
-  // Tick locally rather than polling: the expiry is known, and a countdown that
-  // only moves every 20s reads as broken.
-  const expiresAt = forward.data?.expiresAt ?? null;
-  useEffect(() => {
-    if (!expiresAt) {
-      setForwardCountdown(null);
-      return;
-    }
-    const tick = () => {
-      const left = Date.parse(expiresAt) - Date.now();
-      if (Number.isNaN(left) || left <= 0) {
-        setForwardCountdown("closing…");
-        void forward.refetch();
-        return;
-      }
-      const total = Math.round(left / 1000);
-      setForwardCountdown(`${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`);
-    };
-    tick();
-    const handle = setInterval(tick, 1000);
-    return () => clearInterval(handle);
-  }, [expiresAt]);
 
   const openUrl = (target: string, hint: string) => {
     void Linking.openURL(target).catch(() => {
