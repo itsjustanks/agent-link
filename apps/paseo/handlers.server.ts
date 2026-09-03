@@ -11,6 +11,7 @@ import {
   isLegacyShim,
   modelLabel,
   normalizeUsage,
+  thinkingFor,
   sameModelSet,
 } from "./router.logic";
 import { applyPowerUp, listPowerUps } from "./powerups.server";
@@ -531,7 +532,11 @@ export async function handleRouterSyncModels(_input: unknown, { paseo }: PluginH
   // Splitting it by pool would only mirror 9router's internals into a menu.
   const chosen = new Set(settings.syncSelection);
   const wanted = (id: string) => chosen.size === 0 || chosen.has(id);
-  const models = ids.filter(wanted).map((id) => ({ id, label: modelLabel(id) }));
+  const models = ids.filter(wanted).map((id) => ({
+    id,
+    label: modelLabel(id),
+    ...thinkingFor(id),
+  }));
   const forClaude = models.filter((model) => cliForModel(model.id) === "claude");
   const forCodex = models.filter((model) => cliForModel(model.id) === "codex");
 

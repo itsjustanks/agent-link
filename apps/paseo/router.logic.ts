@@ -251,3 +251,58 @@ export function quotaTone(quota: Quota): "success" | "warning" | "danger" | "neu
   if (quota.remainingPercentage <= 25) return "warning";
   return "success";
 }
+
+/**
+ * Reasoning-effort options for a routed model.
+ *
+ * Paseo builds its thinking selector from a model's `thinkingOptions`, which the
+ * provider adapters derive from each vendor's own catalogue. A routed id like
+ * `cx/gpt-5.6-sol` is not in that catalogue, so a synced model arrives with no
+ * options and the selector disappears — which is why effort is missing on routed
+ * models while base ones keep it.
+ *
+ * Declaring the options here restores it. `mergeModelAdditions` spreads whatever
+ * we supply over the base definition and `normalizeAgentModelDefinition` reads
+ * `thinkingOptions` to derive the default, so nothing filters these out.
+ *
+ * Ids must match what the provider actually accepts for that family, so they are
+ * chosen per pool rather than shared: Codex takes OpenAI's reasoning efforts,
+ * Claude takes Anthropic's thinking levels.
+ */
+export type ThinkingOption = { id: string; label: string; description?: string; isDefault?: boolean };
+
+const CODEX_EFFORTS: ThinkingOption[] = [
+  { id: "low", label: "Low", description: "Fastest, least reasoning" },
+  { id: "medium", label: "Medium", description: "Balanced", isDefault: true },
+  { id: "high", label: "High", description: "More reasoning, slower" },
+  { id: "xhigh", label: "Extra high", description: "Maximum reasoning" },
+];
+
+const CLAUDE_THINKING: ThinkingOption[] = [
+  { id: "none", label: "None", description: "No extended thinking" },
+  { id: "low", label: "Low" },
+  { id: "medium", label: "Medium", isDefault: true },
+  { id: "high", label: "High" },
+  { id: "xhigh", label: "Extra high", description: "Maximum thinking budget" },
+];
+
+/**
+ * An id that already names its own effort — 9router exposes per-effort variants
+ * such as `cu/claude-fable-5-1-xhigh` — is left alone. Offering a second effort
+ * control over a model whose effort is baked into its id would let the two
+ * disagree, and the id wins.
+ */
+const EFFORT_SUFFIX = /-(?:low|medium|high|xhigh|max)$/;
+
+export function thinkingFor(
+  id: string,
+): { thinkingOptions?: ThinkingOption[]; defaultThinkingOptionId?: string } {
+  if (EFFORT_SUFFIX.test(id)) return {};
+  const cli = cliForModel(id);
+  const options = cli === "codex" ? CODEX_EFFORTS : cli === "claude" ? CLAUDE_THINKING : null;
+  if (!options) return {};
+  return {
+    thinkingOptions: options,
+    defaultThinkingOptionId: options.find((option) => option.isDefault)?.id ?? options[0]?.id,
+  };
+}

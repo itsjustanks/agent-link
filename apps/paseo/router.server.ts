@@ -196,7 +196,20 @@ export class RouterClient {
       response = await send();
     }
     if (!response || !response.ok) {
-      if (response) this.loginError = `HTTP ${response.status} on ${path}`;
+      if (response) {
+        // The status alone is not actionable — 9router explains every refusal in
+        // the body ("baseUrl, apiKey and model are required"), and discarding it
+        // turns a precise complaint into a mystery for whoever sees the panel.
+        let detail = "";
+        try {
+          const body = (await response.json()) as { error?: unknown; message?: unknown };
+          const found = body?.error ?? body?.message;
+          if (typeof found === "string" && found.trim()) detail = `: ${found.trim()}`;
+        } catch {
+          // Non-JSON error body; the status is all there is.
+        }
+        this.loginError = `HTTP ${response.status} on ${path}${detail}`;
+      }
       return null;
     }
     try {
