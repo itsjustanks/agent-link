@@ -29,6 +29,8 @@ import {
   routerCliTools,
   routerProxyPools,
   routerPxpipe,
+  routerStrategies,
+  routerStrategySet,
   routerHolds,
   routerClearHold,
   routerTestModel,
@@ -392,6 +394,8 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
   const callCliTools = useRpc(routerCliTools);
   const callProxyPools = useRpc(routerProxyPools);
   const callPxpipe = useRpc(routerPxpipe);
+  const callStrategies = useRpc(routerStrategies);
+  const callStrategySet = useRpc(routerStrategySet);
   const callHolds = useRpc(routerHolds);
   const callClearHold = useRpc(routerClearHold);
   const callTestModel = useRpc(routerTestModel);
@@ -477,6 +481,11 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
     queryFn: () => callRequestLogs({ limit: 25, errorsOnly: true }),
     enabled: live && tab === "logs",
     refetchInterval: tab === "logs" ? 8_000 : false,
+  });
+  const strategies = useQuery({
+    queryKey: ["agent-link-9router", "strategies"],
+    queryFn: () => callStrategies({}),
+    enabled: live && tab === "accounts",
   });
   const spend = useQuery({
     queryKey: ["agent-link-9router", "spend"],
@@ -569,6 +578,7 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
   const syncMutation = useMutation({ mutationFn: callSyncModels, ...feedback });
   const catalogSyncMutation = useMutation({ mutationFn: callCatalogSync, ...feedback });
   const priorityMutation = useMutation({ mutationFn: callPrioritySet, ...feedback });
+  const strategyMutation = useMutation({ mutationFn: callStrategySet, ...feedback });
   const activeMutation = useMutation({ mutationFn: callActiveSet, ...feedback });
   const removeMutation = useMutation({ mutationFn: callRemoveConnection, ...feedback });
   const exposeMutation = useMutation({ mutationFn: callExpose, ...feedback });
@@ -1102,6 +1112,63 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
       {/* ---------------------------------------------------------- ACCOUNTS */}
       {tab === "accounts" ? (
         <>
+          <Card theme={theme}>
+            <Step theme={theme} index={0} title="Selection strategy" hint="which account answers" />
+            <Note theme={theme}>
+              This decides which account absorbs a request, so it decides which one hits its ceiling first. With
+              fallback the top account carries everything until it 429s; round-robin spreads the load so no single
+              account is exhausted while the others sit idle.
+            </Note>
+            {strategies.isLoading ? <ActivityIndicator color={theme.colors.accent} /> : null}
+            {(strategies.data?.strategies ?? []).map((entry) => (
+              <View key={entry.provider} style={{ gap: 6, paddingVertical: 6 }}>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                  <Text style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "600", flex: 1 }}>
+                    {entry.label}
+                  </Text>
+                  <Chip theme={theme} label={`${entry.accounts} account${entry.accounts === 1 ? "" : "s"}`} />
+                </View>
+                <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap" }}>
+                  {(["fallback", "round-robin", "priority", "random"] as const).map((option) => {
+                    const selected = (entry.strategy ?? "fallback") === option;
+                    return (
+                      <Pressable
+                        key={option}
+                        disabled={strategyMutation.isPending}
+                        onPress={() =>
+                          strategyMutation.mutate({
+                            provider: entry.provider,
+                            strategy: option,
+                            stickyLimit: option === "round-robin" ? (entry.stickyLimit ?? strategies.data?.defaultStickyLimit ?? 3) : null,
+                          })
+                        }
+                        style={{
+                          paddingHorizontal: 10,
+                          paddingVertical: 5,
+                          borderRadius: 999,
+                          backgroundColor: selected ? theme.colors.accent : theme.colors.surface1,
+                          borderColor: theme.colors.border,
+                          borderWidth: selected ? 0 : 1,
+                        }}
+                      >
+                        <Text
+                          style={{
+                            color: selected ? theme.colors.accentForeground : theme.colors.foregroundMuted,
+                            fontSize: 12,
+                            fontWeight: "600",
+                          }}
+                        >
+                          {option}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+                <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>{entry.detail}</Text>
+              </View>
+            ))}
+          </Card>
+
           <Card theme={theme}>
             <Step theme={theme} index={0} title="Order accounts" hint={`${order.data?.connections.length ?? 0}`} />
             <Note theme={theme}>

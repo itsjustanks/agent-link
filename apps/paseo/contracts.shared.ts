@@ -783,3 +783,42 @@ export const routerPxpipe = defineRpc({
     detail: z.string(),
   }),
 });
+
+/**
+ * How 9router picks between the accounts behind one provider.
+ *
+ * This decides which account absorbs a request, so it decides which account
+ * hits its ceiling first. With `fallback` the top-priority account carries
+ * everything until it 429s; with `round-robin` the load spreads and no single
+ * account is exhausted while others sit idle. Invisible in the panel until
+ * now, which made an all-accounts-limited state look inexplicable.
+ */
+export const ProviderStrategySchema = z.object({
+  provider: z.string(),
+  label: z.string(),
+  /** null means the provider follows 9router's default (fallback). */
+  strategy: z.enum(["fallback", "round-robin", "priority", "random"]).nullable(),
+  /** Requests one account serves before round-robin advances. Only meaningful for round-robin. */
+  stickyLimit: z.number().nullable(),
+  accounts: z.number(),
+  detail: z.string(),
+});
+
+export const routerStrategies = defineRpc({
+  name: "agent-link-9router.router.strategies",
+  input: z.object({}),
+  output: z.object({
+    strategies: z.array(ProviderStrategySchema),
+    defaultStickyLimit: z.number().nullable(),
+  }),
+});
+
+export const routerStrategySet = defineRpc({
+  name: "agent-link-9router.router.strategy-set",
+  input: z.object({
+    provider: z.string(),
+    strategy: z.enum(["fallback", "round-robin", "priority", "random"]),
+    stickyLimit: z.number().int().min(1).max(50).nullable(),
+  }),
+  output: z.object({ ok: z.boolean(), message: z.string() }),
+});

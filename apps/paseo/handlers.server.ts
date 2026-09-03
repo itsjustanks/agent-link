@@ -13,6 +13,7 @@ import {
   normalizeUsage,
   thinkingFor,
   sameModelSet,
+  providerLabel,
 } from "./router.logic";
 import { applyPowerUp, listPowerUps } from "./powerups.server";
 import {
@@ -1815,5 +1816,88 @@ export async function handleRouterPxpipe() {
     mode: typeof status.mode === "string" ? status.mode : null,
     minChars,
     detail,
+  };
+}
+
+const STRATEGY_DETAIL: Record<string, string> = {
+  fallback: "One account carries everything until it fails, then the next takes over.",
+  "round-robin": "Requests spread across accounts, so no single account is exhausted first.",
+  priority: "Strict priority order; lower-priority accounts only serve when higher ones cannot.",
+  random: "Each request picks an account at random.",
+};
+
+export async function handleRouterStrategies() {
+  const client = new RouterClient();
+  const [settings, connections] = await Promise.all([
+    client.api<Record<string, unknown>>("settings"),
+    client.api<{ providers?: Array<Record<string, unknown>>; connections?: Array<Record<string, unknown>> }>("providers"),
+  ]);
+  if (!settings) return { strategies: [], defaultStickyLimit: null };
+
+  const perProvider = (settings.providerStrategies ?? {}) as Record<string, Record<string, unknown>>;
+  const defaultSticky = typeof settings.stickyRoundRobinLimit === "number" ? settings.stickyRoundRobinLimit : null;
+
+  // Only list providers that actually have accounts — a strategy for a provider
+  // with nothing behind it is a control that changes nothing.
+  const counts = new Map<string, number>();
+  for (const entry of connections?.providers ?? connections?.connections ?? []) {
+    const provider = typeof entry.provider === "string" ? entry.provider : null;
+    if (provider) counts.set(provider, (counts.get(provider) ?? 0) + 1);
+  }
+
+  const strategies = [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([provider, accounts]) => {
+      const config = perProvider[provider] ?? {};
+      const raw = typeof config.fallbackStrategy === "string" ? config.fallbackStrategy : null;
+      const known = ["fallback", "round-robin", "priority", "random"] as const;
+      const strategy: (typeof known)[number] | null =
+        known.find((candidate) => candidate === raw) ?? null;
+      const stickyLimit = typeof config.stickyRoundRobinLimit === "number" ? config.stickyRoundRobinLimit : null;
+      const effective = strategy ?? "fallback";
+      let detail = STRATEGY_DETAIL[effective] ?? "";
+      if (strategy === null) detail = `Default — ${detail.charAt(0).toLowerCase()}${detail.slice(1)}`;
+      if (effective === "round-robin") {
+        detail += ` Advances every ${stickyLimit ?? defaultSticky ?? 1} request(s).`;
+      }
+      return {
+        provider,
+        label: providerLabel(provider),
+        strategy,
+        stickyLimit,
+        accounts,
+        detail,
+      };
+    });
+
+  return { strategies, defaultStickyLimit: defaultSticky };
+}
+
+/**
+ * Settings is a single document, so this reads the current strategy map and
+ * PATCHes it back with one provider changed. Sending only the new provider
+ * would drop every other provider's strategy.
+ */
+export async function handleRouterStrategySet(input: {
+  provider: string;
+  strategy: "fallback" | "round-robin" | "priority" | "random";
+  stickyLimit: number | null;
+}) {
+  const client = new RouterClient();
+  const settings = await client.api<Record<string, unknown>>("settings");
+  if (!settings) return { ok: false, message: client.authError ?? "Could not read 9router settings." };
+
+  const current = { ...((settings.providerStrategies ?? {}) as Record<string, unknown>) };
+  const entry: Record<string, unknown> = { fallbackStrategy: input.strategy };
+  if (input.strategy === "round-robin" && input.stickyLimit !== null) {
+    entry.stickyRoundRobinLimit = input.stickyLimit;
+  }
+  current[input.provider] = entry;
+
+  const saved = await client.apiJson<unknown>("settings", "PATCH", { providerStrategies: current });
+  if (saved === null) return { ok: false, message: client.authError ?? "9router rejected the strategy change." };
+  return {
+    ok: true,
+    message: `${providerLabel(input.provider)} now uses ${input.strategy}.`,
   };
 }
