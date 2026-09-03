@@ -1506,3 +1506,102 @@ export async function handleRouterConnectionActiveSet({
 }) {
   return updateConnection(id, { isActive }, (label) => `${label} is now ${isActive ? "active" : "parked"}.`);
 }
+
+/**
+ * Per-model availability, derived from the accounts that can serve each model.
+ *
+ * A model is only as available as the connections behind it, and those
+ * connections carry the state that matters: `backoffLevel` (9router resting an
+ * account), `errorCode` 429 (upstream rate limit), `isActive` (parked), and
+ * `modelLock_*` keys that restrict an account to specific models.
+ */
+export async function handleRouterModelAvailability() {
+  const client = new RouterClient();
+  if (!(await client.health())) {
+    return { models: [] };
+  }
+
+  const ids = await client.models();
+  const raw = await client.api<{
+    connections?: Array<Record<string, unknown>>;
+    providers?: Array<Record<string, unknown>>;
+  }>("providers");
+  const rows = raw?.connections ?? raw?.providers ?? [];
+
+  const text = (value: unknown) => (typeof value === "string" ? value : "");
+  const num = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : 0);
+
+  type Account = {
+    pool: string;
+    locks: string[];
+    active: boolean;
+    backoff: number;
+    limited: boolean;
+    resetAt: string | null;
+  };
+
+  const accounts: Account[] = rows.map((row) => {
+    const data = (row.data ?? {}) as Record<string, unknown>;
+    const locks = Object.keys(data)
+      .filter((key) => key.startsWith("modelLock_"))
+      .map((key) => key.slice("modelLock_".length));
+    // 9router's provider name is the pool prefix used in model ids: a `claude`
+    // connection serves `cc/…`, a `codex` connection serves `cx/…`.
+    const provider = text(row.provider);
+    return {
+      pool: provider === "claude" ? "cc" : provider === "codex" ? "cx" : provider,
+      locks,
+      active: row.isActive !== false && row.isActive !== 0,
+      backoff: num(data.backoffLevel),
+      limited: num(data.errorCode) === 429,
+      resetAt: text(data.resetAt) || text(data.lastErrorAt) || null,
+    };
+  });
+
+  const models = ids.map((id) => {
+    const [pool = "", bare = id] = id.includes("/") ? id.split("/", 2) : ["", id];
+    // An account serves a model when the pool matches and either it holds no
+    // locks (serves anything in its pool) or one of its locks names this model.
+    const serving = accounts.filter(
+      (account) =>
+        account.pool === pool &&
+        (account.locks.length === 0 || account.locks.includes(bare)),
+    );
+    const usable = serving.filter(
+      (account) => account.active && !account.limited && account.backoff === 0,
+    );
+    const resting = serving.filter((account) => account.active && account.backoff > 0);
+
+    let state: "ready" | "limited" | "resting" | "none";
+    let detail: string;
+    if (serving.length === 0) {
+      state = "none";
+      detail = "No connected account serves this model.";
+    } else if (usable.length > 0) {
+      state = "ready";
+      detail = `${usable.length} of ${serving.length} account(s) ready.`;
+    } else if (serving.some((account) => account.limited)) {
+      state = "limited";
+      detail = `All ${serving.length} account(s) rate-limited upstream.`;
+    } else if (resting.length > 0) {
+      state = "resting";
+      detail = `9router is resting ${resting.length} account(s) after errors.`;
+    } else {
+      state = "none";
+      detail = `All ${serving.length} account(s) parked.`;
+    }
+
+    const resets = serving.map((account) => account.resetAt).filter((at): at is string => !!at);
+    return {
+      id,
+      label: modelLabel(id),
+      state,
+      accounts: serving.length,
+      usable: usable.length,
+      readyAt: resets.length > 0 ? resets.sort()[0] : null,
+      detail,
+    };
+  });
+
+  return { models };
+}

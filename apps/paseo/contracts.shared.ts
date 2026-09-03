@@ -659,3 +659,35 @@ export const routerConnectionActiveSet = defineRpc({
   input: z.object({ id: z.string(), isActive: z.boolean() }),
   output: z.object({ ok: z.boolean(), message: z.string() }),
 });
+
+/**
+ * Whether a model can actually be used right now.
+ *
+ * Presence in the picker says nothing about availability: on 2026-09-03 every
+ * Claude account sat at backoff 8 with a 429, so `cc/claude-fable-5-1` was
+ * listed, correctly configured, and completely unusable for two hours. The
+ * only way to find out was to send a request and read the failure.
+ *
+ * Availability is per model because accounts are locked to models: an account
+ * carrying `modelLock_claude-fable-5-1` can serve fable and nothing else, so
+ * fable can be exhausted while other models still answer through the same
+ * connection list.
+ */
+export const ModelAvailabilitySchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  /** ready = an account can serve it now; limited = every account is rate-limited; resting = 9router is backing off; none = no account offers it. */
+  state: z.enum(["ready", "limited", "resting", "none"]),
+  /** Accounts that could serve this model, and how many of those are usable. */
+  accounts: z.number(),
+  usable: z.number(),
+  /** Soonest moment an account is expected back, when known. */
+  readyAt: z.string().nullable(),
+  detail: z.string(),
+});
+
+export const routerModelAvailability = defineRpc({
+  name: "agent-link-9router.router.model-availability",
+  input: z.object({}),
+  output: z.object({ models: z.array(ModelAvailabilitySchema) }),
+});

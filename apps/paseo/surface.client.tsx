@@ -24,6 +24,7 @@ import {
   routerConnectionOrder,
   routerConnectionPrioritySet,
   routerConnectionActiveSet,
+  routerModelAvailability,
   routerHolds,
   routerClearHold,
   routerTestModel,
@@ -381,6 +382,7 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
   const callConnectionOrder = useRpc(routerConnectionOrder);
   const callPrioritySet = useRpc(routerConnectionPrioritySet);
   const callActiveSet = useRpc(routerConnectionActiveSet);
+  const callAvailability = useRpc(routerModelAvailability);
   const callHolds = useRpc(routerHolds);
   const callClearHold = useRpc(routerClearHold);
   const callTestModel = useRpc(routerTestModel);
@@ -442,6 +444,12 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<{ model: string; ok: boolean; message: string } | null>(null);
 
+  const availability = useQuery({
+    queryKey: ["agent-link-9router", "model-availability"],
+    queryFn: () => callAvailability({}),
+    enabled: live && tab === "models",
+    refetchInterval: tab === "models" ? 15_000 : false,
+  });
   const order = useQuery({
     queryKey: ["agent-link-9router", "connection-order"],
     queryFn: () => callConnectionOrder({}),
@@ -1276,6 +1284,50 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
       {/* ------------------------------------------------------------ MODELS */}
       {tab === "models" ? (
         <>
+          <Card theme={theme}>
+            <Step
+              theme={theme}
+              index={0}
+              title="Available now"
+              hint={`${availability.data?.models.filter((m) => m.state === "ready").length ?? 0} ready`}
+            />
+            <Note theme={theme}>
+              Being listed is not being usable. A model is only as available as the accounts behind it, and an
+              account locked to one model can be exhausted while the rest still answer.
+            </Note>
+            {availability.isLoading ? <ActivityIndicator color={theme.colors.accent} /> : null}
+            {(availability.data?.models ?? []).map((model) => (
+              <View
+                key={model.id}
+                style={{
+                  flexDirection: "row",
+                  alignItems: "center",
+                  gap: 8,
+                  paddingVertical: 4,
+                }}
+              >
+                <Chip
+                  theme={theme}
+                  label={model.state}
+                  tone={
+                    model.state === "ready"
+                      ? "success"
+                      : model.state === "limited"
+                        ? "danger"
+                        : model.state === "resting"
+                          ? "warning"
+                          : "neutral"
+                  }
+                />
+                <Text style={{ color: theme.colors.foreground, fontSize: 12, flex: 1 }} numberOfLines={1}>
+                  {model.id}
+                </Text>
+                <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
+                  {model.usable}/{model.accounts}
+                </Text>
+              </View>
+            ))}
+          </Card>
           <Card theme={theme}>
             <Step theme={theme} index={0} title="In Paseo's picker" hint={data?.paseo.modelsInSync ? "in sync" : undefined} />
             <Note theme={theme}>
