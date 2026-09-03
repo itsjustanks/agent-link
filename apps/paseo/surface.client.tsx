@@ -18,6 +18,9 @@ import {
   routerStatus,
   routerSyncModels,
   routerUsageStats,
+  routerCatalogSync,
+  routerConnectionHealth,
+  routerRequestLogs,
   routerHolds,
   routerClearHold,
   routerTestModel,
@@ -369,6 +372,9 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
   const callAliasSet = useRpc(routerAliasSet);
   const callAliasRemove = useRpc(routerAliasRemove);
   const callUsageStats = useRpc(routerUsageStats);
+  const callCatalogSync = useRpc(routerCatalogSync);
+  const callConnectionHealth = useRpc(routerConnectionHealth);
+  const callRequestLogs = useRpc(routerRequestLogs);
   const callHolds = useRpc(routerHolds);
   const callClearHold = useRpc(routerClearHold);
   const callTestModel = useRpc(routerTestModel);
@@ -430,6 +436,20 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<{ model: string; ok: boolean; message: string } | null>(null);
 
+  // Connection health is what explains a model that will not answer, so it
+  // loads with the Accounts tab rather than behind a button.
+  const health = useQuery({
+    queryKey: ["9router-agent-link", "connection-health"],
+    queryFn: () => callConnectionHealth({}),
+    enabled: live && tab === "accounts",
+    refetchInterval: tab === "accounts" ? 20_000 : false,
+  });
+  const requestLogs = useQuery({
+    queryKey: ["9router-agent-link", "request-logs"],
+    queryFn: () => callRequestLogs({ limit: 25, errorsOnly: true }),
+    enabled: live && tab === "logs",
+    refetchInterval: tab === "logs" ? 8_000 : false,
+  });
   const usage = useQuery({
     queryKey: ["9router-agent-link", "usage-stats"],
     queryFn: () => callUsageStats({}),
@@ -496,6 +516,7 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
   const saveMutation = useMutation({ mutationFn: callSaveSettings, ...feedback });
   const routeMutation = useMutation({ mutationFn: callRouteCli, ...feedback });
   const syncMutation = useMutation({ mutationFn: callSyncModels, ...feedback });
+  const catalogSyncMutation = useMutation({ mutationFn: callCatalogSync, ...feedback });
   const removeMutation = useMutation({ mutationFn: callRemoveConnection, ...feedback });
   const exposeMutation = useMutation({ mutationFn: callExpose, ...feedback });
   const aliasSetMutation = useMutation({ mutationFn: callAliasSet, ...feedback });
@@ -1027,6 +1048,61 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
       {/* ---------------------------------------------------------- ACCOUNTS */}
       {tab === "accounts" ? (
         <>
+          <Card theme={theme}>
+            <Step theme={theme} index={0} title="Account health" hint={`${health.data?.connections.length ?? 0}`} />
+            <Note theme={theme}>
+              What decides whether a model answers lives on the account, not the model. An expired token, an
+              active backoff, or a model lock pinning the account to one model are all invisible in the picker.
+            </Note>
+            {(health.data?.connections ?? []).map((connection) => {
+              const expiring = connection.expiresInMinutes !== null && connection.expiresInMinutes < 60;
+              return (
+                <View
+                  key={connection.id}
+                  style={{ gap: 4, padding: 8, borderRadius: 8, backgroundColor: theme.colors.surface2 }}
+                >
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                    <Text style={{ color: theme.colors.foreground, fontSize: 12, fontWeight: "600", flex: 1 }}>
+                      {providerLabel(connection.provider)} · {connection.email || connection.name || connection.id.slice(0, 8)}
+                    </Text>
+                    <Chip
+                      theme={theme}
+                      label={connection.isActive ? "active" : "inactive"}
+                      tone={connection.isActive ? "success" : "neutral"}
+                    />
+                  </View>
+                  {connection.modelLocks.length > 0 ? (
+                    <Text style={{ color: theme.colors.statusWarning, fontSize: 11 }}>
+                      Locked to {connection.modelLocks.join(", ")} — requests to this account answer with that
+                      model whatever was asked for.
+                    </Text>
+                  ) : null}
+                  {connection.backoffLevel > 0 ? (
+                    <Text style={{ color: theme.colors.statusWarning, fontSize: 11 }}>
+                      Backoff level {connection.backoffLevel} — 9router is resting this account.
+                    </Text>
+                  ) : null}
+                  {connection.expiresInMinutes !== null ? (
+                    <Text
+                      style={{
+                        color: expiring ? theme.colors.statusWarning : theme.colors.foregroundMuted,
+                        fontSize: 11,
+                      }}
+                    >
+                      {connection.expiresInMinutes < 0
+                        ? `Token expired ${Math.abs(connection.expiresInMinutes)}m ago`
+                        : `Token valid for ${connection.expiresInMinutes}m`}
+                    </Text>
+                  ) : null}
+                  {connection.lastError ? (
+                    <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }} numberOfLines={2}>
+                      {connection.lastError}
+                    </Text>
+                  ) : null}
+                </View>
+              );
+            })}
+          </Card>
           {holdCount > 0 ? (
             <Card theme={theme}>
               <Step theme={theme} index={0} title="Parked accounts" hint={`${holdCount}`} />
@@ -1147,11 +1223,16 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
             <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
               <Chip theme={theme} label={`${data?.paseo.listedModels.claude.length ?? 0} Claude`} tone={data?.paseo.listedModels.claude.length ? "success" : "neutral"} />
               <Chip theme={theme} label={`${data?.paseo.listedModels.codex.length ?? 0} Codex`} tone={data?.paseo.listedModels.codex.length ? "success" : "neutral"} />
+              <Button theme={theme} label="Refresh catalogue" disabled={!data?.running} busy={catalogSyncMutation.isPending} onPress={() => catalogSyncMutation.mutate({})} />
               <Button theme={theme} label="Sync into Paseo" tone="primary" disabled={!data?.running} busy={syncMutation.isPending} onPress={() => syncMutation.mutate({})} />
             </View>
             {(data?.paseo.staleProviders.length ?? 0) > 0 ? (
               <Note theme={theme} tone="warning">Old provider entries still present: {data?.paseo.staleProviders.join(", ")} — Sync removes them.</Note>
             ) : null}
+            <Note theme={theme}>
+              Sync publishes a snapshot. If 9router has learned a model since the last one, press Refresh
+              catalogue first — otherwise the new model stays invisible to Paseo however often you sync.
+            </Note>
             <Note theme={theme}>
               {(syncSelection.data?.selected.length ?? 0) === 0
                 ? `Syncing all ${data?.models.count ?? 0} models. Tap below to choose a shorter list instead.`
@@ -1532,7 +1613,49 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
 
       {/* -------------------------------------------------------------- LOGS */}
       {tab === "logs" ? (
-        <Card theme={theme}>
+        <>
+          <Card theme={theme}>
+            <Step
+              theme={theme}
+              index={0}
+              title="Failed requests"
+              hint={requestLogs.data ? `${requestLogs.data.requests.length}` : undefined}
+            />
+            <Note theme={theme}>
+              The console below is 9router talking to itself; this is the request as the caller saw it. A model
+              that "does not work" usually has one row here with the status and the upstream reason.
+            </Note>
+            {requestLogs.isLoading ? <ActivityIndicator color={theme.colors.accent} /> : null}
+            {(requestLogs.data?.requests.length ?? 0) === 0 && !requestLogs.isLoading ? (
+              <Note theme={theme}>No failed requests recorded.</Note>
+            ) : null}
+            {(requestLogs.data?.requests ?? []).map((request, index) => (
+              <View
+                key={`${request.id}-${index}`}
+                style={{ gap: 2, padding: 8, borderRadius: 8, backgroundColor: theme.colors.surface2 }}
+              >
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                  <Text style={{ color: theme.colors.foreground, fontSize: 12, fontWeight: "600", flex: 1 }}>
+                    {request.model || "unknown model"}
+                  </Text>
+                  {request.status !== null ? (
+                    <Chip theme={theme} label={`${request.status}`} tone="danger" />
+                  ) : null}
+                </View>
+                {request.error ? (
+                  <Text style={{ color: theme.colors.statusWarning, fontSize: 11 }} numberOfLines={3}>
+                    {request.error}
+                  </Text>
+                ) : null}
+                <Text style={{ color: theme.colors.foregroundMuted, fontSize: 10 }}>
+                  {[request.at, request.provider, request.latencyMs !== null ? `${request.latencyMs}ms` : ""]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </Text>
+              </View>
+            ))}
+          </Card>
+          <Card theme={theme}>
           <Step theme={theme} index={0} title="9router console" hint={logs.data ? `${logs.data.lines.length} lines` : undefined} />
           <Note theme={theme}>
             Live from 9router, newest last, refreshed every 4s. This is where a routing failure explains itself — the
@@ -1572,7 +1695,8 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
               }}
             />
           </View>
-        </Card>
+          </Card>
+        </>
       ) : null}
 
 

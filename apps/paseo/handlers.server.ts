@@ -1317,3 +1317,114 @@ async function cloudflareFallback(): Promise<{ url: string | null; message: stri
       "No SSH route, so a Cloudflare tunnel is starting. Its address is public and takes a few seconds to resolve — reopen this in about ten seconds to get the link.",
   };
 }
+
+/**
+ * Refresh 9router's upstream model catalogue.
+ *
+ * Paseo's model list is a snapshot taken by `sync-models`, so a model the
+ * router learns later is invisible until the next sync. Refreshing the
+ * catalogue first makes that sync see everything currently on offer.
+ */
+export async function handleRouterCatalogSync() {
+  const client = new RouterClient();
+  if (!(await client.health())) {
+    return { ok: false, message: "9router is not running.", models: 0 };
+  }
+  const result = await client.api<{ success?: boolean; result?: unknown; error?: string }>(
+    "models/catalog-sync",
+  );
+  if (!result) {
+    return { ok: false, message: client.authError ?? "Catalogue refresh failed.", models: 0 };
+  }
+  // Count from /v1/models rather than the sync payload: that is the list Paseo
+  // will actually publish, so it is the number worth reporting.
+  const models = (await client.models()).length;
+  return { ok: true, message: `Catalogue refreshed — ${models} model(s) on offer.`, models };
+}
+
+/**
+ * Per-connection health.
+ *
+ * The fields that decide whether a model answers live on the connection, not
+ * the model: an expired token, an active backoff, or a model lock pinning the
+ * account to one model regardless of what was asked for. None of that is
+ * visible in Paseo's model picker.
+ */
+export async function handleRouterConnectionHealth() {
+  const client = new RouterClient();
+  const raw = await client.api<{
+    connections?: Array<Record<string, unknown>>;
+    providers?: Array<Record<string, unknown>>;
+  }>("providers");
+  const rows = raw?.connections ?? raw?.providers ?? [];
+  const text = (value: unknown) => (typeof value === "string" ? value : "");
+  const num = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : 0);
+
+  return {
+    connections: rows.map((row) => {
+      const data = (row.data ?? {}) as Record<string, unknown>;
+      // A lock is stored as a `modelLock_<id>` key on the connection's blob,
+      // which is why it never shows up as a model property anywhere.
+      const modelLocks = Object.keys(data)
+        .filter((key) => key.startsWith("modelLock_"))
+        .map((key) => key.slice("modelLock_".length));
+      const expiresAt = Date.parse(text(data.expiresAt));
+      return {
+        id: text(row.id),
+        provider: text(row.provider),
+        name: text(row.name),
+        email: text(row.email),
+        isActive: row.isActive !== false && row.isActive !== 0,
+        expiresInMinutes: Number.isFinite(expiresAt)
+          ? Math.round((expiresAt - Date.now()) / 60_000)
+          : null,
+        backoffLevel: num(data.backoffLevel),
+        lastError: text(data.lastError),
+        lastErrorAt: text(data.lastErrorAt) || null,
+        modelLocks,
+      };
+    }),
+  };
+}
+
+/** Recent requests, so a failure can be read rather than inferred from a 404. */
+export async function handleRouterRequestLogs({
+  limit,
+  errorsOnly,
+}: {
+  limit?: number;
+  errorsOnly?: boolean;
+}) {
+  const client = new RouterClient();
+  const size = Math.min(Math.max(limit ?? 25, 1), 100);
+  const raw = await client.api<unknown>(`usage/request-logs?limit=${size}`);
+  // The endpoint has returned both a bare array and a wrapped object across
+  // versions; accept either rather than break on an upgrade.
+  const rows: Array<Record<string, unknown>> = Array.isArray(raw)
+    ? (raw as Array<Record<string, unknown>>)
+    : ((raw as { logs?: unknown[]; requests?: unknown[] } | null)?.logs as Array<Record<string, unknown>>) ??
+      ((raw as { requests?: unknown[] } | null)?.requests as Array<Record<string, unknown>>) ??
+      [];
+
+  const text = (value: unknown) => (typeof value === "string" ? value : "");
+  const maybeNum = (value: unknown) =>
+    typeof value === "number" && Number.isFinite(value) ? value : null;
+
+  const requests = rows.map((row) => ({
+    id: text(row.id) || text(row.requestId),
+    at: text(row.createdAt) || text(row.at) || text(row.timestamp),
+    model: text(row.model),
+    provider: text(row.provider) || text(row.providerAlias),
+    status: maybeNum(row.statusCode ?? row.status),
+    latencyMs: maybeNum(row.latencyMs ?? row.duration),
+    inputTokens: maybeNum(row.promptTokens ?? row.inputTokens),
+    outputTokens: maybeNum(row.completionTokens ?? row.outputTokens),
+    error: text(row.error) || text(row.errorMessage),
+  }));
+
+  return {
+    requests: errorsOnly
+      ? requests.filter((entry) => entry.error !== "" || (entry.status !== null && entry.status >= 400))
+      : requests,
+  };
+}

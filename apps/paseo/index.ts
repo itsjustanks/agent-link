@@ -39,6 +39,9 @@ import {
   routerLocalForwardStatus,
   routerLocalForwardStop,
   routerRequireApiKey,
+  routerCatalogSync,
+  routerConnectionHealth,
+  routerRequestLogs,
 } from "./contracts.shared";
 import {
   handleRouterAliasRemove,
@@ -80,6 +83,9 @@ import {
   handleRouterLocalForwardStatus,
   handleRouterLocalForwardStop,
   handleRouterRequireApiKey,
+  handleRouterCatalogSync,
+  handleRouterConnectionHealth,
+  handleRouterRequestLogs,
 } from "./handlers.server";
 import { AgentLinkSurface } from "./surface.client";
 
@@ -123,6 +129,9 @@ export default function contribute(plugin: PluginContext) {
   plugin.handle(routerLocalForwardStop, handleRouterLocalForwardStop);
   plugin.handle(routerLocalForwardStatus, handleRouterLocalForwardStatus);
   plugin.handle(routerRequireApiKey, handleRouterRequireApiKey);
+  plugin.handle(routerCatalogSync, handleRouterCatalogSync);
+  plugin.handle(routerConnectionHealth, handleRouterConnectionHealth);
+  plugin.handle(routerRequestLogs, handleRouterRequestLogs);
 
   plugin.addSurface("agent-link", AgentLinkSurface);
   plugin.addSidebarItem({ id: "agent-link", title: "9Router", icon: "Users", surface: "agent-link" });

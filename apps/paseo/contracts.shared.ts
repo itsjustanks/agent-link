@@ -558,3 +558,69 @@ export const routerRequireApiKey = defineRpc({
   input: z.object({ required: z.boolean() }),
   output: z.object({ ok: z.boolean(), message: z.string() }),
 });
+
+/**
+ * Ask 9router to re-read its upstream model catalogue.
+ *
+ * `router.sync-models` publishes a *snapshot* of `/v1/models` into Paseo's
+ * config, so a model the router learned after the last sync stays invisible
+ * until someone syncs again. That is exactly how `cc/claude-fable-5-1` sat
+ * unavailable for hours on 2026-09-03: the catalogue gained it 47 minutes
+ * after the snapshot was taken. Refreshing here, then syncing, closes that gap
+ * without a trip to the dashboard.
+ */
+export const routerCatalogSync = defineRpc({
+  name: "9router-agent-link.router.catalog-sync",
+  input: z.object({}),
+  output: z.object({ ok: z.boolean(), message: z.string(), models: z.number() }),
+});
+
+/** One connection's health: token expiry, backoff, last error, model locks. */
+export const ConnectionHealthSchema = z.object({
+  id: z.string(),
+  provider: z.string(),
+  name: z.string(),
+  email: z.string(),
+  isActive: z.boolean(),
+  /** Minutes until the access token expires; negative once it has. */
+  expiresInMinutes: z.number().nullable(),
+  /** 9router's exponential backoff level; > 0 means it is being rested. */
+  backoffLevel: z.number(),
+  lastError: z.string(),
+  lastErrorAt: z.string().nullable(),
+  /**
+   * Model ids this connection is pinned to. A lock is invisible in the picker
+   * but decides what actually answers, so a request for one model can come
+   * back as another entirely.
+   */
+  modelLocks: z.array(z.string()),
+});
+
+export const routerConnectionHealth = defineRpc({
+  name: "9router-agent-link.router.connection-health",
+  input: z.object({}),
+  output: z.object({ connections: z.array(ConnectionHealthSchema) }),
+});
+
+/** A single request 9router handled, for reading a failure back. */
+export const RequestLogSchema = z.object({
+  id: z.string(),
+  at: z.string(),
+  model: z.string(),
+  provider: z.string(),
+  status: z.number().nullable(),
+  latencyMs: z.number().nullable(),
+  inputTokens: z.number().nullable(),
+  outputTokens: z.number().nullable(),
+  error: z.string(),
+});
+
+export const routerRequestLogs = defineRpc({
+  name: "9router-agent-link.router.request-logs",
+  input: z.object({
+    limit: z.number().min(1).max(100).optional(),
+    /** Keep only failures — the reason to open this at all. */
+    errorsOnly: z.boolean().optional(),
+  }),
+  output: z.object({ requests: z.array(RequestLogSchema) }),
+});
