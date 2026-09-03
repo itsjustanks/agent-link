@@ -1,7 +1,7 @@
 import { defineRpc } from "@getpaseo/plugin/server";
 import { z } from "zod";
 
-// Every RPC lives under `agent-link.router.*`. Secrets never cross this
+// Every RPC lives under `9router-agent-link.router.*`. Secrets never cross this
 // boundary: the API key is reported as `present` + `last4`, the password never.
 
 export const QuotaSchema = z.object({
@@ -138,7 +138,7 @@ export type CustomModel = z.infer<typeof CustomModelSchema>;
 export type CliHijack = z.infer<typeof CliHijackSchema>;
 
 export const routerStatus = defineRpc({
-  name: "agent-link.router.status",
+  name: "9router-agent-link.router.status",
   input: z.object({}),
   output: RouterStatusSchema,
 });
@@ -149,13 +149,13 @@ export const routerStatus = defineRpc({
  * rather than a trip to a terminal.
  */
 export const routerStart = defineRpc({
-  name: "agent-link.router.start",
+  name: "9router-agent-link.router.start",
   input: z.object({ action: z.enum(["start", "stop", "restart"]).optional() }),
   output: z.object({ ok: z.boolean(), running: z.boolean(), message: z.string() }),
 });
 
 export const routerSettingsSave = defineRpc({
-  name: "agent-link.router.settings.save",
+  name: "9router-agent-link.router.settings.save",
   input: z.object({ url: z.string().optional(), password: z.string().optional() }),
   output: z.object({
     ok: z.boolean(),
@@ -170,14 +170,14 @@ export const routerSettingsSave = defineRpc({
  * machine — not only the ones Paseo starts.
  */
 export const routerRouteCli = defineRpc({
-  name: "agent-link.router.route-cli",
+  name: "9router-agent-link.router.route-cli",
   input: z.object({ cli: z.string(), routed: z.boolean() }),
   output: z.object({ ok: z.boolean(), message: z.string() }),
 });
 
 /** List 9router's models on Paseo's native claude/codex providers. */
 export const routerSyncModels = defineRpc({
-  name: "agent-link.router.sync-models",
+  name: "9router-agent-link.router.sync-models",
   input: z.object({}),
   output: z.object({
     ok: z.boolean(),
@@ -192,7 +192,7 @@ export const routerSyncModels = defineRpc({
 export const OauthProviderSchema = z.enum(["claude", "codex"]);
 
 export const routerConnectStart = defineRpc({
-  name: "agent-link.router.connect.start",
+  name: "9router-agent-link.router.connect.start",
   input: z.object({ provider: OauthProviderSchema }),
   output: z.object({
     provider: OauthProviderSchema,
@@ -205,7 +205,7 @@ export const routerConnectStart = defineRpc({
 });
 
 export const routerConnectPoll = defineRpc({
-  name: "agent-link.router.connect.poll",
+  name: "9router-agent-link.router.connect.poll",
   input: z.object({ provider: OauthProviderSchema, state: z.string() }),
   output: z.object({
     status: z.enum(["pending", "done", "error", "unknown"]),
@@ -214,7 +214,7 @@ export const routerConnectPoll = defineRpc({
 });
 
 export const routerConnectComplete = defineRpc({
-  name: "agent-link.router.connect.complete",
+  name: "9router-agent-link.router.connect.complete",
   input: z.object({
     provider: OauthProviderSchema,
     code: z.string(),
@@ -226,19 +226,19 @@ export const routerConnectComplete = defineRpc({
 });
 
 export const routerConnectionRemove = defineRpc({
-  name: "agent-link.router.connection.remove",
+  name: "9router-agent-link.router.connection.remove",
   input: z.object({ id: z.string() }),
   output: z.object({ ok: z.boolean(), message: z.string() }),
 });
 
 export const routerModelExpose = defineRpc({
-  name: "agent-link.router.model.expose",
+  name: "9router-agent-link.router.model.expose",
   input: z.object({ providerAlias: z.string(), id: z.string(), name: z.string().optional() }),
   output: z.object({ ok: z.boolean(), message: z.string() }),
 });
 
 export const routerModelUnexpose = defineRpc({
-  name: "agent-link.router.model.unexpose",
+  name: "9router-agent-link.router.model.unexpose",
   input: z.object({ providerAlias: z.string(), id: z.string(), type: z.string().optional() }),
   output: z.object({ ok: z.boolean(), message: z.string() }),
 });
@@ -248,13 +248,13 @@ export const routerModelUnexpose = defineRpc({
  * `claude-opus-5` reaches the `cc/` account pool instead of 404ing.
  */
 export const routerAliasSet = defineRpc({
-  name: "agent-link.router.alias.set",
+  name: "9router-agent-link.router.alias.set",
   input: z.object({ alias: z.string(), model: z.string() }),
   output: z.object({ ok: z.boolean(), message: z.string() }),
 });
 
 export const routerAliasRemove = defineRpc({
-  name: "agent-link.router.alias.remove",
+  name: "9router-agent-link.router.alias.remove",
   input: z.object({ alias: z.string() }),
   output: z.object({ ok: z.boolean(), message: z.string() }),
 });
@@ -283,19 +283,19 @@ export const HoldSchema = z.object({
 });
 
 export const routerUsageStats = defineRpc({
-  name: "agent-link.router.usage-stats",
+  name: "9router-agent-link.router.usage-stats",
   input: z.object({}),
   output: UsageStatsSchema,
 });
 
 export const routerHolds = defineRpc({
-  name: "agent-link.router.holds",
+  name: "9router-agent-link.router.holds",
   input: z.object({}),
   output: z.object({ count: z.number(), holds: z.array(HoldSchema) }),
 });
 
 export const routerClearHold = defineRpc({
-  name: "agent-link.router.clear-hold",
+  name: "9router-agent-link.router.clear-hold",
   // `connectionId` is what actually clears a connection parked with
   // testStatus "unavailable"; clearCooldown alone only lifts model locks.
   input: z.object({ provider: z.string(), model: z.string(), connectionId: z.string().optional() }),
@@ -303,14 +303,14 @@ export const routerClearHold = defineRpc({
 });
 
 export const routerComboCreate = defineRpc({
-  name: "agent-link.router.combo.create",
+  name: "9router-agent-link.router.combo.create",
   input: z.object({ name: z.string(), models: z.array(z.string()) }),
   output: z.object({ ok: z.boolean(), message: z.string() }),
 });
 
 /** Reachability of a model id, so the panel can prove the path works. */
 export const routerTestModel = defineRpc({
-  name: "agent-link.router.test-model",
+  name: "9router-agent-link.router.test-model",
   input: z.object({ model: z.string() }),
   output: z.object({ ok: z.boolean(), message: z.string(), latencyMs: z.number() }),
 });
@@ -331,13 +331,13 @@ export const TuningSchema = z.object({
 });
 
 export const routerTuning = defineRpc({
-  name: "agent-link.router.tuning",
+  name: "9router-agent-link.router.tuning",
   input: z.object({}),
   output: TuningSchema,
 });
 
 export const routerTuningSet = defineRpc({
-  name: "agent-link.router.tuning.set",
+  name: "9router-agent-link.router.tuning.set",
   input: z.object({
     rtkEnabled: z.boolean().optional(),
     cavemanEnabled: z.boolean().optional(),
@@ -353,7 +353,7 @@ export const routerTuningSet = defineRpc({
 
 /** 9router's live console, so a failing turn can be read without leaving Paseo. */
 export const routerLogs = defineRpc({
-  name: "agent-link.router.logs",
+  name: "9router-agent-link.router.logs",
   input: z.object({ limit: z.number().optional() }),
   output: z.object({ lines: z.array(z.string()) }),
 });
@@ -377,51 +377,51 @@ export const ComboSchema = z.object({
 });
 
 export const routerKeys = defineRpc({
-  name: "agent-link.router.keys",
+  name: "9router-agent-link.router.keys",
   input: z.object({}),
   output: z.object({ keys: z.array(ApiKeySchema) }),
 });
 
 export const routerKeyCreate = defineRpc({
-  name: "agent-link.router.key.create",
+  name: "9router-agent-link.router.key.create",
   input: z.object({ name: z.string() }),
   output: z.object({ ok: z.boolean(), message: z.string(), last4: z.string().nullable() }),
 });
 
 export const routerKeyDelete = defineRpc({
-  name: "agent-link.router.key.delete",
+  name: "9router-agent-link.router.key.delete",
   input: z.object({ id: z.string() }),
   output: z.object({ ok: z.boolean(), message: z.string() }),
 });
 
 /** Copy a key's full value to the clipboard, on explicit request only. */
 export const routerKeyReveal = defineRpc({
-  name: "agent-link.router.key.reveal",
+  name: "9router-agent-link.router.key.reveal",
   input: z.object({ id: z.string() }),
   output: z.object({ ok: z.boolean(), key: z.string().nullable(), message: z.string() }),
 });
 
 export const routerCombos = defineRpc({
-  name: "agent-link.router.combos",
+  name: "9router-agent-link.router.combos",
   input: z.object({}),
   output: z.object({ combos: z.array(ComboSchema) }),
 });
 
 export const routerComboSave = defineRpc({
-  name: "agent-link.router.combo.save",
+  name: "9router-agent-link.router.combo.save",
   input: z.object({ id: z.string().optional(), name: z.string(), models: z.array(z.string()) }),
   output: z.object({ ok: z.boolean(), message: z.string() }),
 });
 
 export const routerComboDelete = defineRpc({
-  name: "agent-link.router.combo.delete",
+  name: "9router-agent-link.router.combo.delete",
   input: z.object({ id: z.string() }),
   output: z.object({ ok: z.boolean(), message: z.string() }),
 });
 
 /** Change the dashboard password from here, and keep the saved copy in step. */
 export const routerPasswordChange = defineRpc({
-  name: "agent-link.router.password.change",
+  name: "9router-agent-link.router.password.change",
   input: z.object({ currentPassword: z.string(), newPassword: z.string() }),
   output: z.object({ ok: z.boolean(), message: z.string() }),
 });
@@ -445,26 +445,26 @@ export const PowerUpSchema = z.object({
 });
 
 export const routerPowerUps = defineRpc({
-  name: "agent-link.router.power-ups",
+  name: "9router-agent-link.router.power-ups",
   input: z.object({}),
   output: z.object({ powerUps: z.array(PowerUpSchema) }),
 });
 
 export const routerPowerUpApply = defineRpc({
-  name: "agent-link.router.power-up.apply",
+  name: "9router-agent-link.router.power-up.apply",
   input: z.object({ id: z.string(), apply: z.boolean() }),
   output: z.object({ ok: z.boolean(), message: z.string(), restartRequired: z.boolean() }),
 });
 
 /** Which models Sync writes to Paseo. Empty means every cc/ and cx/ model. */
 export const routerSyncSelection = defineRpc({
-  name: "agent-link.router.sync-selection",
+  name: "9router-agent-link.router.sync-selection",
   input: z.object({}),
   output: z.object({ selected: z.array(z.string()) }),
 });
 
 export const routerSyncSelectionSet = defineRpc({
-  name: "agent-link.router.sync-selection.set",
+  name: "9router-agent-link.router.sync-selection.set",
   input: z.object({ selected: z.array(z.string()) }),
   output: z.object({ ok: z.boolean(), message: z.string() }),
 });
@@ -485,7 +485,7 @@ export const TunnelSchema = z.object({
 });
 
 export const routerTunnel = defineRpc({
-  name: "agent-link.router.tunnel",
+  name: "9router-agent-link.router.tunnel",
   input: z.object({}),
   output: z.object({
     tunnels: z.array(TunnelSchema),
@@ -502,7 +502,7 @@ export const routerTunnel = defineRpc({
  * actually sitting. Nothing is exposed publicly.
  */
 export const routerLocalForward = defineRpc({
-  name: "agent-link.router.local-forward",
+  name: "9router-agent-link.router.local-forward",
   input: z.object({
     /** ssh target for the daemon's host, e.g. "user@host". */
     sshTarget: z.string(),
@@ -529,7 +529,7 @@ export const routerLocalForward = defineRpc({
 
 /** Live state of the forward, so the panel can count down and reflect a close. */
 export const routerLocalForwardStatus = defineRpc({
-  name: "agent-link.router.local-forward.status",
+  name: "9router-agent-link.router.local-forward.status",
   input: z.object({}),
   output: z.object({
     open: z.boolean(),
@@ -541,20 +541,20 @@ export const routerLocalForwardStatus = defineRpc({
 });
 
 export const routerLocalForwardStop = defineRpc({
-  name: "agent-link.router.local-forward.stop",
+  name: "9router-agent-link.router.local-forward.stop",
   input: z.object({}),
   output: z.object({ ok: z.boolean(), message: z.string() }),
 });
 
 export const routerTunnelSet = defineRpc({
-  name: "agent-link.router.tunnel.set",
+  name: "9router-agent-link.router.tunnel.set",
   input: z.object({ provider: z.enum(["cloudflare", "tailscale"]), enabled: z.boolean() }),
   output: z.object({ ok: z.boolean(), message: z.string() }),
 });
 
 /** Require a bearer key on /v1 — the thing that makes a tunnel survivable. */
 export const routerRequireApiKey = defineRpc({
-  name: "agent-link.router.require-api-key",
+  name: "9router-agent-link.router.require-api-key",
   input: z.object({ required: z.boolean() }),
   output: z.object({ ok: z.boolean(), message: z.string() }),
 });

@@ -17,15 +17,31 @@ Requires 9router (`npm install -g 9router`). Without it the panel shows an insta
 ## Install
 
 ```sh
-paseo plugin add itsjustanks/paseo-plugin-9router --path apps/paseo --id agent-link
-paseo plugin reload agent-link
+paseo plugin add itsjustanks/paseo-plugin-9router --path apps/paseo --id 9router-agent-link
+paseo plugin reload 9router-agent-link
 ```
+
+### Renaming an existing install
+
+The plugin id changed from `agent-link` to `9router-agent-link`. A daemon that
+still has the old id keeps running the old code under the old RPC namespace, so
+remove it before installing:
+
+```bash
+paseo plugin remove agent-link
+paseo plugin add itsjustanks/paseo-plugin-9router --path apps/paseo --id 9router-agent-link
+```
+
+`remove` clears configuration only; it never deletes source. Your accounts,
+settings and router state are untouched — they live in `~/.agent-link`, which is
+keyed to the tool rather than to the plugin id.
+
 
 For local development from a checkout:
 
 ```sh
 agent-link app install paseo --link
-paseo plugin reload agent-link
+paseo plugin reload 9router-agent-link
 ```
 
 Then open **9Router** in the sidebar.
@@ -77,7 +93,7 @@ Restoring Claude also clears any `ANTHROPIC_DEFAULT_*` value still pointing at a
 
 **A model 400s with a version message.** 9router sends its own hardcoded Claude Code version, not yours. A model gated behind a newer client fails until 9router bumps it.
 
-**Nothing appears in the picker after Sync.** Check `paseo plugin logs agent-link`, then reload Paseo. Sync writes a `ninerouter` provider and refreshes it; it never restarts the daemon.
+**Nothing appears in the picker after Sync.** Check `paseo plugin logs 9router-agent-link`, then reload Paseo. Sync writes a `ninerouter` provider and refreshes it; it never restarts the daemon.
 
 ## License
 

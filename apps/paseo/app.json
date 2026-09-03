@@ -4,5 +4,5 @@
   "summary": "Accounts, quotas and models from a local 9router, wired into Paseo",
   "requires": "paseo",
   "kind": "paseo-plugin",
-  "pluginId": "agent-link"
+  "pluginId": "9router-agent-link"
 }

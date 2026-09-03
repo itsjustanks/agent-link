@@ -395,7 +395,7 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
   const callForwardStatus = useRpc(routerLocalForwardStatus);
 
   const status = useQuery({
-    queryKey: ["agent-link", "router-status"],
+    queryKey: ["9router-agent-link", "router-status"],
     queryFn: () => callStatus({}),
     refetchInterval: 15_000,
   });
@@ -431,58 +431,58 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
   const [testResult, setTestResult] = useState<{ model: string; ok: boolean; message: string } | null>(null);
 
   const usage = useQuery({
-    queryKey: ["agent-link", "usage-stats"],
+    queryKey: ["9router-agent-link", "usage-stats"],
     queryFn: () => callUsageStats({}),
     enabled: live && tab === "usage",
     refetchInterval: 30_000,
   });
   const tuning = useQuery({
-    queryKey: ["agent-link", "tuning"],
+    queryKey: ["9router-agent-link", "tuning"],
     queryFn: () => callTuning({}),
     enabled: live && tab === "tuning",
   });
   const logs = useQuery({
-    queryKey: ["agent-link", "logs"],
+    queryKey: ["9router-agent-link", "logs"],
     queryFn: () => callLogs({ limit: 200 }),
     enabled: live && tab === "logs",
     refetchInterval: tab === "logs" ? 4_000 : false,
   });
   const keys = useQuery({
-    queryKey: ["agent-link", "keys"],
+    queryKey: ["9router-agent-link", "keys"],
     queryFn: () => callKeys({}),
     enabled: live && tab === "keys",
   });
   const combos = useQuery({
-    queryKey: ["agent-link", "combos"],
+    queryKey: ["9router-agent-link", "combos"],
     queryFn: () => callCombos({}),
     enabled: live && (tab === "keys" || tab === "models"),
   });
   const powerUps = useQuery({
-    queryKey: ["agent-link", "power-ups"],
+    queryKey: ["9router-agent-link", "power-ups"],
     queryFn: () => callPowerUps({}),
     enabled: tab === "powerups",
   });
   const syncSelection = useQuery({
-    queryKey: ["agent-link", "sync-selection"],
+    queryKey: ["9router-agent-link", "sync-selection"],
     queryFn: () => callSyncSelection({}),
     enabled: tab === "models",
   });
   const tunnel = useQuery({
-    queryKey: ["agent-link", "tunnel"],
+    queryKey: ["9router-agent-link", "tunnel"],
     queryFn: () => callTunnel({}),
     enabled: live && tab === "setup",
     // A tunnel takes a few seconds to publish its URL, so poll while open.
     refetchInterval: tab === "setup" ? 8_000 : false,
   });
   const holds = useQuery({
-    queryKey: ["agent-link", "holds"],
+    queryKey: ["9router-agent-link", "holds"],
     queryFn: () => callHolds({}),
     enabled: live,
     refetchInterval: 30_000,
   });
 
   const refresh = () => {
-    void queryClient.invalidateQueries({ queryKey: ["agent-link"] });
+    void queryClient.invalidateQueries({ queryKey: ["9router-agent-link"] });
   };
   const feedback = {
     onSuccess: (result: { message?: string }) => {
@@ -614,7 +614,7 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
   // this machine's port instead — the wrong router, or nothing. The forward
   // below makes the same URL mean the right thing.
   const forward = useQuery({
-    queryKey: ["agent-link", "local-forward"],
+    queryKey: ["9router-agent-link", "local-forward"],
     queryFn: () => callForwardStatus({}),
     refetchInterval: 20_000,
   });
