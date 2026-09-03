@@ -1107,20 +1107,52 @@ export async function handleRouterRequireApiKey({ required }: { required: boolea
  * One forward at a time, tracked at module scope so it survives across handler
  * calls (the plugin subprocess outlives them) and can be replaced or stopped.
  */
-let localForward: { child: ReturnType<typeof spawn>; port: number; target: string } | null = null;
+let localForward: {
+  child: ReturnType<typeof spawn>;
+  port: number;
+  target: string;
+  expiresAt: number | null;
+  timer: ReturnType<typeof setTimeout> | null;
+} | null = null;
 
 function forwardAlive(): boolean {
   return Boolean(localForward && localForward.child.exitCode === null && !localForward.child.killed);
 }
 
+/** Drop the forward and its timer together, so neither outlives the other. */
+function clearForward(): void {
+  if (localForward?.timer) clearTimeout(localForward.timer);
+  localForward = null;
+}
+
 export async function handleRouterLocalForwardStop() {
   if (!forwardAlive()) {
-    localForward = null;
+    clearForward();
     return { ok: true, message: "No forward was running." };
   }
   localForward?.child.kill();
-  localForward = null;
+  clearForward();
   return { ok: true, message: "Forward closed." };
+}
+
+/**
+ * What the panel polls. A forward can die on its own — the timer fires, ssh
+ * drops, the network goes — so the panel asks rather than assuming the state it
+ * last saw is still true.
+ */
+export async function handleRouterLocalForwardStatus() {
+  if (!forwardAlive()) {
+    clearForward();
+    return { open: false, url: null, localPort: null, target: null, expiresAt: null };
+  }
+  const state = localForward!;
+  return {
+    open: true,
+    url: `http://127.0.0.1:${state.port}/dashboard`,
+    localPort: state.port,
+    target: state.target,
+    expiresAt: state.expiresAt ? new Date(state.expiresAt).toISOString() : null,
+  };
 }
 
 export async function handleRouterLocalForward(input: {
@@ -1128,6 +1160,7 @@ export async function handleRouterLocalForward(input: {
   sshPort: number | null;
   identityFile: string | null;
   remotePort: number;
+  ttlMinutes: number | null;
 }) {
   const target = input.sshTarget.trim();
   if (!target) {
@@ -1140,6 +1173,7 @@ export async function handleRouterLocalForward(input: {
       ok: fallback.url !== null,
       url: fallback.url,
       localPort: null,
+      expiresAt: null,
       message: fallback.message,
     };
   }
@@ -1150,11 +1184,12 @@ export async function handleRouterLocalForward(input: {
       ok: true,
       url: `http://127.0.0.1:${localForward.port}/dashboard`,
       localPort: localForward.port,
+      expiresAt: localForward.expiresAt ? new Date(localForward.expiresAt).toISOString() : null,
       message: "Forward already open.",
     };
   }
   if (forwardAlive()) localForward?.child.kill();
-  localForward = null;
+  clearForward();
 
   // Offset from the remote port so a local router on the standard port keeps
   // working while a remote one is being viewed.
@@ -1189,7 +1224,7 @@ export async function handleRouterLocalForward(input: {
   for (;;) {
     if (child.exitCode !== null) {
       const detail = stderr.trim().split("\n").pop() ?? `ssh exited (${child.exitCode})`;
-      return { ok: false, url: null, localPort: null, message: detail };
+      return { ok: false, url: null, localPort: null, expiresAt: null, message: detail };
     }
     const reachable = await new Promise<boolean>((resolve) => {
       const socket = connect({ host: "127.0.0.1", port: localPort });
@@ -1206,17 +1241,43 @@ export async function handleRouterLocalForward(input: {
     if (Date.now() > deadline) {
       child.kill();
       const detail = stderr.trim().split("\n").pop() ?? "the forward did not come up in time";
-      return { ok: false, url: null, localPort: null, message: detail };
+      return { ok: false, url: null, localPort: null, expiresAt: null, message: detail };
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
 
-  localForward = { child, port: localPort, target };
+  // A forward is a hole to an accounts dashboard. Default it to a short life so
+  // a closed tab does not leave one open for the rest of the session; the timer
+  // is cleared with the forward so a manual stop cannot leave it armed against
+  // a later, unrelated forward.
+  const ttl = input.ttlMinutes && input.ttlMinutes > 0 ? Math.min(input.ttlMinutes, 240) : null;
+  const expiresAt = ttl ? Date.now() + ttl * 60_000 : null;
+  const timer = ttl
+    ? setTimeout(() => {
+        if (localForward?.child === child) {
+          child.kill();
+          clearForward();
+        }
+      }, ttl * 60_000)
+    : null;
+  // Node keeps the event loop alive for a pending timer; this one must not hold
+  // the plugin subprocess open on its own.
+  timer?.unref?.();
+
+  // ssh can die without us asking — the network drops, the far host reboots.
+  // Reflect that rather than reporting a forward that is no longer there.
+  child.once("exit", () => {
+    if (localForward?.child === child) clearForward();
+  });
+
+  localForward = { child, port: localPort, target, expiresAt, timer };
+  const window = ttl ? ` Closes in ${ttl} min.` : "";
   return {
     ok: true,
     url: `http://127.0.0.1:${localPort}/dashboard`,
     localPort,
-    message: `Forwarding ${target}:${input.remotePort} to 127.0.0.1:${localPort}.`,
+    expiresAt: expiresAt ? new Date(expiresAt).toISOString() : null,
+    message: `Forwarding ${target}:${input.remotePort} to 127.0.0.1:${localPort}.${window}`,
   };
 }
 

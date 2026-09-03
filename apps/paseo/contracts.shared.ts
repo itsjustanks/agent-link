@@ -510,12 +510,33 @@ export const routerLocalForward = defineRpc({
     identityFile: z.string().nullable(),
     /** Port the router listens on over there. */
     remotePort: z.number(),
+    /**
+     * Close the forward automatically after this many minutes. A forward is a
+     * hole to an accounts dashboard; leaving one open indefinitely because a
+     * tab was closed is the failure worth designing against.
+     */
+    ttlMinutes: z.number().nullable(),
   }),
   output: z.object({
     ok: z.boolean(),
     url: z.string().nullable(),
     localPort: z.number().nullable(),
+    /** When the forward closes itself, ISO 8601; null when it will not. */
+    expiresAt: z.string().nullable(),
     message: z.string(),
+  }),
+});
+
+/** Live state of the forward, so the panel can count down and reflect a close. */
+export const routerLocalForwardStatus = defineRpc({
+  name: "agent-link.router.local-forward.status",
+  input: z.object({}),
+  output: z.object({
+    open: z.boolean(),
+    url: z.string().nullable(),
+    localPort: z.number().nullable(),
+    target: z.string().nullable(),
+    expiresAt: z.string().nullable(),
   }),
 });
 

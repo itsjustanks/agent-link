@@ -1,7 +1,7 @@
 import type { PluginSurfaceProps, PluginTheme } from "@getpaseo/plugin";
 import { useRpc } from "@getpaseo/plugin";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { ActivityIndicator, Clipboard, Linking, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import type { CliHijack, Connection, RouterStatus } from "./contracts.shared";
 import {
@@ -38,6 +38,9 @@ import {
   routerSyncSelectionSet,
   routerTunnel,
   routerTunnelSet,
+  routerLocalForward,
+  routerLocalForwardStatus,
+  routerLocalForwardStop,
   routerRequireApiKey,
 } from "./contracts.shared";
 import { cliForModel, formatReset, groupModelIds, parseOauthPaste, providerLabel, quotaTone } from "./router.logic";
@@ -387,6 +390,9 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
   const callTunnel = useRpc(routerTunnel);
   const callTunnelSet = useRpc(routerTunnelSet);
   const callRequireApiKey = useRpc(routerRequireApiKey);
+  const callForward = useRpc(routerLocalForward);
+  const callForwardStop = useRpc(routerLocalForwardStop);
+  const callForwardStatus = useRpc(routerLocalForwardStatus);
 
   const status = useQuery({
     queryKey: ["agent-link", "router-status"],
@@ -603,12 +609,87 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
     });
   };
 
-  const openDashboard = () => {
-    const target = data?.dashboardUrl ?? "";
+  // The dashboard is bound to the ROUTER's loopback. Opening its URL opens it on
+  // whichever machine the app runs on, so for a remote daemon the link reaches
+  // this machine's port instead — the wrong router, or nothing. The forward
+  // below makes the same URL mean the right thing.
+  const forward = useQuery({
+    queryKey: ["agent-link", "local-forward"],
+    queryFn: () => callForwardStatus({}),
+    refetchInterval: 20_000,
+  });
+
+  const [forwardHost, setForwardHost] = useState("");
+  const [forwardKey, setForwardKey] = useState("");
+  const [forwardMinutes, setForwardMinutes] = useState("5");
+  const [forwardCountdown, setForwardCountdown] = useState<string | null>(null);
+
+  // Tick locally rather than polling: the expiry is known, and a countdown that
+  // only moves every 20s reads as broken.
+  const expiresAt = forward.data?.expiresAt ?? null;
+  useEffect(() => {
+    if (!expiresAt) {
+      setForwardCountdown(null);
+      return;
+    }
+    const tick = () => {
+      const left = Date.parse(expiresAt) - Date.now();
+      if (Number.isNaN(left) || left <= 0) {
+        setForwardCountdown("closing…");
+        void forward.refetch();
+        return;
+      }
+      const total = Math.round(left / 1000);
+      setForwardCountdown(`${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`);
+    };
+    tick();
+    const handle = setInterval(tick, 1000);
+    return () => clearInterval(handle);
+  }, [expiresAt]);
+
+  const openUrl = (target: string, hint: string) => {
     void Linking.openURL(target).catch(() => {
       Clipboard.setString(target);
-      setMessage(`Copied ${target} — paste it into a Paseo browser tab (⌘⇧B).`);
+      setMessage(`Copied ${target} — ${hint}`);
     });
+  };
+
+  const openDashboard = () => {
+    // Prefer a live forward: it is the only URL that reaches a remote router.
+    const forwarded = forward.data?.open ? forward.data.url : null;
+    const target = forwarded ?? data?.dashboardUrl ?? "";
+    openUrl(target, "paste it into a Paseo browser tab (⌘⇧B).");
+  };
+
+  const openForward = () => {
+    const host = forwardHost.trim();
+    if (!host) {
+      setMessage("Enter the daemon's SSH target first, e.g. user@host.");
+      return;
+    }
+    const minutes = Number.parseInt(forwardMinutes, 10);
+    void callForward({
+      sshTarget: host,
+      sshPort: null,
+      identityFile: forwardKey.trim() || null,
+      remotePort: 20128,
+      ttlMinutes: Number.isFinite(minutes) && minutes > 0 ? minutes : 5,
+    })
+      .then((result) => {
+        setMessage(result.message);
+        void forward.refetch();
+        if (result.ok && result.url) openUrl(result.url, "open it in a Paseo browser tab (⌘⇧B).");
+      })
+      .catch((error: unknown) => setMessage(error instanceof Error ? error.message : String(error)));
+  };
+
+  const closeForward = () => {
+    void callForwardStop({})
+      .then((result) => {
+        setMessage(result.message);
+        void forward.refetch();
+      })
+      .catch((error: unknown) => setMessage(error instanceof Error ? error.message : String(error)));
   };
 
   return (
@@ -738,6 +819,42 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
                 }}
               />
             </View>
+            {forward.data?.open ? (
+              <Note theme={theme} tone="warning">
+                Forwarding {forward.data.target} to 127.0.0.1:{forward.data.localPort}
+                {forwardCountdown ? ` — closes in ${forwardCountdown}` : ""}. "Open dashboard" now reaches that
+                router, not this one.
+              </Note>
+            ) : null}
+          </Card>
+
+          <Card theme={theme}>
+            <Step theme={theme} index={0} title="Remote dashboard" hint={forward.data?.open ? "forwarding" : undefined} />
+            <Note theme={theme}>
+              A dashboard is bound to its own machine's loopback, so opening the link from here reaches THIS
+              machine's port — the wrong router, or nothing at all. Forward the remote port over SSH and the same
+              link resolves where you are sitting. Nothing is published; the forward closes itself when the timer
+              runs out.
+            </Note>
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+              <Field theme={theme} value={forwardHost} onChangeText={setForwardHost} placeholder="user@host" />
+              <Field theme={theme} value={forwardKey} onChangeText={setForwardKey} placeholder="~/.ssh/id_ed25519 (optional)" />
+              <Field theme={theme} value={forwardMinutes} onChangeText={setForwardMinutes} placeholder="minutes (5)" />
+            </View>
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+              {forward.data?.open ? (
+                <>
+                  <Button theme={theme} label={`Open (${forwardCountdown ?? "open"})`} tone="primary" onPress={openDashboard} />
+                  <Button theme={theme} label="Close forward" tone="danger" onPress={closeForward} />
+                </>
+              ) : (
+                <Button theme={theme} label="Forward and open" tone="primary" onPress={openForward} />
+              )}
+            </View>
+            <Note theme={theme}>
+              Always name a key when the host runs fail2ban: without one, ssh offers every key the agent holds and
+              a host that refuses too many can ban this machine for its ban window.
+            </Note>
           </Card>
 
           <Card theme={theme}>

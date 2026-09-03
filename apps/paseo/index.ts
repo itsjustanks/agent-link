@@ -36,6 +36,7 @@ import {
   routerTunnel,
   routerTunnelSet,
   routerLocalForward,
+  routerLocalForwardStatus,
   routerLocalForwardStop,
   routerRequireApiKey,
 } from "./contracts.shared";
@@ -76,6 +77,7 @@ import {
   handleRouterTunnel,
   handleRouterTunnelSet,
   handleRouterLocalForward,
+  handleRouterLocalForwardStatus,
   handleRouterLocalForwardStop,
   handleRouterRequireApiKey,
 } from "./handlers.server";
@@ -119,6 +121,7 @@ export default function contribute(plugin: PluginContext) {
   plugin.handle(routerTunnelSet, handleRouterTunnelSet);
   plugin.handle(routerLocalForward, handleRouterLocalForward);
   plugin.handle(routerLocalForwardStop, handleRouterLocalForwardStop);
+  plugin.handle(routerLocalForwardStatus, handleRouterLocalForwardStatus);
   plugin.handle(routerRequireApiKey, handleRouterRequireApiKey);
 
   plugin.addSurface("agent-link", AgentLinkSurface);
