@@ -21,6 +21,9 @@ import {
   routerCatalogSync,
   routerConnectionHealth,
   routerRequestLogs,
+  routerConnectionOrder,
+  routerConnectionPrioritySet,
+  routerConnectionActiveSet,
   routerHolds,
   routerClearHold,
   routerTestModel,
@@ -375,6 +378,9 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
   const callCatalogSync = useRpc(routerCatalogSync);
   const callConnectionHealth = useRpc(routerConnectionHealth);
   const callRequestLogs = useRpc(routerRequestLogs);
+  const callConnectionOrder = useRpc(routerConnectionOrder);
+  const callPrioritySet = useRpc(routerConnectionPrioritySet);
+  const callActiveSet = useRpc(routerConnectionActiveSet);
   const callHolds = useRpc(routerHolds);
   const callClearHold = useRpc(routerClearHold);
   const callTestModel = useRpc(routerTestModel);
@@ -436,6 +442,11 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<{ model: string; ok: boolean; message: string } | null>(null);
 
+  const order = useQuery({
+    queryKey: ["agent-link-9router", "connection-order"],
+    queryFn: () => callConnectionOrder({}),
+    enabled: live && tab === "accounts",
+  });
   // Connection health is what explains a model that will not answer, so it
   // loads with the Accounts tab rather than behind a button.
   const health = useQuery({
@@ -517,6 +528,8 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
   const routeMutation = useMutation({ mutationFn: callRouteCli, ...feedback });
   const syncMutation = useMutation({ mutationFn: callSyncModels, ...feedback });
   const catalogSyncMutation = useMutation({ mutationFn: callCatalogSync, ...feedback });
+  const priorityMutation = useMutation({ mutationFn: callPrioritySet, ...feedback });
+  const activeMutation = useMutation({ mutationFn: callActiveSet, ...feedback });
   const removeMutation = useMutation({ mutationFn: callRemoveConnection, ...feedback });
   const exposeMutation = useMutation({ mutationFn: callExpose, ...feedback });
   const aliasSetMutation = useMutation({ mutationFn: callAliasSet, ...feedback });
@@ -1048,6 +1061,56 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
       {/* ---------------------------------------------------------- ACCOUNTS */}
       {tab === "accounts" ? (
         <>
+          <Card theme={theme}>
+            <Step theme={theme} index={0} title="Order accounts" hint={`${order.data?.connections.length ?? 0}`} />
+            <Note theme={theme}>
+              9router tries accounts in priority order, lowest first, so this decides which one answers. Park an
+              account to rest it without deleting it — its tokens are kept.
+            </Note>
+            {(order.data?.connections ?? []).map((connection) => (
+              <View
+                key={connection.id}
+                style={{
+                  flexDirection: "row",
+                  alignItems: "center",
+                  gap: 8,
+                  padding: 8,
+                  borderRadius: 8,
+                  backgroundColor: theme.colors.surface2,
+                  opacity: connection.isActive ? 1 : 0.55,
+                }}
+              >
+                <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11, width: 22 }}>
+                  {connection.priority}
+                </Text>
+                <Text style={{ color: theme.colors.foreground, fontSize: 12, flex: 1 }} numberOfLines={1}>
+                  {providerLabel(connection.provider)} · {connection.label}
+                </Text>
+                <Button
+                  theme={theme}
+                  label="↑"
+                  disabled={connection.priority <= 1 || priorityMutation.isPending}
+                  onPress={() =>
+                    priorityMutation.mutate({ id: connection.id, priority: connection.priority - 1 })
+                  }
+                />
+                <Button
+                  theme={theme}
+                  label="↓"
+                  disabled={connection.priority >= 99 || priorityMutation.isPending}
+                  onPress={() =>
+                    priorityMutation.mutate({ id: connection.id, priority: connection.priority + 1 })
+                  }
+                />
+                <Button
+                  theme={theme}
+                  label={connection.isActive ? "Park" : "Use"}
+                  busy={activeMutation.isPending}
+                  onPress={() => activeMutation.mutate({ id: connection.id, isActive: !connection.isActive })}
+                />
+              </View>
+            ))}
+          </Card>
           <Card theme={theme}>
             <Step theme={theme} index={0} title="Account health" hint={`${health.data?.connections.length ?? 0}`} />
             <Note theme={theme}>

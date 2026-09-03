@@ -1428,3 +1428,81 @@ export async function handleRouterRequestLogs({
       : requests,
   };
 }
+
+/** Connections in the order 9router will try them. */
+export async function handleRouterConnectionOrder() {
+  const client = new RouterClient();
+  const raw = await client.api<{
+    connections?: Array<Record<string, unknown>>;
+    providers?: Array<Record<string, unknown>>;
+  }>("providers");
+  const rows = raw?.connections ?? raw?.providers ?? [];
+  const text = (value: unknown) => (typeof value === "string" ? value : "");
+
+  return {
+    connections: rows
+      .map((row) => ({
+        id: text(row.id),
+        provider: text(row.provider),
+        // Prefer the account's email: with several accounts on one provider it
+        // is the only label that says which is which.
+        label: text(row.email) || text(row.name) || text(row.id).slice(0, 8),
+        priority: typeof row.priority === "number" ? row.priority : 99,
+        isActive: row.isActive !== false && row.isActive !== 0,
+      }))
+      .sort((a, b) => a.priority - b.priority || a.label.localeCompare(b.label)),
+  };
+}
+
+/**
+ * Change one connection's priority or active flag.
+ *
+ * 9router's PUT replaces the record, so the current one is read first and the
+ * single field merged in — sending a bare `{priority}` would blank the
+ * account's credentials.
+ */
+async function updateConnection(
+  id: string,
+  patch: Record<string, unknown>,
+  describe: (label: string) => string,
+) {
+  const client = new RouterClient();
+  const current = await client.api<Record<string, unknown>>(`providers/${encodeURIComponent(id)}`);
+  if (!current) {
+    return { ok: false, message: client.authError ?? `No connection ${id}.` };
+  }
+  const body = { ...(current.provider ? current : (current.connection as object) ?? current), ...patch };
+  const saved = await client.apiJson<{ error?: string }>(
+    `providers/${encodeURIComponent(id)}`,
+    "PUT",
+    body,
+  );
+  if (!saved) {
+    return { ok: false, message: client.authError ?? "Update refused." };
+  }
+  const label =
+    (typeof current.email === "string" && current.email) ||
+    (typeof current.name === "string" && current.name) ||
+    id.slice(0, 8);
+  return { ok: true, message: describe(label) };
+}
+
+export async function handleRouterConnectionPrioritySet({
+  id,
+  priority,
+}: {
+  id: string;
+  priority: number;
+}) {
+  return updateConnection(id, { priority }, (label) => `${label} is now priority ${priority}.`);
+}
+
+export async function handleRouterConnectionActiveSet({
+  id,
+  isActive,
+}: {
+  id: string;
+  isActive: boolean;
+}) {
+  return updateConnection(id, { isActive }, (label) => `${label} is now ${isActive ? "active" : "parked"}.`);
+}

@@ -624,3 +624,38 @@ export const routerRequestLogs = defineRpc({
   }),
   output: z.object({ requests: z.array(RequestLogSchema) }),
 });
+
+/**
+ * Account ordering.
+ *
+ * 9router tries connections in `priority` order, so priority is what decides
+ * which account answers a request — the single most consequential setting in
+ * the dashboard, and the one thing the panel could not change. `isActive`
+ * parks an account without deleting it, which is how you rest a rate-limited
+ * account and keep its tokens.
+ */
+export const ConnectionOrderSchema = z.object({
+  id: z.string(),
+  provider: z.string(),
+  label: z.string(),
+  priority: z.number(),
+  isActive: z.boolean(),
+});
+
+export const routerConnectionOrder = defineRpc({
+  name: "agent-link-9router.router.connection-order",
+  input: z.object({}),
+  output: z.object({ connections: z.array(ConnectionOrderSchema) }),
+});
+
+export const routerConnectionPrioritySet = defineRpc({
+  name: "agent-link-9router.router.connection-priority.set",
+  input: z.object({ id: z.string(), priority: z.number().min(1).max(99) }),
+  output: z.object({ ok: z.boolean(), message: z.string() }),
+});
+
+export const routerConnectionActiveSet = defineRpc({
+  name: "agent-link-9router.router.connection-active.set",
+  input: z.object({ id: z.string(), isActive: z.boolean() }),
+  output: z.object({ ok: z.boolean(), message: z.string() }),
+});
