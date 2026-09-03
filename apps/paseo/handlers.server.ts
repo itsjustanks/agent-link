@@ -1605,3 +1605,215 @@ export async function handleRouterModelAvailability() {
 
   return { models };
 }
+
+/** Read the router's own aggregate rather than recomputing it from usageDaily. */
+export async function handleRouterSpend(input: { days: number | null }) {
+  const client = new RouterClient();
+  const path = input.days === null ? "usage/stats" : `usage/history?days=${input.days}`;
+  const stats = await client.api<Record<string, unknown>>(path);
+  if (!stats) {
+    return {
+      ok: false,
+      message: client.authError ?? "9router did not return usage.",
+      totals: null,
+      byProvider: [],
+      byModel: [],
+      byAccount: [],
+    };
+  }
+
+  const num = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) ? value : 0);
+  const row = (label: string, source: Record<string, unknown>) => ({
+    label,
+    requests: num(source.requests),
+    promptTokens: num(source.promptTokens),
+    completionTokens: num(source.completionTokens),
+    cachedTokens: num(source.cachedTokens),
+    cost: num(source.cost),
+    lastUsed: typeof source.lastUsed === "string" ? source.lastUsed : null,
+  });
+
+  // Spend rows are only useful ranked — an unsorted list of 20 models buries
+  // the one account that burned the quota.
+  const group = (key: string) => {
+    const raw = stats[key];
+    if (!raw || typeof raw !== "object") return [];
+    return Object.entries(raw as Record<string, Record<string, unknown>>)
+      .map(([label, value]) => row(label, value ?? {}))
+      .sort((a, b) => b.cost - a.cost || b.requests - a.requests);
+  };
+
+  // byAccount is keyed by connection id; resolve it to the email the user knows.
+  const connections = await client.api<{ providers?: Array<Record<string, unknown>>; connections?: Array<Record<string, unknown>> }>("providers");
+  const names = new Map<string, string>();
+  for (const entry of connections?.providers ?? connections?.connections ?? []) {
+    const id = typeof entry.id === "string" ? entry.id : null;
+    const name = typeof entry.name === "string" ? entry.name : typeof entry.label === "string" ? entry.label : null;
+    if (id && name) names.set(id, name);
+  }
+
+  return {
+    ok: true,
+    message: null,
+    totals: {
+      label: input.days === null ? "All time" : `Last ${input.days}d`,
+      requests: num(stats.totalRequests),
+      promptTokens: num(stats.totalPromptTokens),
+      completionTokens: num(stats.totalCompletionTokens),
+      cachedTokens: num(stats.totalCachedTokens),
+      cost: num(stats.totalCost),
+      lastUsed: null,
+    },
+    byProvider: group("byProvider"),
+    byModel: group("byModel"),
+    byAccount: group("byAccount").map((entry) => ({ ...entry, label: names.get(entry.label) ?? entry.label })),
+  };
+}
+
+/**
+ * Where each installed CLI actually sends traffic.
+ *
+ * `installed` and `routed` are separate on purpose: Codex was installed and
+ * configured while still reaching api.openai.com directly, because its base
+ * URL lives in config.toml and never saw Claude's environment variables.
+ */
+export async function handleRouterCliTools() {
+  const client = new RouterClient();
+  const statuses = await client.api<Record<string, Record<string, unknown>>>("cli-tools/all-statuses");
+  if (!statuses) return { tools: [] };
+
+  const routerHost = (() => {
+    try {
+      return new URL(client.url).host;
+    } catch {
+      return null;
+    }
+  })();
+
+  // The base URL hides in a different place per tool; search rather than
+  // hardcode, so a tool that moves its key still reports honestly.
+  const findBaseUrl = (value: unknown, depth = 0): string | null => {
+    if (depth > 6) return null;
+    if (typeof value === "string") return /^https?:\/\//.test(value) ? value : null;
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        const found = findBaseUrl(entry, depth + 1);
+        if (found) return found;
+      }
+      return null;
+    }
+    if (value && typeof value === "object") {
+      for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+        if (!/url|endpoint|base/i.test(key)) continue;
+        const found = findBaseUrl(entry, depth + 1);
+        if (found) return found;
+      }
+      for (const entry of Object.values(value as Record<string, unknown>)) {
+        const found = findBaseUrl(entry, depth + 1);
+        if (found) return found;
+      }
+    }
+    return null;
+  };
+
+  const tools = Object.entries(statuses)
+    .map(([id, raw]) => {
+      const source = raw ?? {};
+      const installed = source.installed === true;
+      const baseUrl = findBaseUrl(source.settings ?? source);
+      let routed = false;
+      if (baseUrl && routerHost) {
+        try {
+          routed = new URL(baseUrl).host === routerHost;
+        } catch {
+          routed = false;
+        }
+      }
+      const detail = !installed
+        ? "Not installed."
+        : routed
+          ? "Routed through 9router."
+          : baseUrl
+            ? `Bypassing 9router — reaches ${(() => {
+                try {
+                  return new URL(baseUrl).host;
+                } catch {
+                  return baseUrl;
+                }
+              })()} directly.`
+            : "Installed, but no base URL configured.";
+      return {
+        id,
+        label: id.replace(/(^|-)([a-z])/g, (_m, sep: string, ch: string) => `${sep ? " " : ""}${ch.toUpperCase()}`),
+        installed,
+        routed,
+        baseUrl,
+        detail,
+      };
+    })
+    // Installed tools first, then bypassing ones — the actionable rows on top.
+    .sort((a, b) => Number(b.installed) - Number(a.installed) || Number(a.routed) - Number(b.routed) || a.id.localeCompare(b.id));
+
+  return { tools };
+}
+
+export async function handleRouterProxyPools() {
+  const client = new RouterClient();
+  const [pools, nodes] = await Promise.all([
+    client.api<{ proxyPools?: Array<Record<string, unknown>> }>("proxy-pools"),
+    client.api<{ nodes?: Array<Record<string, unknown>> }>("provider-nodes"),
+  ]);
+
+  const shape = (entry: Record<string, unknown>, fallbackKind: string) => {
+    const id = typeof entry.id === "string" ? entry.id : String(entry.id ?? "");
+    const label =
+      typeof entry.name === "string" ? entry.name : typeof entry.label === "string" ? entry.label : id || "(unnamed)";
+    const kind = typeof entry.type === "string" ? entry.type : typeof entry.provider === "string" ? entry.provider : fallbackKind;
+    const active = entry.isActive !== false && entry.enabled !== false;
+    const url = typeof entry.baseUrl === "string" ? entry.baseUrl : typeof entry.url === "string" ? entry.url : null;
+    return { id, label, kind, active, detail: url ?? (active ? "Active." : "Inactive.") };
+  };
+
+  return {
+    pools: (pools?.proxyPools ?? []).map((entry) => shape(entry, "pool")),
+    nodes: (nodes?.nodes ?? []).map((entry) => shape(entry, "node")),
+  };
+}
+
+export async function handleRouterPxpipe() {
+  const client = new RouterClient();
+  const status = await client.api<Record<string, unknown>>("pxpipe/status");
+  if (!status) {
+    return {
+      installed: false,
+      running: false,
+      enabled: false,
+      version: null,
+      mode: null,
+      minChars: null,
+      detail: client.authError ?? "9router did not report pxpipe.",
+    };
+  }
+  const installed = status.installed === true;
+  const running = status.running === true;
+  const enabled = status.enabled === true;
+  const minChars = typeof status.minChars === "number" ? status.minChars : null;
+  const detail = !installed
+    ? status.installing === true
+      ? "Installing…"
+      : "Not installed — 9router installs it on first use."
+    : !enabled
+      ? "Installed but disabled."
+      : running
+        ? `Compacting prompts over ${minChars ?? "?"} characters.`
+        : "Enabled but not running.";
+  return {
+    installed,
+    running,
+    enabled,
+    version: typeof status.version === "string" ? status.version : null,
+    mode: typeof status.mode === "string" ? status.mode : null,
+    minChars,
+    detail,
+  };
+}

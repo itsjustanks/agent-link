@@ -25,6 +25,10 @@ import {
   routerConnectionPrioritySet,
   routerConnectionActiveSet,
   routerModelAvailability,
+  routerSpend,
+  routerCliTools,
+  routerProxyPools,
+  routerPxpipe,
   routerHolds,
   routerClearHold,
   routerTestModel,
@@ -240,6 +244,7 @@ const TABS = [
   { id: "tuning", label: "Tuning" },
   { id: "powerups", label: "Power-ups" },
   { id: "usage", label: "Usage" },
+  { id: "routing", label: "Routing" },
   { id: "logs", label: "Logs" },
 ] as const;
 type TabId = (typeof TABS)[number]["id"];
@@ -383,6 +388,10 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
   const callPrioritySet = useRpc(routerConnectionPrioritySet);
   const callActiveSet = useRpc(routerConnectionActiveSet);
   const callAvailability = useRpc(routerModelAvailability);
+  const callSpend = useRpc(routerSpend);
+  const callCliTools = useRpc(routerCliTools);
+  const callProxyPools = useRpc(routerProxyPools);
+  const callPxpipe = useRpc(routerPxpipe);
   const callHolds = useRpc(routerHolds);
   const callClearHold = useRpc(routerClearHold);
   const callTestModel = useRpc(routerTestModel);
@@ -468,6 +477,29 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
     queryFn: () => callRequestLogs({ limit: 25, errorsOnly: true }),
     enabled: live && tab === "logs",
     refetchInterval: tab === "logs" ? 8_000 : false,
+  });
+  const spend = useQuery({
+    queryKey: ["agent-link-9router", "spend"],
+    queryFn: () => callSpend({ days: null }),
+    enabled: live && tab === "usage",
+    refetchInterval: tab === "usage" ? 30_000 : false,
+  });
+  const cliTools = useQuery({
+    queryKey: ["agent-link-9router", "cli-tools"],
+    queryFn: () => callCliTools({}),
+    enabled: live && tab === "routing",
+    refetchInterval: tab === "routing" ? 20_000 : false,
+  });
+  const proxyPools = useQuery({
+    queryKey: ["agent-link-9router", "proxy-pools"],
+    queryFn: () => callProxyPools({}),
+    enabled: live && tab === "routing",
+  });
+  const pxpipe = useQuery({
+    queryKey: ["agent-link-9router", "pxpipe"],
+    queryFn: () => callPxpipe({}),
+    enabled: live && tab === "routing",
+    refetchInterval: tab === "routing" ? 20_000 : false,
   });
   const usage = useQuery({
     queryKey: ["agent-link-9router", "usage-stats"],
@@ -1895,6 +1927,112 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
               ))}
             </Card>
           ) : null}
+
+          {spend.data?.byAccount.length ? (
+            <Card theme={theme}>
+              <Step
+                theme={theme}
+                index={0}
+                title="By account"
+                hint="who is spending the quota"
+              />
+              <Note theme={theme}>
+                Rate limits are per account, so this is the row that explains a 429: the account at the top of this
+                list is the one that hit its ceiling, even though every account shares the same model list.
+              </Note>
+              {spend.data.byAccount.map((entry) => (
+                <Row
+                  key={entry.label}
+                  theme={theme}
+                  label={entry.label}
+                  value={`${entry.requests.toLocaleString()} req · ${Math.round(entry.promptTokens / 1e6)}M tok`}
+                />
+              ))}
+            </Card>
+          ) : null}
+        </>
+      ) : null}
+
+      {tab === "routing" ? (
+        <>
+          <Card theme={theme}>
+            <Step theme={theme} index={0} title="CLI tools" hint="where each one actually sends traffic" />
+            <Note theme={theme}>
+              Installed and routed are different things. Codex reads its base URL from its own config.toml and never
+              sees Claude&apos;s environment variables, so it can be fully configured and still reach the vendor
+              directly — which is exactly what a 401 from api.openai.com means.
+            </Note>
+            {!live ? <Note theme={theme} tone="warning">Finish Setup first.</Note> : null}
+            {cliTools.isLoading ? <ActivityIndicator color={theme.colors.accent} /> : null}
+            {cliTools.data?.tools.length === 0 ? <Note theme={theme}>No CLI tools detected.</Note> : null}
+            {cliTools.data?.tools.map((tool) => (
+              <View
+                key={tool.id}
+                style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 5 }}
+              >
+                <Text style={{ color: theme.colors.foreground, fontSize: 13, flex: 1 }}>{tool.label}</Text>
+                <Chip
+                  theme={theme}
+                  label={!tool.installed ? "absent" : tool.routed ? "routed" : "bypassing"}
+                  tone={!tool.installed ? "neutral" : tool.routed ? "success" : "warning"}
+                />
+              </View>
+            ))}
+            {cliTools.data?.tools.filter((tool) => tool.installed && !tool.routed).map((tool) => (
+              <Note key={`${tool.id}-detail`} theme={theme} tone="warning">
+                {tool.label}: {tool.detail}
+              </Note>
+            ))}
+          </Card>
+
+          <Card theme={theme}>
+            <Step theme={theme} index={0} title="Prompt compaction" hint="pxpipe" />
+            {pxpipe.isLoading ? <ActivityIndicator color={theme.colors.accent} /> : null}
+            {pxpipe.data ? (
+              <View style={{ gap: 5 }}>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                  <Text style={{ color: theme.colors.foreground, fontSize: 13, flex: 1 }}>Status</Text>
+                  <Chip
+                    theme={theme}
+                    label={pxpipe.data.running ? "running" : pxpipe.data.installed ? "idle" : "not installed"}
+                    tone={pxpipe.data.running ? "success" : pxpipe.data.installed ? "neutral" : "neutral"}
+                  />
+                </View>
+                <Note theme={theme}>{pxpipe.data.detail}</Note>
+                {pxpipe.data.version ? <Row theme={theme} label="Version" value={pxpipe.data.version} /> : null}
+                {pxpipe.data.mode ? <Row theme={theme} label="Mode" value={pxpipe.data.mode} /> : null}
+              </View>
+            ) : null}
+          </Card>
+
+          <Card theme={theme}>
+            <Step theme={theme} index={0} title="Proxy pools and nodes" hint="outbound paths" />
+            {proxyPools.isLoading ? <ActivityIndicator color={theme.colors.accent} /> : null}
+            {proxyPools.data && proxyPools.data.pools.length === 0 && proxyPools.data.nodes.length === 0 ? (
+              <Note theme={theme}>
+                None configured — every request leaves from this machine directly. That is the normal setup; pools
+                only matter when traffic has to exit somewhere else.
+              </Note>
+            ) : null}
+            {proxyPools.data?.pools.map((pool) => (
+              <Row
+                key={pool.id}
+                theme={theme}
+                label={`Pool · ${pool.label}`}
+                value={pool.detail}
+                tone={pool.active ? "success" : undefined}
+              />
+            ))}
+            {proxyPools.data?.nodes.map((node) => (
+              <Row
+                key={node.id}
+                theme={theme}
+                label={`Node · ${node.label}`}
+                value={node.detail}
+                tone={node.active ? "success" : undefined}
+              />
+            ))}
+          </Card>
         </>
       ) : null}
     </ScrollView>

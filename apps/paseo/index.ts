@@ -46,6 +46,10 @@ import {
   routerConnectionPrioritySet,
   routerConnectionActiveSet,
   routerModelAvailability,
+  routerSpend,
+  routerCliTools,
+  routerProxyPools,
+  routerPxpipe,
 } from "./contracts.shared";
 import {
   handleRouterAliasRemove,
@@ -94,6 +98,10 @@ import {
   handleRouterConnectionPrioritySet,
   handleRouterConnectionActiveSet,
   handleRouterModelAvailability,
+  handleRouterSpend,
+  handleRouterCliTools,
+  handleRouterProxyPools,
+  handleRouterPxpipe,
 } from "./handlers.server";
 import { AgentLinkSurface } from "./surface.client";
 
@@ -144,6 +152,10 @@ export default function contribute(plugin: PluginContext) {
   plugin.handle(routerConnectionPrioritySet, handleRouterConnectionPrioritySet);
   plugin.handle(routerConnectionActiveSet, handleRouterConnectionActiveSet);
   plugin.handle(routerModelAvailability, handleRouterModelAvailability);
+  plugin.handle(routerSpend, handleRouterSpend);
+  plugin.handle(routerCliTools, handleRouterCliTools);
+  plugin.handle(routerProxyPools, handleRouterProxyPools);
+  plugin.handle(routerPxpipe, handleRouterPxpipe);
 
   plugin.addSurface("agent-link", AgentLinkSurface);
   plugin.addSidebarItem({ id: "agent-link", title: "9Router", icon: "Users", surface: "agent-link" });

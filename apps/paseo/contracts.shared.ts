@@ -691,3 +691,95 @@ export const routerModelAvailability = defineRpc({
   input: z.object({}),
   output: z.object({ models: z.array(ModelAvailabilitySchema) }),
 });
+
+/**
+ * Spend, as the dashboard's Quota page reports it.
+ *
+ * The router already aggregates this; recomputing it from `usageDaily` would
+ * drift the moment 9router changes how it counts a cached token. Totals and
+ * per-model rows come straight from `/api/usage/stats`.
+ */
+export const SpendRowSchema = z.object({
+  label: z.string(),
+  requests: z.number(),
+  promptTokens: z.number(),
+  completionTokens: z.number(),
+  cachedTokens: z.number(),
+  cost: z.number(),
+  lastUsed: z.string().nullable(),
+});
+
+export const routerSpend = defineRpc({
+  name: "agent-link-9router.router.spend",
+  input: z.object({ days: z.number().int().min(1).max(90).nullable() }),
+  output: z.object({
+    ok: z.boolean(),
+    message: z.string().nullable(),
+    totals: SpendRowSchema.nullable(),
+    byProvider: z.array(SpendRowSchema),
+    byModel: z.array(SpendRowSchema),
+    byAccount: z.array(SpendRowSchema),
+  }),
+});
+
+/**
+ * Which CLIs are installed and where each one currently sends its traffic.
+ *
+ * A CLI can be installed, configured, and still bypassing the router — the
+ * 401s to api.openai.com came from exactly that, Codex reading its own
+ * config.toml while Claude's env vars pointed at 9router. This reports the
+ * base URL each tool resolves, so a bypass is visible rather than inferred.
+ */
+export const CliToolSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  installed: z.boolean(),
+  routed: z.boolean(),
+  baseUrl: z.string().nullable(),
+  detail: z.string(),
+});
+
+export const routerCliTools = defineRpc({
+  name: "agent-link-9router.router.cli-tools",
+  input: z.object({}),
+  output: z.object({ tools: z.array(CliToolSchema) }),
+});
+
+/** Outbound proxy pools, and the upstream nodes traffic can be forwarded to. */
+export const ProxyPoolSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  kind: z.string().nullable(),
+  active: z.boolean(),
+  detail: z.string(),
+});
+
+export const routerProxyPools = defineRpc({
+  name: "agent-link-9router.router.proxy-pools",
+  input: z.object({}),
+  output: z.object({
+    pools: z.array(ProxyPoolSchema),
+    nodes: z.array(ProxyPoolSchema),
+  }),
+});
+
+/**
+ * pxpipe — the router's prompt-compaction sidecar.
+ *
+ * Reported rather than controlled: it installs itself on demand, and a panel
+ * that offers a Start button for something not installed invites a failure
+ * the user cannot act on.
+ */
+export const routerPxpipe = defineRpc({
+  name: "agent-link-9router.router.pxpipe",
+  input: z.object({}),
+  output: z.object({
+    installed: z.boolean(),
+    running: z.boolean(),
+    enabled: z.boolean(),
+    version: z.string().nullable(),
+    mode: z.string().nullable(),
+    minChars: z.number().nullable(),
+    detail: z.string(),
+  }),
+});
