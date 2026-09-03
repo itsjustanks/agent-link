@@ -327,6 +327,30 @@ function Row({ theme, label, value, tone }: { theme: Theme; label: string; value
   );
 }
 
+/**
+ * Durations here are read at a glance, not measured, so precision past the
+ * second unit is noise: "2d 4h" answers "has it been stable?" better than
+ * "2d 4h 17m 3s".
+ */
+function formatDuration(seconds: number | null): string {
+  if (seconds === null || !Number.isFinite(seconds) || seconds < 0) return "—";
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  const m = Math.floor(seconds / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ${m % 60}m`;
+  const d = Math.floor(h / 24);
+  return `${d}d ${h % 24}h`;
+}
+
+/** Relative age, for "last seen" style values. */
+function formatAgo(iso: string | null): string {
+  if (!iso) return "—";
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return "—";
+  return `${formatDuration((Date.now() - then) / 1000)} ago`;
+}
+
 export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
   const queryClient = useQueryClient();
   const callStatus = useRpc(routerStatus);
@@ -657,11 +681,41 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
             </Card>
           ) : null}
 
+          {data && data.warnings.length > 0 ? (
+            <Card theme={theme}>
+              <Step theme={theme} index={0} title="Needs attention" />
+              {data.warnings.map((w) => (
+                <Note key={w.id} theme={theme} tone="warning">
+                  {w.severity === "danger" ? "⚠ " : ""}{w.title}. {w.detail}
+                </Note>
+              ))}
+            </Card>
+          ) : null}
+
           <Card theme={theme}>
             <Step theme={theme} index={data?.binary.path ? 2 : 3} title="Server" hint={data?.url} />
             <View style={{ gap: 5 }}>
               <Row theme={theme} label="Binary" value={data?.binary.path ?? "not installed"} tone={data?.binary.path ? "success" : "danger"} />
               <Row theme={theme} label="Status" value={data?.running ? "running" : "stopped"} tone={data?.running ? "success" : "warning"} />
+              {data?.uptime.running ? (
+                <>
+                  <Row theme={theme} label="Uptime" value={formatDuration(data.uptime.uptimeSeconds)} tone="success" />
+                  <Row theme={theme} label="Memory" value={data.uptime.rssMb !== null ? `${data.uptime.rssMb} MB` : "—"} />
+                </>
+              ) : (
+                <Row theme={theme} label="Last seen" value={formatAgo(data?.uptime.lastSeenAt ?? null)} tone="warning" />
+              )}
+              {data && data.uptime.previousRunSeconds !== null ? (
+                <Row theme={theme} label="Previous run" value={formatDuration(data.uptime.previousRunSeconds)} />
+              ) : null}
+              {data && data.uptime.restartsToday > 0 ? (
+                <Row
+                  theme={theme}
+                  label="Restarts today"
+                  value={String(data.uptime.restartsToday)}
+                  tone={data.uptime.restartsToday >= 3 ? "danger" : "warning"}
+                />
+              ) : null}
               <Row theme={theme} label="API key" value={data?.apiKey.present ? `···${data.apiKey.last4 ?? ""}` : "none"} tone={data?.apiKey.present ? "success" : "warning"} />
               {data?.version?.hasUpdate ? <Row theme={theme} label="Update" value={`${data.version.latest} available`} tone="warning" /> : null}
             </View>

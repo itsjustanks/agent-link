@@ -73,6 +73,38 @@ export const ClientVersionSchema = z.object({
   mismatch: z.boolean(),
 });
 
+/**
+ * Uptime for the local 9router process, read from the process table rather
+ * than 9router's API: /api/health returns only {ok:true} and everything
+ * richer is behind the dashboard cookie, so this keeps working in exactly
+ * the degraded states worth reporting on.
+ */
+export const UptimeSchema = z.object({
+  running: z.boolean(),
+  pid: z.number().nullable(),
+  uptimeSeconds: z.number().nullable(),
+  startedAt: z.string().nullable(),
+  rssMb: z.number().nullable(),
+  lastSeenAt: z.string().nullable(),
+  previousRunSeconds: z.number().nullable(),
+  restartsToday: z.number(),
+  history: z.array(
+    z.object({ startedAt: z.string(), endedAt: z.string().nullable(), pid: z.number() }),
+  ),
+});
+
+export type Uptime = z.infer<typeof UptimeSchema>;
+
+/** Known-problem checks for the Claude Code -> 9router path. */
+export const WarningSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  detail: z.string(),
+  severity: z.enum(["warning", "danger"]),
+});
+
+export type RouterWarning = z.infer<typeof WarningSchema>;
+
 export const RouterStatusSchema = z.object({
   clientVersion: ClientVersionSchema,
   binary: z.object({ path: z.string().nullable(), version: z.string().nullable() }),
@@ -88,6 +120,8 @@ export const RouterStatusSchema = z.object({
   aliases: z.array(AliasSchema),
   combos: z.array(z.object({ name: z.string(), models: z.array(z.string()) })),
   hijack: z.array(CliHijackSchema),
+  uptime: UptimeSchema,
+  warnings: z.array(WarningSchema),
   paseo: z.object({
     // Model ids currently listed on Paseo's native providers.
     listedModels: z.object({ claude: z.array(z.string()), codex: z.array(z.string()) }),
@@ -458,6 +492,37 @@ export const routerTunnel = defineRpc({
     requireApiKey: z.boolean(),
     localUrl: z.string(),
   }),
+});
+
+/**
+ * A remote daemon's dashboard is bound to ITS loopback, so the panel's "Open"
+ * button — which opens the URL on whichever machine the app is running on —
+ * reaches the wrong machine entirely, or nothing at all. This forwards the
+ * remote port to a local one over SSH so the link resolves where the user is
+ * actually sitting. Nothing is exposed publicly.
+ */
+export const routerLocalForward = defineRpc({
+  name: "agent-link.router.local-forward",
+  input: z.object({
+    /** ssh target for the daemon's host, e.g. "user@host". */
+    sshTarget: z.string(),
+    sshPort: z.number().nullable(),
+    identityFile: z.string().nullable(),
+    /** Port the router listens on over there. */
+    remotePort: z.number(),
+  }),
+  output: z.object({
+    ok: z.boolean(),
+    url: z.string().nullable(),
+    localPort: z.number().nullable(),
+    message: z.string(),
+  }),
+});
+
+export const routerLocalForwardStop = defineRpc({
+  name: "agent-link.router.local-forward.stop",
+  input: z.object({}),
+  output: z.object({ ok: z.boolean(), message: z.string() }),
 });
 
 export const routerTunnelSet = defineRpc({

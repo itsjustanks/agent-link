@@ -35,6 +35,8 @@ import {
   routerSyncSelectionSet,
   routerTunnel,
   routerTunnelSet,
+  routerLocalForward,
+  routerLocalForwardStop,
   routerRequireApiKey,
 } from "./contracts.shared";
 import {
@@ -73,6 +75,8 @@ import {
   handleRouterSyncSelectionSet,
   handleRouterTunnel,
   handleRouterTunnelSet,
+  handleRouterLocalForward,
+  handleRouterLocalForwardStop,
   handleRouterRequireApiKey,
 } from "./handlers.server";
 import { AgentLinkSurface } from "./surface.client";
@@ -113,6 +117,8 @@ export default function contribute(plugin: PluginContext) {
   plugin.handle(routerSyncSelectionSet, handleRouterSyncSelectionSet);
   plugin.handle(routerTunnel, handleRouterTunnel);
   plugin.handle(routerTunnelSet, handleRouterTunnelSet);
+  plugin.handle(routerLocalForward, handleRouterLocalForward);
+  plugin.handle(routerLocalForwardStop, handleRouterLocalForwardStop);
   plugin.handle(routerRequireApiKey, handleRouterRequireApiKey);
 
   plugin.addSurface("agent-link", AgentLinkSurface);

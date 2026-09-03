@@ -1,5 +1,7 @@
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
+import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { connect } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { CliHijack, Connection, CustomModel, RouterStatus } from "./contracts.shared";
@@ -25,6 +27,7 @@ import {
   stopRouter,
   writeSettings,
 } from "./router.server";
+import { readUptime, readWarnings } from "./uptime.server";
 
 const HOME = homedir();
 
@@ -226,6 +229,9 @@ export async function handleRouterStatus(_input: unknown, { paseo }: PluginHandl
   const staleShims = listStaleShims(isLegacyShim);
 
   const clientVersion = await readClientVersion(running ? client : null);
+  // Folds this observation into the history file; safe to call every refresh.
+  const uptime = readUptime();
+  const warnings = readWarnings();
 
   const empty: RouterStatus = {
     clientVersion,
@@ -242,6 +248,8 @@ export async function handleRouterStatus(_input: unknown, { paseo }: PluginHandl
     aliases: [],
     combos: [],
     hijack: [],
+    uptime,
+    warnings,
     paseo: {
       listedModels: { claude: paseoClaude, codex: paseoCodex },
       modelsInSync: false,
@@ -413,12 +421,32 @@ export async function handleRouterRouteCli({ cli, routed }: { cli: string; route
     return { ok: true, message: "Claude Code now runs through 9router." };
   }
 
+  // 9router's codex-settings route destructures {baseUrl, apiKey, model,
+  // subagentModel} and rejects the request with 400 "baseUrl, apiKey and model
+  // are required" unless the first three are all present. Sending only the URL
+  // and key — which this did — fails every time, so routing Codex from the panel
+  // never worked. The model is chosen from what the router actually exposes
+  // rather than hardcoded, since the available `cx/` ids differ per install.
+  const codexIds = await client.models();
+  const codexModel =
+    codexIds.find((id) => id.startsWith("cx/") && /gpt-5\.6-sol$/.test(id)) ??
+    codexIds.find((id) => id.startsWith("cx/") && !id.endsWith("-review")) ??
+    codexIds.find((id) => id.startsWith("cx/")) ??
+    null;
+  if (!codexModel) {
+    return {
+      ok: false,
+      message: "9router exposes no Codex models, so there is nothing to route Codex to. Connect a Codex account first.",
+    };
+  }
+
   const result = await client.apiJson<{ success?: boolean }>(path, "POST", {
     baseUrl: `${settings.url}/v1`,
     apiKey: key,
+    model: codexModel,
   });
   if (result === null) return { ok: false, message: client.authError ?? "Could not update Codex settings." };
-  return { ok: true, message: "Codex now runs through 9router." };
+  return { ok: true, message: `Codex now runs through 9router on ${codexModel}.` };
 }
 
 /**
@@ -1057,5 +1085,169 @@ export async function handleRouterRequireApiKey({ required }: { required: boolea
   return {
     ok: true,
     message: required ? "/v1 now requires a bearer key." : "/v1 no longer requires a key — keep it on loopback.",
+  };
+}
+
+// --------------------------------------------------------- local forward
+
+/**
+ * An SSH port-forward to a remote daemon's dashboard.
+ *
+ * The panel's "Open dashboard" button hands a URL to the client, which opens it
+ * on the machine the APP runs on. When the selected host is a remote daemon,
+ * its dashboard is bound to that machine's loopback, so the link either reaches
+ * the local router by coincidence or fails outright. Forwarding the port makes
+ * the same URL mean the right thing from here.
+ *
+ * One forward at a time, tracked at module scope so it survives across handler
+ * calls (the plugin subprocess outlives them) and can be replaced or stopped.
+ */
+let localForward: { child: ReturnType<typeof spawn>; port: number; target: string } | null = null;
+
+function forwardAlive(): boolean {
+  return Boolean(localForward && localForward.child.exitCode === null && !localForward.child.killed);
+}
+
+export async function handleRouterLocalForwardStop() {
+  if (!forwardAlive()) {
+    localForward = null;
+    return { ok: true, message: "No forward was running." };
+  }
+  localForward?.child.kill();
+  localForward = null;
+  return { ok: true, message: "Forward closed." };
+}
+
+export async function handleRouterLocalForward(input: {
+  sshTarget: string;
+  sshPort: number | null;
+  identityFile: string | null;
+  remotePort: number;
+}) {
+  const target = input.sshTarget.trim();
+  if (!target) {
+    // No SSH route to this daemon. 9router can expose its own dashboard through
+    // Cloudflare, so offer that rather than leaving the user stuck — but say
+    // plainly that it becomes a public URL, which an accounts dashboard being
+    // reachable from the internet deserves.
+    const fallback = await cloudflareFallback();
+    return {
+      ok: fallback.url !== null,
+      url: fallback.url,
+      localPort: null,
+      message: fallback.message,
+    };
+  }
+
+  // Reuse a live forward to the same host rather than stacking listeners.
+  if (forwardAlive() && localForward?.target === target) {
+    return {
+      ok: true,
+      url: `http://127.0.0.1:${localForward.port}/dashboard`,
+      localPort: localForward.port,
+      message: "Forward already open.",
+    };
+  }
+  if (forwardAlive()) localForward?.child.kill();
+  localForward = null;
+
+  // Offset from the remote port so a local router on the standard port keeps
+  // working while a remote one is being viewed.
+  const localPort = input.remotePort + 1;
+
+  const args = [
+    "-N",
+    "-o", "BatchMode=yes",
+    "-o", "ConnectTimeout=10",
+    // Without IdentitiesOnly ssh offers every key the agent holds; a host that
+    // refuses too many closes the connection, and where fail2ban is watching it
+    // bans this machine for the ban window. Measured the hard way.
+    "-o", "IdentitiesOnly=yes",
+    "-o", "StrictHostKeyChecking=accept-new",
+    "-o", "ExitOnForwardFailure=yes",
+    "-L", `127.0.0.1:${localPort}:127.0.0.1:${input.remotePort}`,
+  ];
+  if (input.identityFile) args.push("-i", input.identityFile);
+  if (input.sshPort) args.push("-p", String(input.sshPort));
+  args.push(target);
+
+  const child = spawn("ssh", args, { stdio: ["ignore", "ignore", "pipe"], detached: false });
+  let stderr = "";
+  child.stderr?.on("data", (chunk) => {
+    stderr = `${stderr}${String(chunk)}`.slice(-2000);
+  });
+
+  // Wait for the listener rather than assuming it: ExitOnForwardFailure makes
+  // ssh exit when the local port is taken, and reporting success then would
+  // hand the user a link to nothing.
+  const deadline = Date.now() + 8000;
+  for (;;) {
+    if (child.exitCode !== null) {
+      const detail = stderr.trim().split("\n").pop() ?? `ssh exited (${child.exitCode})`;
+      return { ok: false, url: null, localPort: null, message: detail };
+    }
+    const reachable = await new Promise<boolean>((resolve) => {
+      const socket = connect({ host: "127.0.0.1", port: localPort });
+      const done = (value: boolean) => {
+        socket.destroy();
+        resolve(value);
+      };
+      socket.setTimeout(700);
+      socket.once("connect", () => done(true));
+      socket.once("timeout", () => done(false));
+      socket.once("error", () => done(false));
+    });
+    if (reachable) break;
+    if (Date.now() > deadline) {
+      child.kill();
+      const detail = stderr.trim().split("\n").pop() ?? "the forward did not come up in time";
+      return { ok: false, url: null, localPort: null, message: detail };
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+
+  localForward = { child, port: localPort, target };
+  return {
+    ok: true,
+    url: `http://127.0.0.1:${localPort}/dashboard`,
+    localPort,
+    message: `Forwarding ${target}:${input.remotePort} to 127.0.0.1:${localPort}.`,
+  };
+}
+
+/**
+ * When there is no SSH route to a daemon, fall back to 9router's own Cloudflare
+ * tunnel rather than spawning cloudflared here — the router already owns that
+ * lifecycle, so borrowing it avoids a second orphan-prone process.
+ *
+ * The quick-tunnel hostname is printed several seconds BEFORE DNS carries it,
+ * and a lookup made in that window is cached as NXDOMAIN by whichever resolver
+ * asked. So the URL is handed back with that warning rather than probed here;
+ * probing it early is what makes it unreachable for the rest of its life.
+ */
+async function cloudflareFallback(): Promise<{ url: string | null; message: string }> {
+  const client = new RouterClient();
+  if (!(await client.health())) {
+    return { url: null, message: "No SSH target for this host, and 9router is not reachable to expose it." };
+  }
+
+  const status = await client.api<{ tunnel?: Record<string, unknown> }>("tunnel/status");
+  const existing = status?.tunnel;
+  const liveUrl = String(existing?.publicUrl ?? existing?.tunnelUrl ?? "");
+  if (existing?.running === true && liveUrl) {
+    return { url: `${liveUrl.replace(/\/$/, "")}/dashboard`, message: "Using the Cloudflare tunnel 9router already has open." };
+  }
+
+  const started = await client.apiJson<{ success?: boolean }>("tunnel/cloudflare", "POST", { enabled: true });
+  if (started === null) {
+    return {
+      url: null,
+      message: client.authError ?? "No SSH target, and the Cloudflare tunnel could not be started. Install cloudflared on that machine or add SSH access.",
+    };
+  }
+  return {
+    url: null,
+    message:
+      "No SSH route, so a Cloudflare tunnel is starting. Its address is public and takes a few seconds to resolve — reopen this in about ten seconds to get the link.",
   };
 }
