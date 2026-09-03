@@ -401,7 +401,7 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
   const callForwardStatus = useRpc(routerLocalForwardStatus);
 
   const status = useQuery({
-    queryKey: ["9router-agent-link", "router-status"],
+    queryKey: ["router9-agent-link", "router-status"],
     queryFn: () => callStatus({}),
     refetchInterval: 15_000,
   });
@@ -439,70 +439,70 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
   // Connection health is what explains a model that will not answer, so it
   // loads with the Accounts tab rather than behind a button.
   const health = useQuery({
-    queryKey: ["9router-agent-link", "connection-health"],
+    queryKey: ["router9-agent-link", "connection-health"],
     queryFn: () => callConnectionHealth({}),
     enabled: live && tab === "accounts",
     refetchInterval: tab === "accounts" ? 20_000 : false,
   });
   const requestLogs = useQuery({
-    queryKey: ["9router-agent-link", "request-logs"],
+    queryKey: ["router9-agent-link", "request-logs"],
     queryFn: () => callRequestLogs({ limit: 25, errorsOnly: true }),
     enabled: live && tab === "logs",
     refetchInterval: tab === "logs" ? 8_000 : false,
   });
   const usage = useQuery({
-    queryKey: ["9router-agent-link", "usage-stats"],
+    queryKey: ["router9-agent-link", "usage-stats"],
     queryFn: () => callUsageStats({}),
     enabled: live && tab === "usage",
     refetchInterval: 30_000,
   });
   const tuning = useQuery({
-    queryKey: ["9router-agent-link", "tuning"],
+    queryKey: ["router9-agent-link", "tuning"],
     queryFn: () => callTuning({}),
     enabled: live && tab === "tuning",
   });
   const logs = useQuery({
-    queryKey: ["9router-agent-link", "logs"],
+    queryKey: ["router9-agent-link", "logs"],
     queryFn: () => callLogs({ limit: 200 }),
     enabled: live && tab === "logs",
     refetchInterval: tab === "logs" ? 4_000 : false,
   });
   const keys = useQuery({
-    queryKey: ["9router-agent-link", "keys"],
+    queryKey: ["router9-agent-link", "keys"],
     queryFn: () => callKeys({}),
     enabled: live && tab === "keys",
   });
   const combos = useQuery({
-    queryKey: ["9router-agent-link", "combos"],
+    queryKey: ["router9-agent-link", "combos"],
     queryFn: () => callCombos({}),
     enabled: live && (tab === "keys" || tab === "models"),
   });
   const powerUps = useQuery({
-    queryKey: ["9router-agent-link", "power-ups"],
+    queryKey: ["router9-agent-link", "power-ups"],
     queryFn: () => callPowerUps({}),
     enabled: tab === "powerups",
   });
   const syncSelection = useQuery({
-    queryKey: ["9router-agent-link", "sync-selection"],
+    queryKey: ["router9-agent-link", "sync-selection"],
     queryFn: () => callSyncSelection({}),
     enabled: tab === "models",
   });
   const tunnel = useQuery({
-    queryKey: ["9router-agent-link", "tunnel"],
+    queryKey: ["router9-agent-link", "tunnel"],
     queryFn: () => callTunnel({}),
     enabled: live && tab === "setup",
     // A tunnel takes a few seconds to publish its URL, so poll while open.
     refetchInterval: tab === "setup" ? 8_000 : false,
   });
   const holds = useQuery({
-    queryKey: ["9router-agent-link", "holds"],
+    queryKey: ["router9-agent-link", "holds"],
     queryFn: () => callHolds({}),
     enabled: live,
     refetchInterval: 30_000,
   });
 
   const refresh = () => {
-    void queryClient.invalidateQueries({ queryKey: ["9router-agent-link"] });
+    void queryClient.invalidateQueries({ queryKey: ["router9-agent-link"] });
   };
   const feedback = {
     onSuccess: (result: { message?: string }) => {
@@ -635,7 +635,7 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
   // this machine's port instead — the wrong router, or nothing. The forward
   // below makes the same URL mean the right thing.
   const forward = useQuery({
-    queryKey: ["9router-agent-link", "local-forward"],
+    queryKey: ["router9-agent-link", "local-forward"],
     queryFn: () => callForwardStatus({}),
     refetchInterval: 20_000,
   });
