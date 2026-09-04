@@ -939,3 +939,31 @@ export const routerThinkingCheck = defineRpc({
   input: z.object({ model: z.string().nullable() }),
   output: ThinkingCheckSchema,
 });
+
+/**
+ * Daily spend, so a burn is visible while it builds rather than after.
+ *
+ * On 2026-09-04 one model reached 932 requests and 374M prompt tokens before
+ * anyone looked, and the first symptom was a rate limit rather than a number
+ * going up. A series answers "is today unusual?" — a total never does.
+ */
+export const UsagePointSchema = z.object({
+  label: z.string(),
+  tokens: z.number(),
+  cost: z.number(),
+});
+
+export const routerUsageChart = defineRpc({
+  name: "agent-link-9router.router.usage-chart",
+  input: z.object({ days: z.number().int().min(1).max(90) }),
+  output: z.object({
+    points: z.array(UsagePointSchema),
+    /** Peak tokens in the window, so the panel can scale bars without a second pass. */
+    peakTokens: z.number(),
+    totalTokens: z.number(),
+    totalCost: z.number(),
+    /** Today against the mean of the days before it, when there are enough days to say. */
+    trend: z.string().nullable(),
+    message: z.string().nullable(),
+  }),
+});

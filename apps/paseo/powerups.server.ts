@@ -26,6 +26,130 @@ export type PowerUp = {
   action: "toggle" | "run";
 };
 
+
+/**
+ * Two upstream bugs we patch in 9router's compiled chunks.
+ *
+ * Both are string substitutions in `.next-cli-build`, so both are reverted by
+ * any `npm i -g 9router`. That is exactly why they are listed here rather than
+ * applied silently: an upgrade that quietly restores a rolling outage is worse
+ * than one that shows a toggle flipping back to "off".
+ */
+type ChunkPatch = {
+  id: string;
+  title: string;
+  detail: string;
+  caution: string;
+  broken: string;
+  fixed: string;
+};
+
+const CHUNK_PATCHES: ChunkPatch[] = [
+  {
+    id: "adaptive-effort",
+    title: "Fix adaptive thinking (upstream #3786)",
+    detail:
+      "9router maps thinking mode \"auto\" to the literal string \"auto\" in output_config.effort. Anthropic rejects it with 400, and 9router then backs the account off — so the NEXT valid request fails too, which reads as a rate-limit outage rather than a translation bug.",
+    caution:
+      "Edits 9router's compiled files and needs a 9router restart. Undone by the next `npm i -g 9router`.",
+    broken: 'b.output_config={effort:"xhigh"===a?"high":a}',
+    fixed: 'b.output_config={effort:"xhigh"===a||"auto"===a?"high":a}',
+  },
+  {
+    id: "fable-default",
+    title: "Stop the dashboard downgrading Fable",
+    detail:
+      "The CLI-tools page hardcodes cc/claude-fable-5 as the default for ANTHROPIC_DEFAULT_FABLE_MODEL, so saving that page silently rewrites Fable 5.1 down to Fable 5.",
+    caution: "Edits 9router's compiled files and needs a 9router restart. Undone by the next `npm i -g 9router`.",
+    broken: 'envKey:"ANTHROPIC_DEFAULT_FABLE_MODEL",defaultValue:"cc/claude-fable-5"',
+    fixed: 'envKey:"ANTHROPIC_DEFAULT_FABLE_MODEL",defaultValue:"cc/claude-fable-5-1"',
+  },
+];
+
+/** Every compiled file 9router serves from, chunks and route bundles alike. */
+function buildFiles(): string[] {
+  const dir = chunkDir();
+  if (!dir) return [];
+  // chunkDir() points at .../server/chunks; the route bundles sit beside it.
+  const build = dirname(dir);
+  const out: string[] = [];
+  const walk = (base: string, depth = 0) => {
+    if (depth > 4) return;
+    let entries: string[];
+    try {
+      entries = readdirSync(base);
+    } catch {
+      return;
+    }
+    for (const name of entries) {
+      const path = join(base, name);
+      let stats;
+      try {
+        stats = statSync(path);
+      } catch {
+        continue;
+      }
+      if (stats.isDirectory()) walk(path, depth + 1);
+      else if (name.endsWith(".js")) out.push(path);
+    }
+  };
+  walk(build);
+  return out;
+}
+
+function patchState(patch: ChunkPatch): { applied: boolean; available: boolean; status: string } {
+  const files = buildFiles();
+  if (files.length === 0) return { applied: false, available: false, status: "9router's files were not found" };
+  let broken = 0;
+  let fixed = 0;
+  for (const file of files) {
+    let text: string;
+    try {
+      text = readFileSync(file, "utf8");
+    } catch {
+      continue;
+    }
+    if (text.includes(patch.fixed)) fixed += 1;
+    else if (text.includes(patch.broken)) broken += 1;
+  }
+  if (fixed === 0 && broken === 0) {
+    // Neither shape present: upstream changed the code, so the patch no longer
+    // describes reality and offering it would be a lie.
+    return { applied: false, available: false, status: "not present in this 9router build" };
+  }
+  return {
+    applied: broken === 0,
+    available: true,
+    status: broken === 0 ? `patched in ${fixed} file(s)` : `unpatched in ${broken} file(s)`,
+  };
+}
+
+function applyChunkPatch(patch: ChunkPatch, apply: boolean): { ok: boolean; message: string } {
+  const files = buildFiles();
+  if (files.length === 0) return { ok: false, message: "9router's files were not found." };
+  const from = apply ? patch.broken : patch.fixed;
+  const to = apply ? patch.fixed : patch.broken;
+  let touched = 0;
+  for (const file of files) {
+    let text: string;
+    try {
+      text = readFileSync(file, "utf8");
+    } catch {
+      continue;
+    }
+    if (!text.includes(from)) continue;
+    const backup = `${file}${BACKUP_SUFFIX}`;
+    if (!existsSync(backup)) copyFileSync(file, backup);
+    writeFileSync(file, text.split(from).join(to));
+    touched += 1;
+  }
+  if (touched === 0) return { ok: false, message: apply ? "Nothing to patch." : "Nothing to revert." };
+  return {
+    ok: true,
+    message: `${apply ? "Patched" : "Reverted"} ${touched} file(s). Restart 9router to load them.`,
+  };
+}
+
 /** The installed Claude Code version, or null when it is missing. */
 export async function claudeVersion(): Promise<string | null> {
   try {
@@ -206,10 +330,28 @@ export async function listPowerUps(): Promise<PowerUp[]> {
       caution: "Runs `claude update`, which replaces the CLI on this machine.",
       action: "run",
     },
+    ...CHUNK_PATCHES.map((patch) => {
+      const state = patchState(patch);
+      return {
+        id: patch.id,
+        title: patch.title,
+        detail: patch.detail,
+        applied: state.applied,
+        available: state.available,
+        status: state.status,
+        caution: patch.caution,
+        action: "toggle" as const,
+      };
+    }),
   ];
 }
 
 export async function applyPowerUp(id: string, apply: boolean): Promise<{ ok: boolean; message: string; restartRequired: boolean }> {
+  const chunk = CHUNK_PATCHES.find((entry) => entry.id === id);
+  if (chunk) {
+    const result = applyChunkPatch(chunk, apply);
+    return { ...result, restartRequired: result.ok };
+  }
   if (id === "claude-version") {
     const result = await applyVersionPatch(apply);
     return { ...result, restartRequired: result.ok };

@@ -58,6 +58,7 @@ import {
   routerUpdate,
   routerTestConnectionModels,
   routerThinkingCheck,
+  routerUsageChart,
 } from "./contracts.shared";
 import {
   handleRouterAliasRemove,
@@ -118,6 +119,7 @@ import {
   handleRouterUpdate,
   handleRouterTestConnectionModels,
   handleRouterThinkingCheck,
+  handleRouterUsageChart,
 } from "./handlers.server";
 import { AgentLinkSurface } from "./surface.client";
 
@@ -180,6 +182,7 @@ export default function contribute(plugin: PluginContext) {
   plugin.handle(routerUpdate, handleRouterUpdate);
   plugin.handle(routerTestConnectionModels, handleRouterTestConnectionModels);
   plugin.handle(routerThinkingCheck, handleRouterThinkingCheck);
+  plugin.handle(routerUsageChart, handleRouterUsageChart);
 
   plugin.addSurface("agent-link", AgentLinkSurface);
   plugin.addSidebarItem({ id: "agent-link", title: "9Router", icon: "Users", surface: "agent-link" });

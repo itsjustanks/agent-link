@@ -36,6 +36,7 @@ import {
   routerVersion,
   routerUpdate,
   routerThinkingCheck,
+  routerUsageChart,
   routerHolds,
   routerClearHold,
   routerTestModel,
@@ -456,6 +457,7 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
   const callVersion = useRpc(routerVersion);
   const callUpdate = useRpc(routerUpdate);
   const callThinkingCheck = useRpc(routerThinkingCheck);
+  const callUsageChart = useRpc(routerUsageChart);
   const callHolds = useRpc(routerHolds);
   const callClearHold = useRpc(routerClearHold);
   const callTestModel = useRpc(routerTestModel);
@@ -566,6 +568,13 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
     queryKey: ["agent-link-9router", "strategies"],
     queryFn: () => callStrategies({}),
     enabled: live && tab === "accounts",
+  });
+  const [chartDays, setChartDays] = useState(14);
+  const usageChart = useQuery({
+    queryKey: ["agent-link-9router", "usage-chart", chartDays],
+    queryFn: () => callUsageChart({ days: chartDays }),
+    enabled: live && tab === "usage",
+    refetchInterval: tab === "usage" ? 60_000 : false,
   });
   const spend = useQuery({
     queryKey: ["agent-link-9router", "spend"],
@@ -2180,6 +2189,82 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
       {/* ------------------------------------------------------------- USAGE */}
       {tab === "usage" ? (
         <>
+          <Card theme={theme}>
+            <Step
+              theme={theme}
+              index={0}
+              title="Daily usage"
+              hint={`last ${chartDays} days`}
+            />
+            <Note theme={theme}>
+              A total says how much you have spent; a series says whether today is unusual. That is the difference
+              between noticing a burn while it builds and finding it after a rate limit.
+            </Note>
+            <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap" }}>
+              {[7, 14, 30].map((days) => (
+                <Pressable
+                  key={days}
+                  onPress={() => setChartDays(days)}
+                  style={{
+                    paddingHorizontal: 10,
+                    paddingVertical: 4,
+                    borderRadius: 999,
+                    backgroundColor: chartDays === days ? theme.colors.accent : theme.colors.surface1,
+                    borderColor: theme.colors.border,
+                    borderWidth: chartDays === days ? 0 : 1,
+                  }}
+                >
+                  <Text
+                    style={{
+                      color: chartDays === days ? theme.colors.accentForeground : theme.colors.foregroundMuted,
+                      fontSize: 12,
+                      fontWeight: "600",
+                    }}
+                  >
+                    {days}d
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+            {usageChart.isLoading ? <ActivityIndicator color={theme.colors.accent} /> : null}
+            {usageChart.data?.message ? (
+              <Note theme={theme} tone="warning">{usageChart.data.message}</Note>
+            ) : null}
+            {usageChart.data?.trend ? <Note theme={theme}>{usageChart.data.trend}</Note> : null}
+            {(usageChart.data?.points ?? []).map((point) => {
+              const peak = usageChart.data?.peakTokens ?? 0;
+              // Zero-token days still get a hairline, so a gap reads as "no
+              // traffic" rather than as a missing row.
+              const fraction = peak > 0 ? point.tokens / peak : 0;
+              return (
+                <View key={point.label} style={{ gap: 2, paddingVertical: 2 }}>
+                  <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+                    <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>{point.label}</Text>
+                    <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
+                      {point.tokens > 0 ? `${(point.tokens / 1e6).toFixed(0)}M · $${point.cost.toFixed(0)}` : "—"}
+                    </Text>
+                  </View>
+                  <View style={{ height: 4, borderRadius: 2, backgroundColor: theme.colors.surface2, overflow: "hidden" }}>
+                    <View
+                      style={{
+                        width: `${Math.max(fraction > 0 ? 2 : 0, fraction * 100)}%`,
+                        height: 4,
+                        backgroundColor: fraction > 0.75 ? theme.colors.statusWarning : theme.colors.accent,
+                      }}
+                    />
+                  </View>
+                </View>
+              );
+            })}
+            {usageChart.data && usageChart.data.points.length > 0 ? (
+              <Row
+                theme={theme}
+                label={`${chartDays}-day total`}
+                value={`${(usageChart.data.totalTokens / 1e9).toFixed(2)}B tokens · $${usageChart.data.totalCost.toFixed(0)}`}
+              />
+            ) : null}
+          </Card>
+
           <Card theme={theme}>
             <Step theme={theme} index={0} title="Totals" hint="since install" />
             {!live ? <Note theme={theme} tone="warning">Finish Setup first — usage needs the dashboard password.</Note> : null}

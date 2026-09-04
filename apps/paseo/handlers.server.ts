@@ -2170,3 +2170,50 @@ export async function handleRouterThinkingCheck(input: { model: string | null })
     fix: null,
   };
 }
+
+export async function handleRouterUsageChart(input: { days: number }) {
+  const client = new RouterClient();
+  const raw = await client.api<Array<Record<string, unknown>>>(`usage/chart?days=${input.days}`);
+  if (!Array.isArray(raw)) {
+    return {
+      points: [],
+      peakTokens: 0,
+      totalTokens: 0,
+      totalCost: 0,
+      trend: null,
+      message: client.authError ?? "9router did not return a usage series.",
+    };
+  }
+  const num = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) ? value : 0);
+  const points = raw.map((entry) => ({
+    label: String(entry.label ?? ""),
+    tokens: num(entry.tokens),
+    cost: num(entry.cost),
+  }));
+
+  const peakTokens = points.reduce((max, point) => Math.max(max, point.tokens), 0);
+  const totalTokens = points.reduce((sum, point) => sum + point.tokens, 0);
+  const totalCost = points.reduce((sum, point) => sum + point.cost, 0);
+
+  // Compare today against the days that actually had traffic: averaging in a
+  // run of zeros reports a huge multiple on a quiet week and means nothing.
+  let trend: string | null = null;
+  if (points.length >= 3) {
+    const today = points[points.length - 1];
+    const prior = points.slice(0, -1).filter((point) => point.tokens > 0);
+    if (prior.length >= 2 && today.tokens > 0) {
+      const mean = prior.reduce((sum, point) => sum + point.tokens, 0) / prior.length;
+      if (mean > 0) {
+        const ratio = today.tokens / mean;
+        trend =
+          ratio >= 1.5
+            ? `Today is ${ratio.toFixed(1)}× the recent daily average.`
+            : ratio <= 0.5
+              ? `Today is well below the recent daily average.`
+              : "Today is in line with recent days.";
+      }
+    }
+  }
+
+  return { points, peakTokens, totalTokens, totalCost, trend, message: null };
+}
