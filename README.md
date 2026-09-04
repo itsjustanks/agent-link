@@ -41,6 +41,22 @@ chmod +x ~/.local/bin/agent-link
 agent-link doctor
 ```
 
+## What it does and does not touch
+
+The plugin adds **one** provider, `9Router`, carrying every model your local
+9router serves. **Paseo's own preloaded providers — `claude`, `codex` and the
+rest — are never modified.** Pick the `9Router` provider to use the shared
+pool; pick `claude` or `codex` to get the vendor path exactly as it ships.
+
+Routing the *CLIs themselves* (rewriting `~/.claude/settings.json` and
+`~/.codex/config.toml`) is 9router's own CLI-tools feature, in its dashboard.
+The plugin does not duplicate it.
+
+> Upgrading from an older version? Earlier releases pushed 9router model ids
+> into the built-in `claude` and `codex` providers via `additionalModels`, and
+> never removed them. The next sync detects and clears those, restoring both
+> providers to stock.
+
 ## The panel
 
 <div align="center">

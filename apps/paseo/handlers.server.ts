@@ -538,11 +538,25 @@ export async function handleRouterSyncModels(_input: unknown, { paseo }: PluginH
     label: modelLabel(id),
     ...thinkingFor(id),
   }));
-  const forClaude = models.filter((model) => cliForModel(model.id) === "claude");
-  const forCodex = models.filter((model) => cliForModel(model.id) === "codex");
-
   const overrides = await providerOverrides(paseo);
   const removedProviders = DEAD_PROVIDER_IDS.filter((id) => overrides[id] !== undefined);
+
+  // One-shot repair for installs upgraded from a version that wrote 9router
+  // model ids into Paseo's built-in providers. We only clear a list this
+  // plugin created (every entry is a 9router id); a list the user curated is
+  // left alone. Routing the built-in CLIs is 9router's own CLI-tools feature,
+  // not ours — it writes ~/.claude/settings.json and ~/.codex/config.toml and
+  // can undo both, so the plugin must never duplicate that.
+  const polluted = ["claude", "codex"].filter((id) => {
+    const extra = (overrides[id] as ProviderEntry | undefined)?.additionalModels;
+    // ProviderModel.id is `unknown` (the config is user-editable), so narrow
+    // to string before comparing — an entry without a string id is not ours.
+    return (
+      Array.isArray(extra) &&
+      extra.length > 0 &&
+      extra.every((m) => typeof m.id === "string" && ids.includes(m.id))
+    );
+  });
   const patch: Record<string, unknown> = {
     [PROVIDER_ID]: {
       extends: "claude",
@@ -555,26 +569,45 @@ export async function handleRouterSyncModels(_input: unknown, { paseo }: PluginH
   // The earlier split provider is gone; remove it rather than leaving a second
   // entry offering a subset of the same catalogue.
   if (overrides[LEGACY_CODEX_PROVIDER_ID] !== undefined) patch[LEGACY_CODEX_PROVIDER_ID] = null;
-  // Paseo's own providers keep their 9router models too: emptying that list
-  // breaks any existing chat pinned to one of them, because a running agent
-  // holds a model id and a provider that no longer offers it fails the turn.
-  patch.claude = { additionalModels: forClaude };
-  patch.codex = { additionalModels: forCodex };
+
+  // Paseo's OWN providers are NEVER patched. `claude`, `codex` and every other
+  // preloaded provider are left exactly as they ship — this plugin only ever
+  // writes its own `9router` provider entry (plus removing entries it created
+  // in earlier versions).
+  //
+  // Earlier versions pushed 9router model ids into `claude` and `codex` via
+  // `additionalModels`, which made the built-ins behave unlike a stock install:
+  // their menus filled with cc/… and cx/… ids that only resolve while 9router
+  // is running and routed. Nothing removed them again, so disconnecting the
+  // plugin left both providers permanently polluted with models that then fail
+  // the turn. See `cleanupBuiltinProviders` for the one-shot repair.
+  //
+  // Everything 9router serves is offered by the 9Router provider above: pick
+  // that to use the pool, or pick `claude`/`codex` for the vendor path.
   for (const id of removedProviders) patch[id] = null;
+  for (const id of polluted) patch[id] = { additionalModels: [] };
 
   await paseo.config.patch({ agents: { providers: patch } } as never);
-  await refreshProviders(paseo, [PROVIDER_ID, "claude", "codex"]);
+  await refreshProviders(paseo, [PROVIDER_ID, ...polluted]);
 
   const removedShims = listStaleShims(isLegacyShim);
   for (const name of removedShims) removeShim(name);
 
   const notes = [`9Router provider now offers ${models.length} model(s).`];
+  if (polluted.length > 0) {
+    notes.push(
+      `Restored ${polluted.join(", ")} to stock — an older version had added 9router models to them.`,
+    );
+  }
   if (removedProviders.length > 0) notes.push(`Removed ${removedProviders.join(", ")}.`);
   if (removedShims.length > 0) notes.push(`Retired ${removedShims.length} old shim(s).`);
+  // `claude`/`codex` in this result are the per-CLI model COUNTS the 9Router
+  // provider serves — reported for the UI only. They are no longer written
+  // into Paseo's built-in providers of the same name.
   return {
     ok: true,
-    claude: forClaude.length,
-    codex: forCodex.length,
+    claude: models.filter((m) => cliForModel(m.id) === "claude").length,
+    codex: models.filter((m) => cliForModel(m.id) === "codex").length,
     removedProviders,
     removedShims,
     message: notes.join(" "),
