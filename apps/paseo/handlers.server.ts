@@ -1947,3 +1947,226 @@ export async function handleRouterStrategySet(input: {
     message: `${providerLabel(input.provider)} now uses ${input.strategy}.`,
   };
 }
+
+export async function handleRouterTailscale() {
+  const client = new RouterClient();
+  const [check, status] = await Promise.all([
+    client.api<Record<string, unknown>>("tunnel/tailscale-check"),
+    client.api<{ tailscale?: Record<string, unknown> }>("tunnel/status"),
+  ]);
+  if (!check) {
+    return {
+      installed: false,
+      loggedIn: false,
+      daemonRunning: false,
+      platform: null,
+      canInstall: false,
+      url: null,
+      detail: client.authError ?? "9router did not report Tailscale.",
+      nextStep: null,
+    };
+  }
+  const ts = status?.tailscale ?? {};
+  const installed = check.installed === true;
+  const loggedIn = check.loggedIn === true;
+  const daemonRunning =
+    check.daemonRunning === true || check.systemDaemonRunning === true || check.customDaemonRunning === true;
+  const running = ts.running === true;
+  const url = typeof ts.tunnelUrl === "string" && ts.tunnelUrl ? ts.tunnelUrl : null;
+
+  // The next step is stated rather than implied: a Publish button that silently
+  // does nothing because Tailscale is not signed in is the state this replaces.
+  let detail: string;
+  let nextStep: string | null = null;
+  if (!installed) {
+    detail = "Not installed on the router's machine.";
+    nextStep = check.brewAvailable === true ? "Install it from here." : "Install Tailscale, then come back.";
+  } else if (!loggedIn) {
+    detail = "Installed but not signed in, so it cannot serve a private address yet.";
+    nextStep = "Run `tailscale up` on the router's machine to sign in.";
+  } else if (!daemonRunning) {
+    detail = "Signed in, but the Tailscale daemon is not running.";
+    nextStep = "Start the Tailscale daemon on the router's machine.";
+  } else if (!running) {
+    detail = "Ready — Tailscale is signed in and running, and the router is not published on it yet.";
+    nextStep = "Publish to get a private, stable address.";
+  } else {
+    detail = "Published on your tailnet. Private, and the address does not change on restart.";
+  }
+
+  return {
+    installed,
+    loggedIn,
+    daemonRunning,
+    platform: typeof check.platform === "string" ? check.platform : null,
+    canInstall: !installed && check.brewAvailable === true,
+    url,
+    detail,
+    nextStep,
+  };
+}
+
+export async function handleRouterTailscaleAction(input: { action: "install" | "enable" | "disable" }) {
+  const client = new RouterClient();
+  const path =
+    input.action === "install"
+      ? "tunnel/tailscale-install"
+      : input.action === "enable"
+        ? "tunnel/tailscale-enable"
+        : "tunnel/tailscale-disable";
+  // Install pulls a package; give it far longer than a normal call.
+  const result = await client.apiJson<{ success?: boolean; error?: string; url?: string }>(path, "POST", {});
+  if (result === null) {
+    return { ok: false, message: client.authError ?? `9router refused the ${input.action}.` };
+  }
+  if (result.error) return { ok: false, message: result.error };
+  const done =
+    input.action === "install"
+      ? "Tailscale installed. Sign in with `tailscale up`, then publish."
+      : input.action === "enable"
+        ? `Published on your tailnet${result.url ? ` at ${result.url}` : ""}.`
+        : "Unpublished from your tailnet.";
+  return { ok: true, message: done };
+}
+
+export async function handleRouterVersion() {
+  const client = new RouterClient();
+  const raw = await client.api<Record<string, unknown>>("version");
+  const current = typeof raw?.currentVersion === "string" ? raw.currentVersion : null;
+  const latest = typeof raw?.latestVersion === "string" ? raw.latestVersion : null;
+  const hasUpdate = raw?.hasUpdate === true;
+  // Said plainly because a missed upgrade is expensive: 0.5.65 carried the fix
+  // for Fable 5.1 rejecting 9router's spoofed CLI version, and there was no way
+  // to notice that from this panel.
+  const detail = !current
+    ? (client.authError ?? "9router did not report a version.")
+    : hasUpdate
+      ? `Update available: ${current} → ${latest}. Upgrades have carried model-compatibility fixes.`
+      : `Up to date on ${current}.`;
+  return { current, latest, hasUpdate, detail };
+}
+
+export async function handleRouterUpdate() {
+  const client = new RouterClient();
+  const result = await client.apiJson<{ success?: boolean; error?: string }>("version/update", "POST", {});
+  if (result === null) return { ok: false, message: client.authError ?? "9router refused the update." };
+  if (result.error) return { ok: false, message: result.error };
+  return { ok: true, message: "Update started. 9router restarts itself when it finishes." };
+}
+
+/**
+ * Test what an account can really serve.
+ *
+ * Presence in the catalogue is not capability: a model can be listed, aliased
+ * and correctly configured while every request fails. This asks the provider
+ * instead of inferring, which is the difference between a picker that lies and
+ * one that does not.
+ */
+export async function handleRouterTestConnectionModels(input: {
+  connectionId: string;
+  models: string[] | null;
+}) {
+  const client = new RouterClient();
+  const body: Record<string, unknown> = {};
+  if (input.models && input.models.length > 0) body.models = input.models;
+  const raw = await client.apiJson<{ results?: Array<Record<string, unknown>>; error?: string }>(
+    `providers/${encodeURIComponent(input.connectionId)}/test-models`,
+    "POST",
+    body,
+  );
+  if (raw === null) {
+    return { results: [], message: client.authError ?? "9router did not run the test." };
+  }
+  if (raw.error) return { results: [], message: raw.error };
+
+  const results = (raw.results ?? []).map((entry) => {
+    const model = String(entry.model ?? entry.id ?? "");
+    const status = typeof entry.status === "number" ? entry.status : null;
+    const ok = entry.ok === true || entry.success === true || status === 200;
+    const error = typeof entry.error === "string" ? entry.error : typeof entry.message === "string" ? entry.message : "";
+    // A 400 naming output_config.effort is the adaptive-thinking bug, not a
+    // dead model — worth saying so, because the two look identical otherwise
+    // and the wrong reading sends you hunting a quota problem that is not there.
+    const detail = ok
+      ? "Serves this model."
+      : /output_config\.effort/i.test(error)
+        ? "Rejected the thinking/effort field — 9router bug, not a dead model or a quota limit."
+        : error || (status ? `HTTP ${status}` : "Failed.");
+    return { model, ok, status, detail };
+  });
+  return { results, message: null };
+}
+
+export async function handleRouterThinkingCheck(input: { model: string | null }) {
+  const settings = readSettings();
+  const client = new RouterClient(settings);
+  const key = settings.apiKey ?? (await client.ensureApiKey());
+  if (!key) {
+    return {
+      state: "unknown" as const,
+      model: null,
+      detail: client.authError ?? "No API key available to test with.",
+      fix: null,
+    };
+  }
+  // Prefer a Claude model, since this is where the bug lives.
+  const model =
+    input.model ?? (await client.models()).find((id) => id.startsWith("cc/")) ?? "cc/claude-sonnet-5";
+
+  let status = 0;
+  let body = "";
+  try {
+    const response = await fetch(`${settings.url}/v1/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+      body: JSON.stringify({
+        model,
+        max_tokens: 16,
+        messages: [{ role: "user", content: "hi" }],
+        thinking: { type: "adaptive" },
+      }),
+      signal: AbortSignal.timeout(60_000),
+    });
+    status = response.status;
+    body = await response.text();
+  } catch (error) {
+    return {
+      state: "unknown" as const,
+      model,
+      detail: error instanceof Error ? error.message : String(error),
+      fix: null,
+    };
+  }
+
+  if (status === 200) {
+    return {
+      state: "ok" as const,
+      model,
+      detail: "Adaptive thinking round-trips cleanly.",
+      fix: null,
+    };
+  }
+  if (/output_config\.effort/i.test(body)) {
+    return {
+      state: "broken" as const,
+      model,
+      detail:
+        "9router sends effort:\"auto\", which Anthropic rejects with 400 — and it then backs the account off, so the next valid request fails too.",
+      fix: "Upgrade 9router, or patch the claude-adaptive branch so mode \"auto\" maps to a real level.",
+    };
+  }
+  if (/rate_limit|429|Unavailable/i.test(body)) {
+    return {
+      state: "blocked" as const,
+      model,
+      detail: "Rate-limited or backing off right now, so adaptive thinking could not be tested.",
+      fix: "Try again once the account is out of backoff.",
+    };
+  }
+  return {
+    state: "unknown" as const,
+    model,
+    detail: `HTTP ${status}: ${body.slice(0, 160)}`,
+    fix: null,
+  };
+}

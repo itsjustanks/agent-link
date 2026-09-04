@@ -843,3 +843,99 @@ export const routerStrategySet = defineRpc({
   }),
   output: z.object({ ok: z.boolean(), message: z.string() }),
 });
+
+/**
+ * Tailscale as the private path to a remote router.
+ *
+ * 9router ships both a Cloudflare quick tunnel and Tailscale. The quick tunnel
+ * is public, its URL changes on every restart, and it puts inference traffic
+ * through Cloudflare's edge. Tailscale is private and its address is stable,
+ * so it is the better answer for reaching a daemon's router — but the panel
+ * previously offered only a Publish toggle, which does nothing when Tailscale
+ * is installed and not signed in. This reports the state that toggle assumed.
+ */
+export const TailscaleStateSchema = z.object({
+  installed: z.boolean(),
+  loggedIn: z.boolean(),
+  daemonRunning: z.boolean(),
+  platform: z.string().nullable(),
+  /** Whether the router can install it here without the user leaving the panel. */
+  canInstall: z.boolean(),
+  url: z.string().nullable(),
+  detail: z.string(),
+  /** The one thing to do next, in the user's terms. */
+  nextStep: z.string().nullable(),
+});
+
+export const routerTailscale = defineRpc({
+  name: "agent-link-9router.router.tailscale",
+  input: z.object({}),
+  output: TailscaleStateSchema,
+});
+
+export const routerTailscaleAction = defineRpc({
+  name: "agent-link-9router.router.tailscale-action",
+  input: z.object({ action: z.enum(["install", "enable", "disable"]) }),
+  output: z.object({ ok: z.boolean(), message: z.string() }),
+});
+
+/** 9router's own version, and whether an upgrade is waiting. */
+export const routerVersion = defineRpc({
+  name: "agent-link-9router.router.version",
+  input: z.object({}),
+  output: z.object({
+    current: z.string().nullable(),
+    latest: z.string().nullable(),
+    hasUpdate: z.boolean(),
+    detail: z.string(),
+  }),
+});
+
+export const routerUpdate = defineRpc({
+  name: "agent-link-9router.router.update",
+  input: z.object({}),
+  output: z.object({ ok: z.boolean(), message: z.string() }),
+});
+
+/**
+ * Whether an account can actually serve each model, tested against the
+ * provider rather than inferred from the catalogue.
+ */
+export const ModelTestSchema = z.object({
+  model: z.string(),
+  ok: z.boolean(),
+  status: z.number().nullable(),
+  detail: z.string(),
+});
+
+export const routerTestConnectionModels = defineRpc({
+  name: "agent-link-9router.router.test-connection-models",
+  input: z.object({ connectionId: z.string(), models: z.array(z.string()).nullable() }),
+  output: z.object({ results: z.array(ModelTestSchema), message: z.string().nullable() }),
+});
+
+/**
+ * Whether adaptive thinking survives the 9router hop.
+ *
+ * 9router maps thinking mode "auto" to the literal string "auto" and writes it
+ * to `output_config.effort`; Anthropic only accepts low|medium|high|xhigh|max
+ * and returns 400. 9router then counts that 400 as a provider failure and backs
+ * the account off, so the NEXT request — a perfectly valid one — fails with
+ * "Unavailable". On 2026-09-04 that read as a rate-limit outage for hours.
+ *
+ * The check sends one adaptive request and reports what came back, so the state
+ * is visible instead of being inferred from a cascade of unrelated 429s.
+ */
+export const ThinkingCheckSchema = z.object({
+  state: z.enum(["ok", "broken", "blocked", "unknown"]),
+  model: z.string().nullable(),
+  detail: z.string(),
+  /** What to do about it, when there is something to do. */
+  fix: z.string().nullable(),
+});
+
+export const routerThinkingCheck = defineRpc({
+  name: "agent-link-9router.router.thinking-check",
+  input: z.object({ model: z.string().nullable() }),
+  output: ThinkingCheckSchema,
+});

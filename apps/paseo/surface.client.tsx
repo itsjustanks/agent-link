@@ -31,6 +31,11 @@ import {
   routerPxpipe,
   routerStrategies,
   routerStrategySet,
+  routerTailscale,
+  routerTailscaleAction,
+  routerVersion,
+  routerUpdate,
+  routerThinkingCheck,
   routerHolds,
   routerClearHold,
   routerTestModel,
@@ -446,6 +451,11 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
   const callPxpipe = useRpc(routerPxpipe);
   const callStrategies = useRpc(routerStrategies);
   const callStrategySet = useRpc(routerStrategySet);
+  const callTailscale = useRpc(routerTailscale);
+  const callTailscaleAction = useRpc(routerTailscaleAction);
+  const callVersion = useRpc(routerVersion);
+  const callUpdate = useRpc(routerUpdate);
+  const callThinkingCheck = useRpc(routerThinkingCheck);
   const callHolds = useRpc(routerHolds);
   const callClearHold = useRpc(routerClearHold);
   const callTestModel = useRpc(routerTestModel);
@@ -531,6 +541,26 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
     queryFn: () => callRequestLogs({ limit: 25, errorsOnly: true }),
     enabled: live && tab === "logs",
     refetchInterval: tab === "logs" ? 8_000 : false,
+  });
+  const thinking = useQuery({
+    queryKey: ["agent-link-9router", "thinking-check"],
+    queryFn: () => callThinkingCheck({ model: null }),
+    // Manual only: this spends a real request against a live account, so it
+    // runs when asked rather than on a timer.
+    enabled: false,
+    retry: false,
+  });
+  const tailscale = useQuery({
+    queryKey: ["agent-link-9router", "tailscale"],
+    queryFn: () => callTailscale({}),
+    enabled: live && tab === "setup",
+    refetchInterval: tab === "setup" ? 15_000 : false,
+  });
+  const version = useQuery({
+    queryKey: ["agent-link-9router", "version"],
+    queryFn: () => callVersion({}),
+    enabled: live,
+    refetchInterval: 300_000,
   });
   const strategies = useQuery({
     queryKey: ["agent-link-9router", "strategies"],
@@ -631,6 +661,8 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
   const catalogSyncMutation = useMutation({ mutationFn: callCatalogSync, ...feedback });
   const priorityMutation = useMutation({ mutationFn: callPrioritySet, ...feedback });
   const strategyMutation = useMutation({ mutationFn: callStrategySet, ...feedback });
+  const tailscaleMutation = useMutation({ mutationFn: callTailscaleAction, ...feedback });
+  const updateMutation = useMutation({ mutationFn: callUpdate, ...feedback });
   const activeMutation = useMutation({ mutationFn: callActiveSet, ...feedback });
   const removeMutation = useMutation({ mutationFn: callRemoveConnection, ...feedback });
   const exposeMutation = useMutation({ mutationFn: callExpose, ...feedback });
@@ -1083,6 +1115,60 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
                 {entry.note ? <Note theme={theme}>{entry.note}</Note> : null}
               </View>
             ))}
+
+            {tailscale.data ? (
+              <View style={{ gap: 6, marginTop: 4 }}>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <Text style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "600", flex: 1 }}>
+                    Tailscale detail
+                  </Text>
+                  <Chip
+                    theme={theme}
+                    label={!tailscale.data.installed ? "absent" : !tailscale.data.loggedIn ? "not signed in" : "ready"}
+                    tone={!tailscale.data.installed ? "neutral" : !tailscale.data.loggedIn ? "warning" : "success"}
+                  />
+                </View>
+                <Note theme={theme}>
+                  Private and stable, unlike the Cloudflare quick tunnel above — that one is public and its URL
+                  changes on every restart. {tailscale.data.detail}
+                </Note>
+                {tailscale.data.nextStep ? (
+                  <Note theme={theme} tone="warning">{tailscale.data.nextStep}</Note>
+                ) : null}
+                <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
+                  {tailscale.data.canInstall ? (
+                    <Button
+                      theme={theme}
+                      label="Install Tailscale"
+                      tone="primary"
+                      busy={tailscaleMutation.isPending}
+                      onPress={() => tailscaleMutation.mutate({ action: "install" })}
+                    />
+                  ) : null}
+                  {tailscale.data.installed && tailscale.data.loggedIn ? (
+                    <Button
+                      theme={theme}
+                      label={tailscale.data.url ? "Unpublish" : "Publish privately"}
+                      tone={tailscale.data.url ? "default" : "primary"}
+                      busy={tailscaleMutation.isPending}
+                      onPress={() =>
+                        tailscaleMutation.mutate({ action: tailscale.data?.url ? "disable" : "enable" })
+                      }
+                    />
+                  ) : null}
+                  {tailscale.data.url ? (
+                    <Button
+                      theme={theme}
+                      label="Copy address"
+                      onPress={() => {
+                        Clipboard.setString(tailscale.data?.url ?? "");
+                        setMessage("Tailnet address copied.");
+                      }}
+                    />
+                  ) : null}
+                </View>
+              </View>
+            ) : null}
             <Button theme={theme} label="Route the others in the dashboard" onPress={openDashboard} />
             {data?.clientVersion.advertised ? (
               <View style={{ gap: 4, padding: 10, borderRadius: 8, backgroundColor: theme.colors.surface2 }}>
@@ -1101,6 +1187,67 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
             ) : null}
           </Card>
 
+
+          <Card theme={theme}>
+            <Step theme={theme} index={0} title="9router version" hint={version.data?.hasUpdate ? "update available" : "current"} />
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <Text style={{ color: theme.colors.foreground, fontSize: 13, flex: 1 }}>
+                {version.data?.current ?? "—"}
+              </Text>
+              {version.data?.hasUpdate ? (
+                <>
+                  <Chip theme={theme} label={`→ ${version.data.latest ?? "?"}`} tone="warning" />
+                  <Button
+                    theme={theme}
+                    label="Update"
+                    tone="primary"
+                    busy={updateMutation.isPending}
+                    onPress={() => updateMutation.mutate({})}
+                  />
+                </>
+              ) : (
+                <Chip theme={theme} label="up to date" tone="success" />
+              )}
+            </View>
+            <Note theme={theme}>{version.data?.detail ?? "Checking…"}</Note>
+          </Card>
+
+          <Card theme={theme}>
+            <Step theme={theme} index={0} title="Adaptive thinking" hint="does it survive the hop" />
+            <Note theme={theme}>
+              9router rewrites the thinking field on its way to Anthropic. When it gets that wrong the request 400s,
+              9router counts it as a provider failure, and the NEXT valid request fails too — which reads as a
+              rate-limit outage rather than a translation bug. One request tells you which it is.
+            </Note>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <Button
+                theme={theme}
+                label="Check"
+                tone="primary"
+                disabled={!live}
+                busy={thinking.isFetching}
+                onPress={() => void thinking.refetch()}
+              />
+              {thinking.data ? (
+                <Chip
+                  theme={theme}
+                  label={thinking.data.state}
+                  tone={
+                    thinking.data.state === "ok"
+                      ? "success"
+                      : thinking.data.state === "broken"
+                        ? "danger"
+                        : "warning"
+                  }
+                />
+              ) : null}
+              {thinking.data?.model ? <Chip theme={theme} label={thinking.data.model} /> : null}
+            </View>
+            {thinking.data ? <Note theme={theme}>{thinking.data.detail}</Note> : null}
+            {thinking.data?.fix ? (
+              <Note theme={theme} tone="warning">{thinking.data.fix}</Note>
+            ) : null}
+          </Card>
 
           <Card theme={theme}>
             <Step theme={theme} index={data?.binary.path ? 5 : 6} title="Remote access" hint="optional" />

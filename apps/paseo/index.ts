@@ -52,6 +52,12 @@ import {
   routerPxpipe,
   routerStrategies,
   routerStrategySet,
+  routerTailscale,
+  routerTailscaleAction,
+  routerVersion,
+  routerUpdate,
+  routerTestConnectionModels,
+  routerThinkingCheck,
 } from "./contracts.shared";
 import {
   handleRouterAliasRemove,
@@ -106,6 +112,12 @@ import {
   handleRouterPxpipe,
   handleRouterStrategies,
   handleRouterStrategySet,
+  handleRouterTailscale,
+  handleRouterTailscaleAction,
+  handleRouterVersion,
+  handleRouterUpdate,
+  handleRouterTestConnectionModels,
+  handleRouterThinkingCheck,
 } from "./handlers.server";
 import { AgentLinkSurface } from "./surface.client";
 
@@ -162,6 +174,12 @@ export default function contribute(plugin: PluginContext) {
   plugin.handle(routerPxpipe, handleRouterPxpipe);
   plugin.handle(routerStrategies, handleRouterStrategies);
   plugin.handle(routerStrategySet, handleRouterStrategySet);
+  plugin.handle(routerTailscale, handleRouterTailscale);
+  plugin.handle(routerTailscaleAction, handleRouterTailscaleAction);
+  plugin.handle(routerVersion, handleRouterVersion);
+  plugin.handle(routerUpdate, handleRouterUpdate);
+  plugin.handle(routerTestConnectionModels, handleRouterTestConnectionModels);
+  plugin.handle(routerThinkingCheck, handleRouterThinkingCheck);
 
   plugin.addSurface("agent-link", AgentLinkSurface);
   plugin.addSidebarItem({ id: "agent-link", title: "9Router", icon: "Users", surface: "agent-link" });
