@@ -14,10 +14,31 @@ export const QuotaSchema = z.object({
   unlimited: z.boolean(),
 });
 
+/**
+ * Spend-limit state, which is separate from the plan quotas above and can block
+ * an account on its own.
+ *
+ * This mattered on 2026-09-04: an account read 86% on both plan meters — real
+ * headroom — while `spendLimitReached` was true and every request failed. A
+ * panel showing only the quota bars says "you have room" and is wrong, so the
+ * spend side is reported next to them rather than left in the dashboard.
+ */
+export const ExtraUsageSchema = z.object({
+  enabled: z.boolean(),
+  spendLimitReached: z.boolean(),
+  usedCredits: z.number().nullable(),
+  monthlyLimit: z.number().nullable(),
+  utilization: z.number().nullable(),
+  currency: z.string().nullable(),
+  /** 9router's own words for why extra usage is off, when it says. */
+  disabledReason: z.string().nullable(),
+});
+
 export const UsageSchema = z.object({
   plan: z.string().nullable(),
   limitReached: z.boolean(),
   quotas: z.array(QuotaSchema),
+  extra: ExtraUsageSchema.nullable(),
 });
 
 export const ConnectionSchema = z.object({

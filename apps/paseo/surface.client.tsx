@@ -236,6 +236,56 @@ function QuotaBar({ theme, quota }: { theme: Theme; quota: RouterStatus["connect
   );
 }
 
+/**
+ * The spend side of an account, rendered beside its quota bars.
+ *
+ * Plan quota and spend limit are enforced separately, so an account can read
+ * 86% headroom on both bars and still refuse every request because its spend
+ * cap is hit. Showing only the bars is how that state stays invisible.
+ */
+function SpendRow({ theme, extra }: { theme: Theme; extra: NonNullable<NonNullable<Connection["usage"]>["extra"]> }) {
+  const money = (value: number | null) =>
+    value === null ? null : `${extra.currency ? `${extra.currency} ` : "$"}${value.toFixed(2)}`;
+  const used = money(extra.usedCredits);
+  const cap = money(extra.monthlyLimit);
+  const blocked = extra.spendLimitReached;
+  const pct = extra.utilization;
+  return (
+    <View style={{ gap: 3 }}>
+      <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 6 }}>
+        <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11 }}>
+          extra usage{extra.enabled ? "" : " (off)"}
+        </Text>
+        <Text
+          style={{
+            color: blocked ? theme.colors.statusDanger : theme.colors.foregroundMuted,
+            fontSize: 11,
+          }}
+        >
+          {used && cap ? `${used} of ${cap}` : pct !== null ? `${Math.round(pct)}% used` : "—"}
+        </Text>
+      </View>
+      {pct !== null ? (
+        <View style={{ height: 4, borderRadius: 2, backgroundColor: theme.colors.surface2, overflow: "hidden" }}>
+          <View
+            style={{
+              width: `${Math.max(2, Math.min(100, pct))}%`,
+              height: 4,
+              backgroundColor: blocked ? theme.colors.statusDanger : theme.colors.statusWarning,
+            }}
+          />
+        </View>
+      ) : null}
+      {blocked ? (
+        <Text style={{ color: theme.colors.statusDanger, fontSize: 11 }}>
+          Spend limit reached — this account refuses requests even where the bars above show headroom.
+          {extra.enabled ? "" : " Extra usage is switched off, so nothing can overflow into credits."}
+        </Text>
+      ) : null}
+    </View>
+  );
+}
+
 // ------------------------------------------------------------------ surface
 
 const TABS = [
@@ -550,9 +600,11 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
   const tunnel = useQuery({
     queryKey: ["agent-link-9router", "tunnel"],
     queryFn: () => callTunnel({}),
-    enabled: live && tab === "setup",
-    // A tunnel takes a few seconds to publish its URL, so poll while open.
-    refetchInterval: tab === "setup" ? 8_000 : false,
+    // Not gated to one tab: "Open dashboard" appears on several, and it needs
+    // the tunnel URL to reach a remote router rather than this machine's
+    // loopback. Polls fast only on Setup, where a tunnel is actually started.
+    enabled: live,
+    refetchInterval: tab === "setup" ? 8_000 : 30_000,
   });
   const holds = useQuery({
     queryKey: ["agent-link-9router", "holds"],
@@ -618,10 +670,13 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
       setSignIn(result);
       setPasted("");
       setMessage("");
-      void Linking.openURL(result.authUrl).catch(() => {
-        Clipboard.setString(result.authUrl);
-        setMessage("Could not open a browser — the sign-in link is on your clipboard.");
-      });
+      // Deliberately NOT Linking.openURL: inside the app that lands in Paseo's
+      // own browser tab, where an OAuth sign-in cannot complete (no cookie jar
+      // it can hand back, and the provider often refuses the embedded view).
+      // Copying puts the link in a real browser instead, which is the only
+      // place the login actually works.
+      Clipboard.setString(result.authUrl);
+      setMessage("Sign-in link copied — paste it into your normal browser, then bring the code back here.");
     },
     onError: (error: unknown) => setMessage(error instanceof Error ? error.message : String(error)),
   });
@@ -739,11 +794,21 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
     });
   };
 
+  // A published tunnel is a real public URL, so it works from whatever machine
+  // the app runs on. The SSH forward only works while it is open, and the
+  // loopback URL only means anything on the router's own host -- so prefer them
+  // in that order rather than always reaching for 127.0.0.1.
+  const tunnelUrl = (tunnel.data?.tunnels ?? []).find((entry) => entry.running && entry.url)?.url ?? null;
+
   const openDashboard = () => {
-    // Prefer a live forward: it is the only URL that reaches a remote router.
     const forwarded = forward.data?.open ? forward.data.url : null;
-    const target = forwarded ?? data?.dashboardUrl ?? "";
-    openUrl(target, "paste it into a Paseo browser tab (⌘⇧B).");
+    const target = forwarded ?? tunnelUrl ?? data?.dashboardUrl ?? "";
+    const hint = forwarded
+      ? "the forward is open, so this reaches the daemon's router."
+      : tunnelUrl
+        ? "this is the published tunnel — treat the URL as a credential."
+        : "paste it into a Paseo browser tab (⌘⇧B).";
+    openUrl(target.replace(/\/+$/, "") + (target.includes("/dashboard") ? "" : "/dashboard"), hint);
   };
 
   const openForward = () => {
@@ -1325,10 +1390,14 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
                       <Chip theme={theme} label={`#${connection.priority}`} />
                       {connection.usage?.plan ? <Chip theme={theme} label={connection.usage.plan} /> : null}
                       {connection.usage?.limitReached ? <Chip theme={theme} label="limit reached" tone="danger" /> : null}
+                      {connection.usage?.extra?.spendLimitReached ? (
+                        <Chip theme={theme} label="spend cap" tone="danger" />
+                      ) : null}
                     </View>
                     {(connection.usage?.quotas ?? []).map((quota) => (
                       <QuotaBar key={quota.label} theme={theme} quota={quota} />
                     ))}
+                    {connection.usage?.extra ? <SpendRow theme={theme} extra={connection.usage.extra} /> : null}
                     <View style={{ flexDirection: "row", gap: 8 }}>
                       {confirmRemove === connection.id ? (
                         <>
@@ -1363,12 +1432,14 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
                   Signing in to {signIn.provider === "claude" ? "Claude" : "Codex"}
                 </Text>
                 <Note theme={theme}>
+                  The link is on your clipboard. Open it in a NORMAL browser — Paseo&apos;s own browser tab cannot
+                  complete an OAuth sign-in.{" "}
                   {signIn.mode === "poll"
-                    ? "Finish the sign-in in your browser, then press Check."
-                    : "Approve in your browser, copy the code it shows, and paste it below."}
+                    ? "Finish there, then press Check."
+                    : "Approve there, copy the code it shows, and paste it below."}
                 </Note>
                 <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-                  <Button theme={theme} label="Copy link" onPress={() => Clipboard.setString(signIn.authUrl)} />
+                  <Button theme={theme} label="Copy link again" onPress={() => { Clipboard.setString(signIn.authUrl); setMessage("Sign-in link copied."); }} />
                   {signIn.mode === "paste-code" ? (
                     <Field theme={theme} value={pasted} onChangeText={setPasted} placeholder="paste code or callback URL" />
                   ) : null}

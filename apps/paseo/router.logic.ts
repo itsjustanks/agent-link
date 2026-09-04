@@ -13,10 +13,21 @@ export type Quota = {
   unlimited: boolean;
 };
 
+export type ExtraUsage = {
+  enabled: boolean;
+  spendLimitReached: boolean;
+  usedCredits: number | null;
+  monthlyLimit: number | null;
+  utilization: number | null;
+  currency: string | null;
+  disabledReason: string | null;
+};
+
 export type Usage = {
   plan: string | null;
   limitReached: boolean;
   quotas: Quota[];
+  extra: ExtraUsage | null;
 };
 
 const num = (value: unknown): number | null => (typeof value === "number" && Number.isFinite(value) ? value : null);
@@ -57,8 +68,36 @@ export function normalizeUsage(raw: unknown): Usage | null {
   const r = raw as Record<string, unknown>;
   const quotas = normalizeQuotas(r.quotas);
   const plan = typeof r.plan === "string" && r.plan ? r.plan : null;
-  if (quotas.length === 0 && plan === null) return null;
-  return { plan, limitReached: r.limitReached === true, quotas };
+  const extra = normalizeExtraUsage(r.extraUsage);
+  if (quotas.length === 0 && plan === null && extra === null) return null;
+  return { plan, limitReached: r.limitReached === true, quotas, extra };
+}
+
+/**
+ * The spend side of an account, reported next to the plan quotas.
+ *
+ * A spend limit blocks requests independently of the quota bars, so reading
+ * only the bars can say "plenty left" about an account that cannot serve a
+ * single request. Numbers arrive in minor units (cents), hence the /100.
+ */
+function normalizeExtraUsage(raw: unknown): ExtraUsage | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const places = num(r.decimal_places) ?? 2;
+  const scale = 10 ** places;
+  const money = (value: unknown): number | null => {
+    const found = num(value);
+    return found === null ? null : found / scale;
+  };
+  return {
+    enabled: r.is_enabled === true,
+    spendLimitReached: r.spend_limit_reached === true,
+    usedCredits: money(r.used_credits),
+    monthlyLimit: money(r.monthly_limit),
+    utilization: num(r.utilization),
+    currency: typeof r.currency === "string" ? r.currency : null,
+    disabledReason: typeof r.disabled_reason === "string" ? r.disabled_reason : null,
+  };
 }
 
 /**
