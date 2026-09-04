@@ -37,6 +37,7 @@ import {
   routerUpdate,
   routerThinkingCheck,
   routerUsageChart,
+  routerHealth,
   routerHolds,
   routerClearHold,
   routerTestModel,
@@ -458,6 +459,7 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
   const callUpdate = useRpc(routerUpdate);
   const callThinkingCheck = useRpc(routerThinkingCheck);
   const callUsageChart = useRpc(routerUsageChart);
+  const callHealth = useRpc(routerHealth);
   const callHolds = useRpc(routerHolds);
   const callClearHold = useRpc(routerClearHold);
   const callTestModel = useRpc(routerTestModel);
@@ -568,6 +570,14 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
     queryKey: ["agent-link-9router", "strategies"],
     queryFn: () => callStrategies({}),
     enabled: live && tab === "accounts",
+  });
+  const health9 = useQuery({
+    queryKey: ["agent-link-9router", "health-summary"],
+    queryFn: () => callHealth({}),
+    // Runs on every tab: the badge is only useful if it is current when you are
+    // looking at something else.
+    enabled: live,
+    refetchInterval: 45_000,
   });
   const [chartDays, setChartDays] = useState(14);
   const usageChart = useQuery({
@@ -901,7 +911,16 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
         active={tab}
         onSelect={setTab}
         badge={{
-          setup: remaining > 0 ? String(remaining) : undefined,
+          // A live problem outranks the setup count: an unfinished checklist can
+          // wait, an account that cannot take a request cannot.
+          setup:
+            health9.data && health9.data.state !== "ok"
+              ? health9.data.state === "bad"
+                ? "!"
+                : "•"
+              : remaining > 0
+                ? String(remaining)
+                : undefined,
           accounts: holdCount > 0 ? String(holdCount) : undefined,
           models: data?.models.count ? String(data.models.count) : undefined,
           keys: keys.data?.keys.length ? String(keys.data.keys.length) : undefined,
@@ -919,6 +938,50 @@ export function AgentLinkSurface({ theme, layout }: PluginSurfaceProps) {
       {/* ------------------------------------------------------------- SETUP */}
       {tab === "setup" ? (
         <>
+          {health9.data ? (
+            <Card theme={theme}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <Text style={{ color: theme.colors.foreground, fontSize: 15, fontWeight: "700", flex: 1 }}>
+                  {health9.data.headline}
+                </Text>
+                <Chip
+                  theme={theme}
+                  label={health9.data.state}
+                  tone={
+                    health9.data.state === "ok" ? "success" : health9.data.state === "warn" ? "warning" : "danger"
+                  }
+                />
+              </View>
+              <Note theme={theme}>
+                What the other tabs add up to. Diagnosing one outage used to mean reading account backoff, model
+                availability, the thinking check, failed requests and the daily burn, and holding the result in your
+                head.
+              </Note>
+              {health9.data.findings.map((finding) => (
+                <View key={finding.id} style={{ gap: 2, paddingVertical: 4 }}>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                    <Chip
+                      theme={theme}
+                      label={finding.severity}
+                      tone={
+                        finding.severity === "ok" ? "success" : finding.severity === "warn" ? "warning" : "danger"
+                      }
+                    />
+                    <Text style={{ color: theme.colors.foreground, fontSize: 13, flex: 1 }}>{finding.title}</Text>
+                  </View>
+                  <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12, paddingLeft: 4 }}>
+                    {finding.detail}
+                  </Text>
+                  {finding.fix ? (
+                    <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12, paddingLeft: 4, fontStyle: "italic" }}>
+                      {finding.fix}
+                    </Text>
+                  ) : null}
+                </View>
+              ))}
+            </Card>
+          ) : null}
+
           <Card theme={theme}>
             <Step theme={theme} index={1} title="Checklist" hint={remaining === 0 ? "all done" : `${remaining} left`} />
             {steps.map((step) => (

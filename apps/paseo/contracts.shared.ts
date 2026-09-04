@@ -967,3 +967,32 @@ export const routerUsageChart = defineRpc({
     message: z.string().nullable(),
   }),
 });
+
+/**
+ * One answer to "is it working right now?".
+ *
+ * The panel grew to nine tabs, and on 2026-09-04 diagnosing a single outage
+ * meant reading five of them — account backoff, model availability, the
+ * thinking check, failed requests, and the daily burn — and holding the result
+ * in your head. Every input is already available; what was missing was somewhere
+ * that says what they mean together.
+ */
+export const HealthFindingSchema = z.object({
+  id: z.string(),
+  severity: z.enum(["ok", "warn", "bad"]),
+  title: z.string(),
+  detail: z.string(),
+  /** The next action, when there is one worth naming. */
+  fix: z.string().nullable(),
+});
+
+export const routerHealth = defineRpc({
+  name: "agent-link-9router.router.health",
+  input: z.object({}),
+  output: z.object({
+    /** Worst finding, so the tab badge can say it in one word. */
+    state: z.enum(["ok", "warn", "bad", "unknown"]),
+    headline: z.string(),
+    findings: z.array(HealthFindingSchema),
+  }),
+});

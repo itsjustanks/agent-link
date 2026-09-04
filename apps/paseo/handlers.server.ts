@@ -2217,3 +2217,126 @@ export async function handleRouterUsageChart(input: { days: number }) {
 
   return { points, peakTokens, totalTokens, totalCost, trend, message: null };
 }
+
+/**
+ * Read the signals the panel already gathers, and say what they mean together.
+ *
+ * Deliberately reuses the existing handlers rather than re-querying: if the
+ * health card and the tab that owns a signal could ever disagree, the card is
+ * worse than useless.
+ */
+export async function handleRouterHealth() {
+  const client = new RouterClient();
+  if (!(await client.health())) {
+    return {
+      state: "bad" as const,
+      headline: "9router is not running.",
+      findings: [
+        {
+          id: "down",
+          severity: "bad" as const,
+          title: "9router is not answering",
+          detail: "Nothing routes until it is up.",
+          fix: "Start it from Setup.",
+        },
+      ],
+    };
+  }
+
+  const [availability, order, version] = await Promise.all([
+    handleRouterModelAvailability().catch(() => ({ models: [] })),
+    handleRouterConnectionHealth().catch(() => ({ connections: [] })),
+    handleRouterVersion().catch(() => ({ current: null, latest: null, hasUpdate: false, detail: "" })),
+  ]);
+
+  const findings: Array<{
+    id: string;
+    severity: "ok" | "warn" | "bad";
+    title: string;
+    detail: string;
+    fix: string | null;
+  }> = [];
+
+  // Accounts: parked and backing-off are different problems with different fixes.
+  const accounts = order.connections ?? [];
+  const claude = accounts.filter((entry) => entry.provider === "claude");
+  const parked = claude.filter((entry) => !entry.isActive);
+  const resting = claude.filter((entry) => entry.isActive && entry.backoffLevel > 0);
+  const usable = claude.filter((entry) => entry.isActive && entry.backoffLevel === 0);
+
+  if (claude.length > 0 && usable.length === 0) {
+    findings.push({
+      id: "no-usable-account",
+      severity: "bad",
+      title: "No Claude account can take a request",
+      detail: `${resting.length} backing off, ${parked.length} parked, of ${claude.length}.`,
+      fix: resting.length > 0 ? "Wait for backoff to clear, or check Adaptive thinking on Setup." : "Un-park an account on Accounts.",
+    });
+  } else if (resting.length > 0) {
+    findings.push({
+      id: "accounts-resting",
+      severity: "warn",
+      title: `${resting.length} account(s) backing off`,
+      detail: `${usable.length} of ${claude.length} can still take a request.`,
+      fix: "A repeated 400 also causes this — check Adaptive thinking on Setup before assuming quota.",
+    });
+  }
+
+  // Models: listed is not the same as usable, which is the distinction that
+  // cost hours when fable stayed in the picker while every request failed.
+  const models = availability.models ?? [];
+  const limited = models.filter((entry) => entry.state === "limited");
+  const none = models.filter((entry) => entry.state === "none");
+  if (limited.length > 0) {
+    findings.push({
+      id: "models-limited",
+      severity: "warn",
+      title: `${limited.length} model(s) rate-limited`,
+      detail: limited.slice(0, 3).map((entry) => entry.label).join(", ") + (limited.length > 3 ? "…" : ""),
+      fix: null,
+    });
+  }
+  if (none.length > 0) {
+    findings.push({
+      id: "models-unserved",
+      severity: "warn",
+      title: `${none.length} model(s) have no account behind them`,
+      detail: none.slice(0, 3).map((entry) => entry.label).join(", ") + (none.length > 3 ? "…" : ""),
+      fix: "Connect an account that serves them, or drop them from the picker.",
+    });
+  }
+
+  if (version.hasUpdate) {
+    findings.push({
+      id: "update",
+      severity: "warn",
+      title: `9router ${version.current} → ${version.latest}`,
+      detail: "Upgrades have carried model-compatibility fixes.",
+      fix: "Update from Setup. Note it reverts any power-up patches.",
+    });
+  }
+
+  if (findings.length === 0) {
+    findings.push({
+      id: "ok",
+      severity: "ok",
+      title: "Everything reachable",
+      detail: `${usable.length} account(s) ready, ${models.filter((entry) => entry.state === "ready").length} model(s) serving.`,
+      fix: null,
+    });
+  }
+
+  const state = findings.some((entry) => entry.severity === "bad")
+    ? ("bad" as const)
+    : findings.some((entry) => entry.severity === "warn")
+      ? ("warn" as const)
+      : ("ok" as const);
+  const headline =
+    state === "bad"
+      ? findings.find((entry) => entry.severity === "bad")!.title
+      : state === "warn"
+        ? `${findings.filter((entry) => entry.severity === "warn").length} thing(s) worth knowing`
+        : "Healthy";
+
+  return { state, headline, findings };
+}
